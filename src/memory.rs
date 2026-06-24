@@ -59,6 +59,9 @@ impl Memory {
     }
 
     // The last N messages, oldest-first (naive recall — last-N for now).
+    // Not wired into the loop yet; v0.2 uses this to seed context from past
+    // sessions. #[allow(dead_code)] silences "unused" until then.
+    #[allow(dead_code)]
     pub fn recent(&self, n: i64) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
