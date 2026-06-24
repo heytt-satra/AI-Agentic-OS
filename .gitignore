@@ -5,3 +5,8 @@
 
 # agent scratch space
 /workspace
+
+# local sqlite db
+/jarvis.db
+/jarvis.db-wal
+/jarvis.db-shm
