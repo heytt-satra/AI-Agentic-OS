@@ -70,15 +70,29 @@ pub fn definitions() -> Vec<Tool> {
     ]
 }
 
+// What a tool call produced + the feedback signal we record.
+pub struct ToolOutcome {
+    pub result: String,   // text fed back to the model
+    pub decision: String, // auto | approved | denied
+    pub ok: bool,         // did it succeed?
+}
+
+// Wrap a plain result string as an "auto" (no-approval) outcome, inferring ok
+// from whether the result is an error/refusal.
+fn auto(result: String) -> ToolOutcome {
+    let bad = result.starts_with("ERROR") || result.starts_with("refused") || result.starts_with("DENIED");
+    ToolOutcome { result, decision: "auto".to_string(), ok: !bad }
+}
+
 // ── Dispatch: the model picked a tool name; run the matching implementation ──
 // async because fetch_url awaits the network. The others are sync but fit fine.
-pub async fn execute(name: &str, args_json: &str) -> String {
+pub async fn execute(name: &str, args_json: &str) -> ToolOutcome {
     match name {
-        "read_file" => read_file(args_json),
-        "write_file" => write_file(args_json),
-        "fetch_url" => fetch_url(args_json).await,
-        "run_shell" => run_shell(args_json),
-        other => format!("ERROR: unknown tool '{other}'"),
+        "read_file" => auto(read_file(args_json)),
+        "write_file" => auto(write_file(args_json)),
+        "fetch_url" => auto(fetch_url(args_json).await),
+        "run_shell" => run_shell(args_json), // sets its own decision (approved/denied)
+        other => auto(format!("ERROR: unknown tool '{other}'")),
     }
 }
 
@@ -161,10 +175,10 @@ async fn fetch_url(args_json: &str) -> String {
 #[derive(Deserialize)]
 struct ShellArgs { command: String }
 
-fn run_shell(args_json: &str) -> String {
+fn run_shell(args_json: &str) -> ToolOutcome {
     let args: ShellArgs = match serde_json::from_str(args_json) {
         Ok(a) => a,
-        Err(e) => return format!("ERROR: bad arguments: {e}"),
+        Err(e) => return ToolOutcome { result: format!("ERROR: bad arguments: {e}"), decision: "auto".into(), ok: false },
     };
 
     // The approval gate. Show exactly what will run, then require a yes.
@@ -175,10 +189,11 @@ fn run_shell(args_json: &str) -> String {
 
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer).is_err() {
-        return "DENIED: could not read approval".to_string();
+        return ToolOutcome { result: "DENIED: could not read approval".into(), decision: "denied".into(), ok: false };
     }
     if answer.trim().to_lowercase() != "y" {
-        return "DENIED by user".to_string();
+        // DENIED is itself a valuable feedback signal (you rejected this action).
+        return ToolOutcome { result: "DENIED by user".into(), decision: "denied".into(), ok: false };
     }
 
     // Approved. On Windows we run via PowerShell; elsewhere via sh.
@@ -194,8 +209,12 @@ fn run_shell(args_json: &str) -> String {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            format!("exit={}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status)
+            ToolOutcome {
+                result: format!("exit={}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status),
+                decision: "approved".to_string(),
+                ok: out.status.success(),
+            }
         }
-        Err(e) => format!("ERROR running command: {e}"),
+        Err(e) => ToolOutcome { result: format!("ERROR running command: {e}"), decision: "approved".into(), ok: false },
     }
 }

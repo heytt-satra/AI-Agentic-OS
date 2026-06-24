@@ -27,9 +27,22 @@ impl Memory {
                 ts      INTEGER NOT NULL,   -- unix seconds
                 role    TEXT    NOT NULL,   -- user | assistant | tool
                 content TEXT    NOT NULL
+            );
+            -- The audit/feedback table: the Cursor-style implicit-feedback
+            -- dataset. Every tool call records the decision (auto/approved/
+            -- denied) and whether it succeeded. This is the training data a
+            -- future fine-tuned re-ranker / RL loop would learn from. Free to
+            -- collect now; impossible to recover later if we don't.
+            CREATE TABLE IF NOT EXISTS audit (
+                id        INTEGER PRIMARY KEY,
+                ts        INTEGER NOT NULL,
+                tool      TEXT    NOT NULL,
+                args      TEXT    NOT NULL,
+                decision  TEXT    NOT NULL,  -- auto | approved | denied
+                ok        INTEGER NOT NULL   -- 1 success, 0 failure/denied
             );",
         )
-        .context("creating messages table")?;
+        .context("creating tables")?;
         Ok(Memory { conn })
     }
 
@@ -47,6 +60,30 @@ impl Memory {
             )
             .context("inserting message")?;
         Ok(())
+    }
+
+    // Record one tool call into the feedback dataset.
+    pub fn log_audit(&self, tool: &str, args: &str, decision: &str, ok: bool) -> Result<()> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO audit (ts, tool, args, decision, ok) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![ts, tool, args, decision, ok as i64],
+            )
+            .context("inserting audit row")?;
+        Ok(())
+    }
+
+    // How many feedback rows we've collected (the dataset size).
+    pub fn audit_count(&self) -> Result<i64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
+            .context("counting audit")?;
+        Ok(n)
     }
 
     // How many messages we've ever stored.

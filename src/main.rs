@@ -24,11 +24,25 @@ approval). Use them when useful rather than guessing.";
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    // Structured logging. Internal/audit events go through `tracing`; the chat
+    // UX stays on plain println. RUST_LOG=info shows the internal stream.
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn,jarvis=info".into()),
+        )
+        .init();
+
     let provider = Provider::from_env()?;
     let mem = Memory::open("jarvis.db")?;
 
     println!("Jarvis online ({}).", provider.model());
-    println!("{} messages in long-term memory. Type 'exit' to quit.\n", mem.count()?);
+    println!(
+        "{} messages remembered | {} feedback rows collected. Type 'exit' to quit.\n",
+        mem.count()?,
+        mem.audit_count()?
+    );
 
     // The live conversation for THIS session, seeded with the persona.
     let mut messages: Vec<Message> = vec![Message::system(PERSONA)];
@@ -73,11 +87,20 @@ async fn run_turn(provider: &Provider, mem: &Memory, messages: &mut Vec<Message>
         if reply.finish_reason == "tool_calls" {
             for call in reply.message.tool_calls.clone().unwrap_or_default() {
                 println!("  · using {}", call.function.name);
-                let result = tools::execute(&call.function.name, &call.function.arguments).await;
-                mem.log("tool", &result)?;
-                messages.push(Message::tool_result(call.id, result));
+                let outcome = tools::execute(&call.function.name, &call.function.arguments).await;
+
+                // Record the feedback signal (the Cursor-style dataset).
+                mem.log_audit(&call.function.name, &call.function.arguments, &outcome.decision, outcome.ok)?;
+                tracing::info!(
+                    tool = %call.function.name,
+                    decision = %outcome.decision,
+                    ok = outcome.ok,
+                    "tool call (step {step})"
+                );
+
+                mem.log("tool", &outcome.result)?;
+                messages.push(Message::tool_result(call.id, outcome.result));
             }
-            let _ = step; // (kept for clarity; loop continues)
             continue;
         }
 
