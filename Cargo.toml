@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 dotenvy = "0.15.7"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+futures-util = "0.3.32"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["full"] }
