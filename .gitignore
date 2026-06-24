@@ -2,3 +2,6 @@
 
 # local secrets - never commit
 .env
+
+# agent scratch space
+/workspace

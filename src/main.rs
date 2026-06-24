@@ -1,60 +1,35 @@
 // ── src/main.rs : wires the pieces together and runs the agent loop ─────────
-//
-// `mod provider;` tells Rust: include src/provider.rs as a module named
-// `provider`. Then `use provider::...` pulls its public names into scope.
 
 mod provider;
+mod tools;
 
 use anyhow::Result;
-use provider::{FunctionDef, Message, Provider, Tool};
+use provider::{Message, Provider};
 
-const MAX_STEPS: u32 = 5;
-
-// Our one tool, for now. (A2 will move tools into their own module and add
-// read_file / write_file / fetch_url / run_shell.)
-fn run_tool(name: &str, _args_json: &str) -> String {
-    match name {
-        "get_current_time" => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("Unix timestamp: {now} (UTC seconds since 1970)")
-        }
-        other => format!("ERROR: unknown tool '{other}'"),
-    }
-}
-
-fn available_tools() -> Vec<Tool> {
-    vec![Tool {
-        kind: "function".to_string(),
-        function: FunctionDef {
-            name: "get_current_time".to_string(),
-            description: "Get the current time as a Unix timestamp.".to_string(),
-            parameters: serde_json::json!({ "type": "object", "properties": {}, "required": [] }),
-        },
-    }]
-}
+const MAX_STEPS: u32 = 8;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
-    let provider = Provider::from_env()?; // builds the client, reads config
+    let provider = Provider::from_env()?;
     println!("Provider ready: {}\n", provider.model());
 
-    let mut messages: Vec<Message> =
-        vec![Message::user("What time is it right now? Answer in one sentence.")];
-    println!("User: What time is it right now?\n");
+    // A task that forces two different tools: write, then read back.
+    let task = "Create a file called shoot.txt in the workspace containing the line \
+                'Lensr shoot Monday 9am'. Then read it back and confirm the exact contents.";
+    let mut messages: Vec<Message> = vec![Message::user(task)];
+    println!("User: {task}\n");
 
     for step in 1..=MAX_STEPS {
-        let reply = provider.chat(&messages, Some(available_tools())).await?;
+        let reply = provider.chat(&messages, Some(tools::definitions())).await?;
         messages.push(reply.message.clone());
 
         if reply.finish_reason == "tool_calls" {
             for call in reply.message.tool_calls.clone().unwrap_or_default() {
-                println!("[step {step}] tool: {}", call.function.name);
-                let result = run_tool(&call.function.name, &call.function.arguments);
-                println!("[step {step}] result: {result}");
+                println!("[step {step}] tool: {}({})", call.function.name, call.function.arguments);
+                // .await because execute() is async (fetch_url awaits the network)
+                let result = tools::execute(&call.function.name, &call.function.arguments).await;
+                println!("[step {step}] result: {}", first_line(&result));
                 messages.push(Message::tool_result(call.id, result));
             }
             continue;
@@ -65,4 +40,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     anyhow::bail!("hit MAX_STEPS without a final answer");
+}
+
+// Tiny helper so long tool results don't flood the console log.
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").chars().take(120).collect()
 }
