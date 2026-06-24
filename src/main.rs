@@ -1,122 +1,130 @@
-// ── Jarvis SPIKE-1, Step C: the first real call to Claude ──────────────────
+// ── Jarvis SPIKE-1, Step C: first real LLM call (via OpenRouter) ────────────
 //
-// Goal: send one message to the Claude API and print the reply + token usage.
-// Along the way you learn: structs, serde (JSON<->Rust), Result/?, env vars,
-// and the reqwest HTTP client.
+// We talk to OpenRouter, a gateway that speaks the OpenAI-compatible API to
+// many models. We use DeepSeek V4 Flash (cheap). The SAME code can later hit
+// Claude/GPT/Gemini by changing one model string.
+//
+// Teaches: structs, serde (JSON<->Rust), Result/?, env vars, reqwest, and the
+// OpenAI chat-completions request/response shape.
 
-use anyhow::{Context, Result}; // `Result` here is anyhow's = Result<T, anyhow::Error>
-use serde::{Deserialize, Serialize}; // derive macros to turn structs <-> JSON
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
-// Constants. Change MODEL to claude-haiku-4-5 for cheaper test calls.
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-sonnet-4-6";
+const API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
 
 // ── Request shapes ─────────────────────────────────────────────────────────
-// `#[derive(Serialize)]` auto-generates code to turn this struct INTO JSON.
-// Field names become JSON keys verbatim (so `max_tokens` -> "max_tokens").
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
+    messages: Vec<Message>,
     max_tokens: u32,
-    messages: Vec<Message>, // Vec<T> = a growable array of T
 }
 
+// One struct serves both request and response messages here, so it derives
+// BOTH Serialize (to send) and Deserialize (to receive).
 #[derive(Serialize, Deserialize, Clone)]
 struct Message {
-    role: String,    // "user" or "assistant"
-    content: String, // for now, plain text (the API accepts a string here)
+    role: String, // "system" | "user" | "assistant"
+    // In responses, content can be null (e.g. tool calls), so it's Optional.
+    content: Option<String>,
 }
 
-// ── Response shapes ────────────────────────────────────────────────────────
-// `#[derive(Deserialize)]` generates code to parse JSON INTO this struct.
-// We only declare the fields we care about; serde ignores the rest.
+// ── Response shapes (OpenAI format) ────────────────────────────────────────
+// Note the difference from Anthropic: replies live under choices[].message,
+// and token counts are prompt_tokens / completion_tokens.
 #[derive(Deserialize)]
 struct ChatResponse {
-    content: Vec<ContentBlock>, // Claude returns an ARRAY of content blocks
+    choices: Vec<Choice>,
     usage: Usage,
-    stop_reason: Option<String>, // Option<T> = "maybe a T, maybe nothing" (null-safe)
 }
 
 #[derive(Deserialize)]
-struct ContentBlock {
-    // `type` is a reserved Rust word, so we name the field `block_type`
-    // and tell serde the JSON key is actually "type".
-    #[serde(rename = "type")]
-    block_type: String,
-    // Not every block has text (tool blocks won't), so it's optional.
-    text: Option<String>,
+struct Choice {
+    message: Message,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Usage {
-    input_tokens: u32,
-    output_tokens: u32,
+    prompt_tokens: u32,
+    completion_tokens: u32,
 }
 
-// ── The actual API call ────────────────────────────────────────────────────
-// `async fn` because the network call is something we await.
-// Returns `Result<ChatResponse>`: either Ok(response) or Err(some error).
-async fn call_claude(api_key: &str, user_text: &str) -> Result<ChatResponse> {
+// ── The API call ───────────────────────────────────────────────────────────
+async fn call_llm(api_key: &str, model: &str, user_text: &str) -> Result<ChatResponse> {
     let client = reqwest::Client::new();
 
     let body = ChatRequest {
-        model: MODEL.to_string(),
+        model: model.to_string(),
         max_tokens: 1024,
         messages: vec![Message {
             role: "user".to_string(),
-            content: user_text.to_string(),
+            content: Some(user_text.to_string()),
         }],
     };
 
-    // Build and send the POST. Each `?` means: if this step errors, stop and
-    // return that error from call_claude. No try/catch pyramids.
     let response = client
         .post(API_URL)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body) // serializes `body` to JSON and sets content-type
+        .header("Authorization", format!("Bearer {api_key}")) // OpenAI-style auth
+        .header("HTTP-Referer", "https://lensr.in") // optional: OpenRouter attribution
+        .header("X-Title", "Jarvis-OS") // optional: shows in your OpenRouter dashboard
+        .json(&body)
         .send()
         .await
-        .context("HTTP request to Claude failed")?;
+        .context("HTTP request to OpenRouter failed")?;
 
-    // Anthropic returns errors as JSON with a non-2xx status. Surface them.
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
-        anyhow::bail!("Claude API returned {status}: {text}");
+        anyhow::bail!("OpenRouter returned {status}: {text}");
     }
 
-    // Parse the JSON body text into our ChatResponse struct.
     let parsed: ChatResponse =
-        serde_json::from_str(&text).context("could not parse Claude's JSON response")?;
+        serde_json::from_str(&text).context("could not parse the JSON response")?;
     Ok(parsed)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Read the API key from the environment. `?` + .context() gives a clear
-    // error if it's missing, instead of a cryptic panic.
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .context("set ANTHROPIC_API_KEY (get one at console.anthropic.com)")?;
+    // Load .env into the environment (no-op if the file is absent).
+    let _ = dotenvy::dotenv();
 
-    println!("Asking Claude ({MODEL})...\n");
+    // Read the key. If missing, print a friendly, actionable message — this is
+    // the "any user can insert their key and it works" experience.
+    let api_key = match std::env::var("OPENROUTER_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => k,
+        _ => {
+            eprintln!("No OPENROUTER_API_KEY found.");
+            eprintln!("Fix: copy .env.example to .env and paste your key from https://openrouter.ai/keys");
+            std::process::exit(1);
+        }
+    };
 
-    let resp = call_claude(&api_key, "Say hello in one short sentence, as Jarvis would.").await?;
+    // Model is overridable via env; otherwise the cheap DeepSeek default.
+    let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
-    // Pull the text out of the first text block. `iter().find_map(...)` walks
-    // the content blocks and grabs the first one that has text.
+    println!("Asking {model} via OpenRouter...\n");
+
+    let resp = call_llm(&api_key, &model, "Say hello in one short sentence, as Jarvis would.").await?;
+
+    // OpenAI format: take the first choice's message content.
     let reply = resp
-        .content
-        .iter()
-        .find_map(|b| if b.block_type == "text" { b.text.clone() } else { None })
-        .unwrap_or_else(|| "(no text in response)".to_string());
+        .choices
+        .first()
+        .and_then(|c| c.message.content.clone())
+        .unwrap_or_else(|| "(no content in response)".to_string());
+
+    let finish = resp
+        .choices
+        .first()
+        .and_then(|c| c.finish_reason.clone())
+        .unwrap_or_else(|| "?".to_string());
 
     println!("Jarvis: {reply}\n");
     println!(
-        "tokens: {} in / {} out | stop_reason: {}",
-        resp.usage.input_tokens,
-        resp.usage.output_tokens,
-        resp.stop_reason.as_deref().unwrap_or("?")
+        "tokens: {} in / {} out | finish_reason: {finish}",
+        resp.usage.prompt_tokens, resp.usage.completion_tokens
     );
 
     Ok(())
