@@ -44,8 +44,21 @@ async fn main() -> Result<()> {
         mem.audit_count()?
     );
 
-    // The live conversation for THIS session, seeded with the persona.
+    // The live conversation for THIS session, seeded with the persona...
     let mut messages: Vec<Message> = vec![Message::system(PERSONA)];
+
+    // ...and with recent dialog from PAST sessions, so Jarvis has continuity.
+    // (Naive last-N recall; v0.2 makes this semantic.)
+    let recalled = mem.recent_dialog(8)?;
+    if !recalled.is_empty() {
+        println!("(recalling {} messages from past sessions)\n", recalled.len());
+        for (role, content) in recalled {
+            messages.push(match role.as_str() {
+                "assistant" => Message::assistant(content),
+                _ => Message::user(content),
+            });
+        }
+    }
 
     loop {
         // ── read one line of input ──────────────────────────────────────────

@@ -35,6 +35,9 @@ impl Message {
     pub fn system(text: impl Into<String>) -> Self {
         Message { role: "system".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
     }
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Message { role: "assistant".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
+    }
     pub fn tool_result(tool_call_id: String, result: impl Into<String>) -> Self {
         Message { role: "tool".into(), content: Some(result.into()), tool_calls: None, tool_call_id: Some(tool_call_id) }
     }

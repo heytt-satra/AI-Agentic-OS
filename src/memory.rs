@@ -95,9 +95,28 @@ impl Memory {
         Ok(n)
     }
 
-    // The last N messages, oldest-first (naive recall — last-N for now).
-    // Not wired into the loop yet; v0.2 uses this to seed context from past
-    // sessions. #[allow(dead_code)] silences "unused" until then.
+    // The last N dialog turns (user/assistant only), oldest-first. We skip
+    // "tool" rows because replaying a tool result without its originating
+    // tool_calls would be an invalid message sequence. Naive last-N recall;
+    // v0.2 upgrades this to semantic (vector) recall.
+    pub fn recent_dialog(&self, n: i64) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT role, content FROM messages
+             WHERE role IN ('user','assistant')
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![n], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    // (Unfiltered variant kept for later debugging/inspection.)
     #[allow(dead_code)]
     pub fn recent(&self, n: i64) -> Result<Vec<(String, String)>> {
         let mut stmt = self
