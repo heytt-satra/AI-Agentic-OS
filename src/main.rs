@@ -9,7 +9,7 @@ mod provider;
 mod tools;
 
 use anyhow::Result;
-use memory::Memory;
+use memory::MemoryHandle;
 use provider::{Message, Provider};
 use std::io::{self, Write};
 
@@ -35,13 +35,13 @@ async fn main() -> Result<()> {
         .init();
 
     let provider = Provider::from_env()?;
-    let mem = Memory::open("jarvis.db")?;
+    let mem = MemoryHandle::spawn("jarvis.db")?;
 
     println!("Jarvis online ({}).", provider.model());
     println!(
         "{} messages remembered | {} feedback rows collected. Type 'exit' to quit.\n",
-        mem.count()?,
-        mem.audit_count()?
+        mem.count().await,
+        mem.audit_count().await
     );
 
     // The live conversation for THIS session, seeded with the persona...
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
 
     // ...and with recent dialog from PAST sessions, so Jarvis has continuity.
     // (Naive last-N recall; v0.2 makes this semantic.)
-    let recalled = mem.recent_dialog(8)?;
+    let recalled = mem.recent_dialog(8).await;
     if !recalled.is_empty() {
         println!("(recalling {} messages from past sessions)\n", recalled.len());
         for (role, content) in recalled {
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         }
 
         messages.push(Message::user(input));
-        mem.log("user", input)?;
+        mem.log("user", input).await;
 
         // ── run the agent on this turn ──────────────────────────────────────
         match run_turn(&provider, &mem, &mut messages).await {
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 
 // One user turn = the agent loop until the model gives a final answer.
 // Borrows `messages` mutably so tool results accumulate into the conversation.
-async fn run_turn(provider: &Provider, mem: &Memory, messages: &mut Vec<Message>) -> Result<String> {
+async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Message>) -> Result<String> {
     for step in 1..=MAX_STEPS {
         let reply = provider.chat(messages, Some(tools::definitions())).await?;
         messages.push(reply.message.clone());
@@ -103,7 +103,7 @@ async fn run_turn(provider: &Provider, mem: &Memory, messages: &mut Vec<Message>
                 let outcome = tools::execute(&call.function.name, &call.function.arguments).await;
 
                 // Record the feedback signal (the Cursor-style dataset).
-                mem.log_audit(&call.function.name, &call.function.arguments, &outcome.decision, outcome.ok)?;
+                mem.log_audit(&call.function.name, &call.function.arguments, &outcome.decision, outcome.ok).await;
                 tracing::info!(
                     tool = %call.function.name,
                     decision = %outcome.decision,
@@ -111,14 +111,14 @@ async fn run_turn(provider: &Provider, mem: &Memory, messages: &mut Vec<Message>
                     "tool call (step {step})"
                 );
 
-                mem.log("tool", &outcome.result)?;
+                mem.log("tool", &outcome.result).await;
                 messages.push(Message::tool_result(call.id, outcome.result));
             }
             continue;
         }
 
         let answer = reply.message.content.unwrap_or_else(|| "(no answer)".to_string());
-        mem.log("assistant", &answer)?;
+        mem.log("assistant", &answer).await;
         return Ok(answer);
     }
     anyhow::bail!("hit MAX_STEPS ({MAX_STEPS}) without finishing")
