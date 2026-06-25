@@ -45,6 +45,7 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
             let y = v.get("y").and_then(|x| x.as_i64()).unwrap_or(0);
             (true, format!("{x},{y}"), format!("click at {x},{y}"))
         }
+        "see_screen" => (true, String::new(), "screenshot your screen and send it to a vision model".into()),
 
         // unknown tools default to ASK (safe default)
         other => (true, String::new(), format!("run unknown tool '{other}'")),

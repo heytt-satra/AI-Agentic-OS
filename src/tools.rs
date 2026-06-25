@@ -32,6 +32,7 @@ pub fn definitions() -> Vec<Tool> {
         f("press_keys", "Press a keyboard shortcut into the focused window, e.g. 'ctrl+s', 'alt+tab', 'enter'. Requires approval.", str_prop("combo", "key combo like ctrl+s")),
         f("mouse_click", "Move the mouse to screen coords (x,y) and left-click. Requires approval. Use with screen vision to know where to click.",
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
+        f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
     ]
@@ -49,6 +50,7 @@ pub async fn execute(name: &str, args_json: &str) -> String {
         "type_text" => type_text(args_json),
         "press_keys" => press_keys(args_json),
         "mouse_click" => mouse_click(args_json),
+        "see_screen" => see_screen(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
         other => format!("ERROR: unknown tool '{other}'"),
@@ -215,6 +217,71 @@ fn mouse_click(args: &str) -> String {
         Ok(()) => format!("clicked at {},{}", a.x, a.y),
         Err(e) => format!("ERROR clicking: {e}"),
     }
+}
+
+// ── screen vision: screenshot + a vision model ──────────────────────────────
+#[derive(Deserialize)]
+struct VisionArg { question: String }
+
+// Sync helper: capture + encode the screen to a base64 data URL. ALL the
+// non-Send types (Monitor, image) live and die here, so the async caller's
+// future stays Send (required by spawned tasks).
+fn screenshot_data_url() -> Result<String, String> {
+    use base64::Engine as _;
+    let monitors = xcap::Monitor::all().map_err(|e| format!("ERROR: screen capture: {e}"))?;
+    let monitor = monitors.into_iter().next().ok_or("ERROR: no monitor found")?;
+    let img = monitor.capture_image().map_err(|e| format!("ERROR capturing screen: {e}"))?;
+    let mut bytes: Vec<u8> = Vec::new();
+    let dynimg = xcap::image::DynamicImage::ImageRgba8(img);
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    dynimg
+        .write_to(&mut cursor, xcap::image::ImageFormat::Png)
+        .map_err(|e| format!("ERROR encoding screenshot: {e}"))?;
+    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)))
+}
+
+async fn see_screen(args: &str) -> String {
+    let a: VisionArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+
+    let data_url = match screenshot_data_url() { Ok(u) => u, Err(e) => return e };
+
+    // ask a VISION model about it (via OpenRouter)
+    let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        return "ERROR: OPENROUTER_API_KEY not set".into();
+    }
+    let model = std::env::var("OPENROUTER_VISION_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 700,
+        "messages": [{ "role": "user", "content": [
+            { "type": "text", "text": a.question },
+            { "type": "image_url", "image_url": { "url": data_url } }
+        ]}]
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .header("Authorization", format!("Bearer {key}"))
+        .header("HTTP-Referer", "https://lensr.in")
+        .header("X-Title", "Jarvis-OS")
+        .json(&body)
+        .send()
+        .await;
+    let text = match resp {
+        Ok(r) => {
+            let s = r.status();
+            let t = r.text().await.unwrap_or_default();
+            if !s.is_success() {
+                return format!("ERROR vision {s}: {} (set OPENROUTER_VISION_MODEL to a vision-capable model)", t.chars().take(300).collect::<String>());
+            }
+            t
+        }
+        Err(e) => return format!("ERROR vision request: {e}"),
+    };
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let answer = v["choices"][0]["message"]["content"].as_str().unwrap_or("(no vision response)");
+    format!("Screen analysis: {answer}")
 }
 
 async fn fetch_url(args: &str) -> String {
