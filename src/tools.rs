@@ -29,6 +29,7 @@ pub fn definitions() -> Vec<Tool> {
         f("open_path", "Open an app, file, or URL with the OS default handler. Requires approval.", str_prop("target", "app name, file path, or URL")),
         f("run_shell", "Run any shell command on this machine (PowerShell on Windows). Requires approval. This is the universal tool — file ops, apps, system settings, installs, automation.", str_prop("command", "the command")),
         f("open_app", "Launch an application by name (e.g. 'notepad', 'chrome', 'code'). Resolves via the OS so it works for installed apps. Requires approval. Use this for apps; use open_path for files/URLs.", str_prop("name", "application name")),
+        f("install_software", "Download and install an application using the system package manager (winget on Windows, brew on macOS, apt on Linux). Use this to ACQUIRE software the user asks for, then open_app to launch it. e.g. 'Visual Studio Code', '7zip', 'git'.", str_prop("name", "app or package name/id")),
         f("wait", "Pause for N seconds. Use after opening an app to let it appear and take focus before typing.",
           serde_json::json!({"type":"object","properties":{"seconds":{"type":"integer"}},"required":["seconds"]})),
         f("paste_text", "Type text reliably by pasting it (clipboard + Ctrl+V) into the focused app. PREFER THIS over type_text for any real text. Requires approval.", str_prop("text", "the text to paste")),
@@ -80,6 +81,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "open_path" => open_path(args_json),
         "run_shell" => run_shell(args_json),
         "open_app" => open_app(args_json),
+        "install_software" => install_software(args_json),
         "wait" => wait_tool(args_json).await,
         "paste_text" => paste_text(args_json),
         "type_text" => type_text(args_json),
@@ -528,6 +530,58 @@ fn open_app_os(name: &str) -> String {
     match std::process::Command::new("xdg-open").arg(name).spawn() {
         Ok(_) => format!("opened {name}"),
         Err(e) => format!("ERROR opening {name}: {e}"),
+    }
+}
+
+// Acquire software via the OS package manager (Power: download + install).
+// Part of the autonomous "acquire -> open -> operate" loop.
+fn install_software(args: &str) -> String {
+    let a: NameArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    install_software_os(&a.name)
+}
+
+#[cfg(windows)]
+fn install_software_os(name: &str) -> String {
+    let out = std::process::Command::new("winget")
+        .args([
+            "install", "--accept-package-agreements", "--accept-source-agreements",
+            "--silent", "--disable-interactivity", name,
+        ])
+        .output();
+    finish_install(name, out, "winget")
+}
+
+#[cfg(target_os = "macos")]
+fn install_software_os(name: &str) -> String {
+    let out = std::process::Command::new("brew").args(["install", name]).output();
+    finish_install(name, out, "brew")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_software_os(name: &str) -> String {
+    // apt needs root; try without sudo first, fall back to sudo -n (non-interactive).
+    let cmd = format!("apt-get install -y {0} || sudo -n apt-get install -y {0}", name);
+    let out = std::process::Command::new("sh").args(["-c", &cmd]).output();
+    finish_install(name, out, "apt-get")
+}
+
+fn finish_install(name: &str, out: std::io::Result<std::process::Output>, mgr: &str) -> String {
+    match out {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if o.status.success() {
+                format!("installed '{name}' via {mgr}.\n{}", stdout.chars().take(1200).collect::<String>())
+            } else {
+                format!(
+                    "ERROR installing '{name}' via {mgr} (exit {}):\n{}\n{}",
+                    o.status,
+                    stdout.chars().take(800).collect::<String>(),
+                    stderr.chars().take(800).collect::<String>()
+                )
+            }
+        }
+        Err(e) => format!("ERROR: could not run {mgr} for '{name}': {e}"),
     }
 }
 

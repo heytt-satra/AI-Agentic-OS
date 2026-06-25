@@ -63,6 +63,10 @@ BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add 
 If you are restarted or interrupted, call task_list to see what is left and resume. \
 RECOVERY: when a tool returns an ERROR, do not give up at once. Read the error, \
 adjust your approach, and try a couple of times before reporting that you are stuck.\n\
+ACQUIRE THEN OPERATE: if the user wants an app that is not installed, install it \
+with install_software, then launch it with open_app, then actually operate it with \
+click_on, type_text, press_keys and see_screen. After each UI action, use see_screen \
+to confirm what happened before the next step, instead of assuming it worked.\n\
 NEWS / WEB FACTS: always include the source link(s) for anything you found online.\n\
 LISTINGS: when the user asks to list files or for detail, give the FULL list, do not \
 summarize as a count.\n\
