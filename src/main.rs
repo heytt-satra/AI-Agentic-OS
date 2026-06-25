@@ -4,6 +4,7 @@
 // Inner loop (run_turn): the agent's tool loop with a MAX_STEPS safety cap.
 // Everything is logged to SQLite memory.
 
+mod embeddings;
 mod memory;
 mod provider;
 mod tools;

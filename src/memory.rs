@@ -10,6 +10,7 @@
 // This is the eng-review's single-writer design — now justified because the
 // heartbeat task and the REPL both need memory concurrently.
 
+use crate::embeddings::{blob_to_vec, cosine, vec_to_blob, Embedder};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use tokio::sync::{mpsc, oneshot};
@@ -49,10 +50,27 @@ impl MemoryHandle {
                         return;
                     }
                 };
+
+                // Try to load the local embedding model. If it fails (offline,
+                // download error), we fall back to keyword (FTS) recall.
+                let embedder = match Embedder::load() {
+                    Ok(e) => {
+                        eprintln!("[memory] semantic embeddings ready");
+                        Some(e)
+                    }
+                    Err(e) => {
+                        eprintln!("[memory] embeddings unavailable ({e}); using keyword recall");
+                        None
+                    }
+                };
+                if let Some(emb) = &embedder {
+                    backfill_embeddings(&conn, emb);
+                }
+
                 // blocking_recv() blocks this thread until a command arrives.
                 // Allowed because we are NOT on a tokio runtime thread.
                 while let Some(cmd) = rx.blocking_recv() {
-                    handle_cmd(&conn, cmd);
+                    handle_cmd(&conn, embedder.as_ref(), cmd);
                 }
             })
             .context("spawning memory thread")?;
@@ -138,10 +156,10 @@ fn open_db(path: &str) -> Result<Connection> {
             tool TEXT NOT NULL, args TEXT NOT NULL,
             decision TEXT NOT NULL, ok INTEGER NOT NULL
          );
-         -- Full-text search index over message content. FTS5 ranks matches by
-         -- relevance (bm25), so we can recall the MOST RELEVANT past messages
-         -- for a query, not just the most recent. rowid mirrors messages.id.
-         CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(role UNINDEXED, content);",
+         -- Full-text search index over message content (keyword fallback).
+         CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(role UNINDEXED, content);
+         -- Semantic vectors: one embedding per message, keyed by messages.id.
+         CREATE TABLE IF NOT EXISTS embeddings (rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);",
     )
     .context("creating tables")?;
 
@@ -166,7 +184,7 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn handle_cmd(conn: &Connection, cmd: MemCmd) {
+fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
     match cmd {
         MemCmd::Log { role, content } => {
             if conn
@@ -176,12 +194,23 @@ fn handle_cmd(conn: &Connection, cmd: MemCmd) {
                 )
                 .is_ok()
             {
-                // Mirror into the FTS index using the same rowid as messages.id.
                 let id = conn.last_insert_rowid();
+                // Mirror into the FTS index (keyword fallback).
                 let _ = conn.execute(
                     "INSERT INTO mem_fts(rowid, role, content) VALUES (?1, ?2, ?3)",
                     params![id, role, content],
                 );
+                // Store a semantic vector for dialog turns (skip tool spam).
+                if let Some(emb) = embedder {
+                    if role == "user" || role == "assistant" {
+                        if let Ok(v) = emb.embed(&content) {
+                            let _ = conn.execute(
+                                "INSERT OR REPLACE INTO embeddings(rowid, vec) VALUES (?1, ?2)",
+                                params![id, vec_to_blob(&v)],
+                            );
+                        }
+                    }
+                }
             }
         }
         MemCmd::LogAudit { tool, args, decision, ok } => {
@@ -207,7 +236,11 @@ fn handle_cmd(conn: &Connection, cmd: MemCmd) {
             let _ = reply.send(rows);
         }
         MemCmd::Search { query, n, reply } => {
-            let rows = query_search(conn, &query, n).unwrap_or_default();
+            // Semantic search if we have embeddings; otherwise keyword (FTS).
+            let rows = match embedder {
+                Some(emb) => semantic_search(conn, emb, &query, n).unwrap_or_default(),
+                None => query_search(conn, &query, n).unwrap_or_default(),
+            };
             let _ = reply.send(rows);
         }
         MemCmd::RecentAudit { n, reply } => {
@@ -215,6 +248,75 @@ fn handle_cmd(conn: &Connection, cmd: MemCmd) {
             let _ = reply.send(rows);
         }
     }
+}
+
+// Embed any dialog messages that don't yet have a vector (e.g. messages saved
+// before embeddings existed). One-time cost on first run with the model.
+fn backfill_embeddings(conn: &Connection, emb: &Embedder) {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT id, content FROM messages
+             WHERE role IN ('user','assistant')
+               AND id NOT IN (SELECT rowid FROM embeddings)",
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map(|it| it.filter_map(|x| x.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        mapped
+    };
+    if rows.is_empty() {
+        return;
+    }
+    eprintln!("[memory] backfilling {} embeddings (one time)...", rows.len());
+    for (id, content) in rows {
+        if let Ok(v) = emb.embed(&content) {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO embeddings(rowid, vec) VALUES (?1, ?2)",
+                params![id, vec_to_blob(&v)],
+            );
+        }
+    }
+}
+
+// Semantic recall: embed the query, score every stored dialog vector by cosine
+// similarity, return the top-N most MEANINGFULLY similar messages. Brute force
+// is fine at personal scale (thousands of rows).
+fn semantic_search(conn: &Connection, emb: &Embedder, query: &str, n: i64) -> Result<Vec<(String, String)>> {
+    let qv = emb.embed(query)?;
+    let mut stmt = conn.prepare(
+        "SELECT m.role, m.content, e.vec FROM embeddings e
+         JOIN messages m ON m.id = e.rowid
+         WHERE m.role IN ('user','assistant')",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+
+    let mut scored: Vec<(f32, String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        let (role, content, blob) = row?;
+        if !seen.insert(content.clone()) {
+            continue; // dedupe identical content
+        }
+        let score = cosine(&qv, &blob_to_vec(&blob));
+        scored.push((score, role, content));
+    }
+    // Highest similarity first.
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored
+        .into_iter()
+        .take(n as usize)
+        .map(|(_, role, content)| (role, content))
+        .collect())
 }
 
 fn query_recent_audit(conn: &Connection, n: i64) -> Result<Vec<(String, String, bool)>> {
