@@ -836,7 +836,12 @@ async fn operate_app(args: &str) -> String {
              {{\"action\":\"key\",\"combo\":STR,\"why\":STR}}  (combo like \"ctrl+s\" or \"enter\")\n\
              {{\"action\":\"done\",\"why\":STR}}  when the goal is achieved\n\
              {{\"action\":\"fail\",\"why\":STR}}  if you cannot proceed\n\
-             For click, give the CENTER pixel of the target element.",
+             For click, give the CENTER pixel of the target element.\n\
+             IMPORTANT: act ONLY inside the app the goal is about. If that window is \
+             not in front, your FIRST action should be to click it to focus it. NEVER \
+             click a web browser's address bar or search box, and never type a search \
+             query, unless the goal is explicitly about the browser - doing so can \
+             navigate away and lose this session.",
             a.goal
         );
         let ans = vision_ask(&data_url, &prompt).await;
