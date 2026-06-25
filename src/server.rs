@@ -8,6 +8,7 @@
 // install, and the binary serves the whole UI itself (HTML is embedded).
 
 use crate::memory::MemoryHandle;
+use crate::policy;
 use crate::provider::{Message, Provider};
 use crate::tools;
 use anyhow::Result;
@@ -91,16 +92,10 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
 
         let _ = send(&mut socket, serde_json::json!({"type":"state","state":"thinking"})).await;
 
-        // In the web UI we don't offer run_shell (its approval gate is a console
-        // prompt). Approval-over-WebSocket is a follow-up.
-        let web_tools: Vec<_> = tools::definitions()
-            .into_iter()
-            .filter(|t| t.function.name != "run_shell")
-            .collect();
-
+        let mut tainted = false;
         let mut answered = false;
         for _ in 0..MAX_STEPS {
-            let reply = match st.provider.chat(&messages, Some(web_tools.clone())).await {
+            let reply = match st.provider.chat(&messages, Some(tools::definitions())).await {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = send(&mut socket, serde_json::json!({"type":"error","text":format!("{e}")})).await;
@@ -111,14 +106,28 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
 
             if reply.finish_reason == "tool_calls" {
                 for call in reply.message.tool_calls.clone().unwrap_or_default() {
-                    let _ = send(&mut socket, serde_json::json!({"type":"tool","name":call.function.name})).await;
+                    let name = call.function.name.clone();
+                    let args = call.function.arguments.clone();
+                    let risk = policy::assess(&name, &args);
+
+                    // Approval (over the WebSocket) if the policy demands it.
+                    let (decision, run) = decide_hud(&mut socket, &st.mem, &name, &risk, tainted).await;
+
+                    let _ = send(&mut socket, serde_json::json!({"type":"tool","name":name})).await;
                     let _ = send(&mut socket, serde_json::json!({"type":"state","state":"working"})).await;
-                    let outcome = tools::execute(&call.function.name, &call.function.arguments).await;
-                    st.mem
-                        .log_audit(&call.function.name, &call.function.arguments, &outcome.decision, outcome.ok)
-                        .await;
-                    st.mem.log("tool", &outcome.result).await;
-                    messages.push(Message::tool_result(call.id, outcome.result));
+
+                    let result = if run {
+                        tools::execute(&name, &args).await
+                    } else {
+                        "DENIED by user".to_string()
+                    };
+                    let ok = tools::result_ok(&result);
+                    st.mem.log_audit(&name, &args, &decision, ok).await;
+                    if name == "fetch_url" || name == "news_search" {
+                        tainted = true;
+                    }
+                    st.mem.log("tool", &result).await;
+                    messages.push(Message::tool_result(call.id, result));
                 }
                 continue;
             }
@@ -135,6 +144,44 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
         let _ = send(&mut socket, serde_json::json!({"type":"state","state":"idle"})).await;
         crate::trim_messages(&mut messages, 16);
     }
+}
+
+// Ask the browser to approve a risky action; block this turn until it replies.
+async fn decide_hud(
+    socket: &mut WebSocket,
+    mem: &MemoryHandle,
+    tool: &str,
+    risk: &policy::Risk,
+    tainted: bool,
+) -> (String, bool) {
+    if !risk.needs_approval {
+        return ("auto".to_string(), true);
+    }
+    if !tainted {
+        match mem.check_permission(tool, &risk.key).await {
+            Some(true) => return ("auto-allowed".to_string(), true),
+            Some(false) => return ("auto-denied".to_string(), false),
+            None => {}
+        }
+    }
+    let _ = send(socket, serde_json::json!({"type":"approval","label":risk.label,"tainted":tainted})).await;
+    // Wait for the user's click (an approval_response message).
+    while let Some(Ok(msg)) = socket.recv().await {
+        if let WsMessage::Text(t) = msg {
+            let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap_or_default();
+            if v.get("type").and_then(|x| x.as_str()) == Some("approval_response") {
+                return match v.get("decision").and_then(|x| x.as_str()).unwrap_or("deny") {
+                    "once" => ("approved".to_string(), true),
+                    "always" => {
+                        mem.remember_permission(tool, &risk.key, true).await;
+                        ("approved-always".to_string(), true)
+                    }
+                    _ => ("denied".to_string(), false),
+                };
+            }
+        }
+    }
+    ("denied".to_string(), false)
 }
 
 async fn send(socket: &mut WebSocket, v: serde_json::Value) -> Result<()> {
@@ -209,6 +256,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
     font-family:var(--mono); font-size:14px; caret-color:var(--amber);
   }
   input::placeholder{color:var(--dim)}
+  #approvalWrap{position:absolute;inset:0;background:rgba(3,5,8,.8);display:none;
+    align-items:center;justify-content:center}
+  #approvalWrap.show{display:flex}
+  .approval{width:min(520px,90vw);border:1px solid var(--amber);background:#0a0f14;padding:20px 22px}
+  .approval .h{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--amber);margin-bottom:10px}
+  .approval .lbl{font-size:14px;color:#ffd98a;word-break:break-word;margin-bottom:6px}
+  .approval .warn{font-size:11px;color:#ff9b6b;margin-bottom:14px;min-height:14px}
+  .approval .btns{display:flex;gap:10px}
+  .approval button{flex:1;font-family:var(--mono);font-size:12px;letter-spacing:.08em;
+    text-transform:uppercase;padding:10px;background:transparent;color:var(--ink);
+    border:1px solid var(--line);cursor:pointer;transition:.15s}
+  .approval button:hover{border-color:var(--amber);color:var(--amber)}
+  .approval button.deny:hover{border-color:#ff6b6b;color:#ff6b6b}
 </style>
 </head>
 <body>
@@ -230,6 +290,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
       </div>
     </footer>
   </main>
+  <div id="approvalWrap"><div class="approval">
+    <div class="h">&#9888; Approval required</div>
+    <div class="lbl" id="apLbl"></div>
+    <div class="warn" id="apWarn"></div>
+    <div class="btns">
+      <button id="apOnce">Allow once</button>
+      <button id="apAlways">Always allow</button>
+      <button class="deny" id="apDeny">Deny</button>
+    </div>
+  </div></div>
 <script>
 const log=document.getElementById('log'), input=document.getElementById('in'),
       toolEl=document.getElementById('tool'), connEl=document.getElementById('conn'),
@@ -291,9 +361,26 @@ function connect(){
     else if(m.type==='tool'){ flashTool(m.name); }
     else if(m.type==='answer'){ typewriter(addMsg('jarvis','Jarvis'), m.text); }
     else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; state='idle'; }
+    else if(m.type==='approval'){ showApproval(m); }
   };
 }
 connect();
+
+// ── approval modal
+const apWrap=document.getElementById('approvalWrap'),
+      apLbl=document.getElementById('apLbl'), apWarn=document.getElementById('apWarn');
+function showApproval(m){
+  apLbl.textContent=m.label||'(action)';
+  apWarn.textContent=m.tainted ? 'This turn read web content - approve carefully.' : '';
+  apWrap.classList.add('show');
+}
+function respond(decision){
+  apWrap.classList.remove('show');
+  ws.send(JSON.stringify({type:'approval_response',decision}));
+}
+document.getElementById('apOnce').onclick=()=>respond('once');
+document.getElementById('apAlways').onclick=()=>respond('always');
+document.getElementById('apDeny').onclick=()=>respond('deny');
 
 input.addEventListener('keydown',(e)=>{
   if(e.key==='Enter' && input.value.trim()){

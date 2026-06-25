@@ -6,6 +6,7 @@
 
 mod embeddings;
 mod memory;
+mod policy;
 mod provider;
 mod server;
 mod tools;
@@ -156,26 +157,32 @@ async fn main() -> Result<()> {
 // One user turn = the agent loop until the model gives a final answer.
 // Borrows `messages` mutably so tool results accumulate into the conversation.
 async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Message>) -> Result<String> {
-    for step in 1..=MAX_STEPS {
+    let mut tainted = false; // becomes true once we read untrusted web content
+    for _step in 1..=MAX_STEPS {
         let reply = provider.chat(messages, Some(tools::definitions())).await?;
         messages.push(reply.message.clone());
 
         if reply.finish_reason == "tool_calls" {
             for call in reply.message.tool_calls.clone().unwrap_or_default() {
-                println!("  · using {}", call.function.name);
-                let outcome = tools::execute(&call.function.name, &call.function.arguments).await;
+                let name = call.function.name.clone();
+                let args = call.function.arguments.clone();
+                let risk = policy::assess(&name, &args);
 
-                // Record the feedback signal (the Cursor-style dataset).
-                mem.log_audit(&call.function.name, &call.function.arguments, &outcome.decision, outcome.ok).await;
-                tracing::info!(
-                    tool = %call.function.name,
-                    decision = %outcome.decision,
-                    ok = outcome.ok,
-                    "tool call (step {step})"
-                );
-
-                mem.log("tool", &outcome.result).await;
-                messages.push(Message::tool_result(call.id, outcome.result));
+                let (decision, run) = decide_console(mem, &name, &risk, tainted).await;
+                let result = if run {
+                    println!("  · {}", risk.label);
+                    tools::execute(&name, &args).await
+                } else {
+                    println!("  · denied: {}", risk.label);
+                    "DENIED by user".to_string()
+                };
+                let ok = tools::result_ok(&result);
+                mem.log_audit(&name, &args, &decision, ok).await;
+                if name == "fetch_url" || name == "news_search" {
+                    tainted = true; // any later risky action must re-ask
+                }
+                mem.log("tool", &result).await;
+                messages.push(Message::tool_result(call.id, result));
             }
             continue;
         }
@@ -185,6 +192,45 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         return Ok(answer);
     }
     anyhow::bail!("hit MAX_STEPS ({MAX_STEPS}) without finishing")
+}
+
+// Decide whether a tool call may run, prompting on the console when needed.
+// Returns (decision_label_for_audit, should_run).
+async fn decide_console(
+    mem: &MemoryHandle,
+    tool: &str,
+    risk: &policy::Risk,
+    tainted: bool,
+) -> (String, bool) {
+    if !risk.needs_approval {
+        return ("auto".to_string(), true);
+    }
+    // Remembered rules apply only on a clean (non-web-tainted) turn.
+    if !tainted {
+        match mem.check_permission(tool, &risk.key).await {
+            Some(true) => return ("auto-allowed".to_string(), true),
+            Some(false) => return ("auto-denied".to_string(), false),
+            None => {}
+        }
+    }
+    println!("\n  \u{26a0}  Jarvis wants to: {}", risk.label);
+    if tainted {
+        println!("  (this turn read web content — approving fresh for safety)");
+    }
+    print!("  [y]es once / [a]lways / [N]o: ");
+    io::stdout().flush().ok();
+    let mut ans = String::new();
+    if io::stdin().read_line(&mut ans).is_err() {
+        return ("denied".to_string(), false);
+    }
+    match ans.trim().to_lowercase().as_str() {
+        "y" => ("approved".to_string(), true),
+        "a" => {
+            mem.remember_permission(tool, &risk.key, true).await;
+            ("approved-always".to_string(), true)
+        }
+        _ => ("denied".to_string(), false),
+    }
 }
 
 // Bound the in-RAM transcript: keep messages[0] (the persona) + the last

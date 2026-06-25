@@ -24,6 +24,8 @@ enum MemCmd {
     RecentDialog { n: i64, reply: oneshot::Sender<Vec<(String, String)>> },
     Search { query: String, n: i64, reply: oneshot::Sender<Vec<(String, String)>> },
     RecentAudit { n: i64, reply: oneshot::Sender<Vec<(String, String, bool)>> },
+    CheckPerm { tool: String, key: String, reply: oneshot::Sender<Option<bool>> },
+    RememberPerm { tool: String, key: String, allow: bool },
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -122,6 +124,23 @@ impl MemoryHandle {
         rx.await.unwrap_or_default()
     }
 
+    // Remembered approval: Some(true)=always allow, Some(false)=always deny, None=ask.
+    pub async fn check_permission(&self, tool: &str, key: &str) -> Option<bool> {
+        let (reply, rx) = oneshot::channel();
+        let cmd = MemCmd::CheckPerm { tool: tool.to_string(), key: key.to_string(), reply };
+        if self.tx.send(cmd).await.is_err() {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn remember_permission(&self, tool: &str, key: &str, allow: bool) {
+        let _ = self
+            .tx
+            .send(MemCmd::RememberPerm { tool: tool.to_string(), key: key.to_string(), allow })
+            .await;
+    }
+
     // Recent tool-call feedback rows (tool, decision, ok) for the digest.
     pub async fn recent_audit(&self, n: i64) -> Vec<(String, String, bool)> {
         let (reply, rx) = oneshot::channel();
@@ -159,7 +178,12 @@ fn open_db(path: &str) -> Result<Connection> {
          -- Full-text search index over message content (keyword fallback).
          CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(role UNINDEXED, content);
          -- Semantic vectors: one embedding per message, keyed by messages.id.
-         CREATE TABLE IF NOT EXISTS embeddings (rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);",
+         CREATE TABLE IF NOT EXISTS embeddings (rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);
+         -- Remembered approval decisions ('always allow/deny this exact action').
+         CREATE TABLE IF NOT EXISTS permissions (
+            tool TEXT NOT NULL, key TEXT NOT NULL, allow INTEGER NOT NULL,
+            PRIMARY KEY (tool, key)
+         );",
     )
     .context("creating tables")?;
 
@@ -246,6 +270,23 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
         MemCmd::RecentAudit { n, reply } => {
             let rows = query_recent_audit(conn, n).unwrap_or_default();
             let _ = reply.send(rows);
+        }
+        MemCmd::CheckPerm { tool, key, reply } => {
+            let allow: Option<bool> = conn
+                .query_row(
+                    "SELECT allow FROM permissions WHERE tool=?1 AND key=?2",
+                    params![tool, key],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+                .map(|n| n != 0);
+            let _ = reply.send(allow);
+        }
+        MemCmd::RememberPerm { tool, key, allow } => {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO permissions (tool, key, allow) VALUES (?1, ?2, ?3)",
+                params![tool, key, allow as i64],
+            );
         }
     }
 }
