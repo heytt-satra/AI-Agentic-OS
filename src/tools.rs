@@ -194,6 +194,8 @@ struct HnHit {
     url: Option<String>,
     points: Option<i64>,
     num_comments: Option<i64>,
+    created_at: Option<String>, // ISO timestamp, so we can show recency
+    created_at_i: Option<i64>,  // unix seconds
 }
 
 async fn news_search(args_json: &str) -> String {
@@ -202,13 +204,24 @@ async fn news_search(args_json: &str) -> String {
         Err(e) => return format!("ERROR: bad arguments: {e}"),
     };
 
+    // Use search_by_date = NEWEST first (not relevance, which returns old
+    // popular stories). Filter to the last ~14 days so results are actually
+    // current. created_at_i is unix seconds; build the filter from "now".
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let since = now - 14 * 24 * 3600;
+    let filter = format!("created_at_i>{since}");
+
     let client = reqwest::Client::new();
     let resp = client
-        .get("https://hn.algolia.com/api/v1/search")
+        .get("https://hn.algolia.com/api/v1/search_by_date")
         .query(&[
             ("query", args.query.as_str()),
             ("tags", "story"),
-            ("hitsPerPage", "6"),
+            ("numericFilters", filter.as_str()),
+            ("hitsPerPage", "8"),
         ])
         .send()
         .await;
@@ -224,16 +237,25 @@ async fn news_search(args_json: &str) -> String {
     };
 
     if parsed.hits.is_empty() {
-        return format!("No stories found for '{}'.", args.query);
+        return format!("No recent stories (last 14 days) for '{}'.", args.query);
     }
 
-    let mut out = format!("Top stories for '{}':\n", args.query);
+    let mut out = format!(
+        "Most RECENT stories for '{}' (newest first; these are live, dated):\n",
+        args.query
+    );
     for (i, h) in parsed.hits.iter().enumerate() {
         let title = h.title.clone().unwrap_or_else(|| "(untitled)".into());
         let url = h.url.clone().unwrap_or_else(|| "(no url)".into());
         let pts = h.points.unwrap_or(0);
-        let cmt = h.num_comments.unwrap_or(0);
-        out.push_str(&format!("{}. {title}  [{pts} pts, {cmt} comments]\n   {url}\n", i + 1));
+        // Prefer the human-readable date; fall back to age in hours.
+        let when = h.created_at.clone().unwrap_or_else(|| {
+            match h.created_at_i {
+                Some(t) => format!("{}h ago", (now - t).max(0) / 3600),
+                None => "recent".into(),
+            }
+        });
+        out.push_str(&format!("{}. {title}  [{when}, {pts} pts]\n   {url}\n", i + 1));
     }
     out
 }
