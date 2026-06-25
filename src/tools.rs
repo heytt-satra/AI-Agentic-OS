@@ -39,6 +39,7 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
         f("click_on", "See the screen and click on a described UI element (e.g. 'the Save button', 'the search box'). Screenshots, locates it with vision, then clicks. Requires approval. This is the reliable way to click things.", str_prop("target", "what to click, in plain words")),
+        f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks use click_on instead.", str_prop("goal", "what to accomplish on screen, in plain words")),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
         f("browse_js", "Open a URL in a headless browser and run a JavaScript snippet on the page (click, fill forms, extract data). Requires approval. Return value is sent back.",
           serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
@@ -89,6 +90,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "mouse_click" => mouse_click(args_json),
         "see_screen" => see_screen(args_json).await,
         "click_on" => click_on(args_json).await,
+        "operate_app" => operate_app(args_json).await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -651,26 +653,37 @@ fn is_modifier(t: &str) -> bool {
     matches!(t, "ctrl" | "control" | "alt" | "shift" | "win" | "meta" | "cmd" | "super")
 }
 
-fn press_keys(args: &str) -> String {
-    let a: ComboArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+// Press a key combo like "ctrl+s" / "enter" / "alt+tab". Shared by press_keys
+// and the autonomous operate loop.
+fn do_combo(combo: &str) -> String {
     let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
-    let parts: Vec<String> = a.combo.split('+').map(|s| s.trim().to_lowercase()).collect();
+    let parts: Vec<String> = combo.split('+').map(|s| s.trim().to_lowercase()).collect();
     let mods: Vec<Key> = parts.iter().filter(|p| is_modifier(p)).map(|p| map_key(p)).collect();
     let finals: Vec<Key> = parts.iter().filter(|p| !is_modifier(p)).map(|p| map_key(p)).collect();
     for m in &mods { let _ = enigo.key(*m, Direction::Press); }
     for k in &finals { let _ = enigo.key(*k, Direction::Click); }
     for m in mods.iter().rev() { let _ = enigo.key(*m, Direction::Release); }
-    format!("pressed {}", a.combo)
+    format!("pressed {combo}")
+}
+
+fn press_keys(args: &str) -> String {
+    let a: ComboArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    do_combo(&a.combo)
+}
+
+// Move + left-click at an absolute pixel. Shared by mouse_click, click_on, operate.
+fn do_click(x: i32, y: i32) -> String {
+    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+    let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+    match enigo.button(Button::Left, Direction::Click) {
+        Ok(()) => format!("clicked at {x},{y}"),
+        Err(e) => format!("ERROR clicking: {e}"),
+    }
 }
 
 fn mouse_click(args: &str) -> String {
     let a: ClickArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
-    let _ = enigo.move_mouse(a.x, a.y, Coordinate::Abs);
-    match enigo.button(Button::Left, Direction::Click) {
-        Ok(()) => format!("clicked at {},{}", a.x, a.y),
-        Err(e) => format!("ERROR clicking: {e}"),
-    }
+    do_click(a.x, a.y)
 }
 
 // ── screen vision: screenshot + a vision model ──────────────────────────────
@@ -774,6 +787,92 @@ async fn click_on(args: &str) -> String {
         }
         _ => format!("Could not locate '{}' on screen (vision: {})", a.target, ans.chars().take(120).collect::<String>()),
     }
+}
+
+// ── autonomous operate loop: perceive -> act -> verify -> recover ────────────
+// This is the computer-use core: given a goal, repeatedly screenshot, ask the
+// vision model for the SINGLE next action, do it, and re-check, until the model
+// says done/fail or we hit the step cap. Reuses do_click / do_paste / do_combo.
+#[derive(Deserialize)]
+struct GoalArg { goal: String }
+
+#[derive(Deserialize)]
+struct Action {
+    action: String,
+    #[serde(default)] x: Option<i64>,
+    #[serde(default)] y: Option<i64>,
+    #[serde(default)] text: Option<String>,
+    #[serde(default)] combo: Option<String>,
+    #[serde(default)] why: String,
+}
+
+// Pull the first {...} JSON object out of the model's reply and parse it.
+fn parse_action(s: &str) -> Option<Action> {
+    let start = s.find('{')?;
+    let end = s[start..].find('}')? + start + 1;
+    serde_json::from_str(&s[start..end]).ok()
+}
+
+async fn operate_app(args: &str) -> String {
+    let a: GoalArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let max = std::env::var("JARVIS_OPERATE_STEPS")
+        .ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(8u32);
+
+    let mut history: Vec<String> = Vec::new();
+    for step in 1..=max {
+        let (data_url, w, h) = match screenshot_data_url() {
+            Ok(x) => x,
+            Err(e) => return format!("operate stopped at step {step}: {e}\nactions: {}", history.join("; ")),
+        };
+        let hist = if history.is_empty() { "(none yet)".to_string() } else { history.join("; ") };
+        let prompt = format!(
+            "You are operating a desktop to accomplish a GOAL by choosing ONE action at a time.\n\
+             The screenshot is {w}x{h} pixels, origin top-left.\n\
+             GOAL: {}\n\
+             ACTIONS SO FAR: {hist}\n\
+             Reply with ONLY one JSON object, no prose, exactly one of:\n\
+             {{\"action\":\"click\",\"x\":INT,\"y\":INT,\"why\":STR}}\n\
+             {{\"action\":\"type\",\"text\":STR,\"why\":STR}}\n\
+             {{\"action\":\"key\",\"combo\":STR,\"why\":STR}}  (combo like \"ctrl+s\" or \"enter\")\n\
+             {{\"action\":\"done\",\"why\":STR}}  when the goal is achieved\n\
+             {{\"action\":\"fail\",\"why\":STR}}  if you cannot proceed\n\
+             For click, give the CENTER pixel of the target element.",
+            a.goal
+        );
+        let ans = vision_ask(&data_url, &prompt).await;
+        if ans.starts_with("ERROR") {
+            return format!("operate stopped: {ans}\nactions: {}", history.join("; "));
+        }
+        let act = match parse_action(&ans) {
+            Some(act) => act,
+            None => {
+                history.push(format!("step {step}: unparseable ({})", ans.chars().take(50).collect::<String>()));
+                continue;
+            }
+        };
+        match act.action.as_str() {
+            "done" => return format!("Done, sir. {}\nSteps: {}", act.why, history.join("; ")),
+            "fail" => return format!("I got stuck: {}\nSteps: {}", act.why, history.join("; ")),
+            "click" => match (act.x, act.y) {
+                (Some(x), Some(y)) => { do_click(x as i32, y as i32); history.push(format!("clicked {x},{y} ({})", act.why)); }
+                _ => history.push("click had no coordinates".into()),
+            },
+            "type" => {
+                let t = act.text.unwrap_or_default();
+                do_paste(&t);
+                history.push(format!("typed \"{}\" ({})", t.chars().take(40).collect::<String>(), act.why));
+            }
+            "key" => {
+                let c = act.combo.unwrap_or_default();
+                do_combo(&c);
+                history.push(format!("key {c} ({})", act.why));
+            }
+            other => history.push(format!("unknown action '{other}'")),
+        }
+        // Let the UI settle before the next screenshot.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    }
+    format!("Reached the {max}-step operate limit before finishing.\nSteps: {}", history.join("; "))
 }
 
 // ── browser automation (real headless Chrome via CDP) ───────────────────────
