@@ -27,9 +27,18 @@ build/test outcomes into the Cursor-style feedback dataset.
 
 First milestone: "write me a small CLI in Rust that does X" -> compiles and passes a test it wrote, end to end, unattended.
 
-## Power 2 - Cross-platform (Windows, macOS, any Linux)
+## Power 2 - Cross-platform (Windows, macOS, any Linux)  [v1 SHIPPED]
 
 Goal: the same single binary behavior on all three, no separate install.
+
+Shipped: device ops are now per-OS. `open_app` has Windows (Start Menu + terminal
+fallback), macOS (`open -a`, then Terminal via AppleScript), and Linux
+(`gtk-launch` -> binary -> `xdg-open`) branches. `run_shell`/`open_path`/`code_exec`
+were already cfg-split, path resolution already uses `dirs`, and screenshot,
+clipboard, and input are cross-platform crates. CI release matrix builds win/mac/
+linux binaries on tag. Honest caveat: only the Windows paths are runtime-verified
+here - the mac/Linux branches compile behind cfg and need a real mac/Linux box (or
+CI) to smoke-test.
 
 - Platform-abstracted device layer: app launch, known folders, clipboard, screenshot, and shell all behind one trait with per-OS implementations (Windows done; add macOS `open`/AppleScript and Linux `xdg-open`/wmctrl paths).
 - Path resolution already uses `dirs` (OneDrive-aware on Windows); extend the same logic for mac/Linux home layouts.
@@ -38,9 +47,16 @@ Goal: the same single binary behavior on all three, no separate install.
 
 First milestone: download the macOS binary, run it, and "open my notes app + screenshot" works identically.
 
-## Power 3 - Full voice in the HUD (mic -> speech-to-text -> spoken reply)
+## Power 3 - Full voice in the HUD (mic -> speech-to-text -> spoken reply)  [v1 SHIPPED]
 
 Goal: talk to Jarvis and hear it talk back, like the films.
+
+Shipped: a "Talk" push-to-talk button in the HUD uses the browser Web Speech API
+for speech-to-text (transcribes into the input and auto-sends), and a VOICE
+toggle speaks Jarvis's replies via the browser SpeechSynthesis TTS. Both are
+zero-dependency and keep the binary self-contained - no STT/TTS API, no cost. The
+mic state flashes the orb's live tag. Caveat: voice input needs a Chromium browser
+(Chrome/Edge); wake-word and local Whisper are future upgrades on the same seam.
 
 - Mic capture in the HUD via the browser Web Audio / MediaRecorder API (no native driver needed).
 - Speech-to-text: route to a cheap STT API first (Cursor playbook); local Whisper as a later config swap, same seam as the chat model.
@@ -50,9 +66,18 @@ Goal: talk to Jarvis and hear it talk back, like the films.
 
 First milestone: hold a key, say "what's happening in tech today", hear the answer read back with sources.
 
-## Power 4 - Deeper autonomy (multi-step tasks, retry, recovery)
+## Power 4 - Deeper autonomy (multi-step tasks, retry, recovery)  [v1 SHIPPED]
 
 Goal: hand Jarvis a goal, not a step, and trust it to finish.
+
+Shipped: a durable task list in SQLite with tools `task_add`, `task_list`,
+`task_done`, `task_cancel`. The persona tells Jarvis to plan a multi-step goal as
+tasks, work through them, mark each done, and call `task_list` to resume after a
+restart. The step budget already auto-summarizes and lets the user say "continue".
+`fetch_url` now retries with backoff on transient network failure. Verified end to
+end: Jarvis added three tasks, listed, marked one done, and a fresh process read
+the list back with correct statuses (durability across restart). Future: surfacing
+long-running tasks live in the HUD, and richer auto-recovery.
 
 - A task planner that decomposes a goal into steps, tracks progress, and resumes if interrupted.
 - Retry-with-backoff and error recovery: when a tool returns ERROR, diagnose and try an alternative instead of giving up or lying about success.

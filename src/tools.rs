@@ -56,6 +56,15 @@ pub fn definitions() -> Vec<Tool> {
         f("code_list", "Show a project's file tree (skips target/node_modules/.git).", str_prop("project", "project name")),
         f("code_exec", "Run a command with the project as the working directory. This is how you build, test, run, and use git: e.g. 'cargo build', 'cargo test', 'npm install', 'pytest', 'git init', 'git commit -m ...'. Returns exit code, stdout, and stderr so you can read failures and fix them.",
           serde_json::json!({"type":"object","properties":{"project":{"type":"string"},"command":{"type":"string","description":"the shell command to run inside the project"}},"required":["project","command"]})),
+
+        // ── deeper autonomy: a durable task list that survives restarts
+        f("task_add", "Add a step to your durable to-do list (it survives restarts). Before a multi-step job, plan it by adding one task per step. Returns the new task id.", str_prop("title", "the task/step")),
+        f("task_list", "List your current tasks and their status (open/done). Use to see what's left, or to resume a job after a restart.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("task_done", "Mark a task done by its id once you have actually finished it.",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
+        f("task_cancel", "Drop a task by its id (no longer needed).",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
     ]
 }
 
@@ -87,6 +96,10 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "code_read_file" => code_read_file(args_json),
         "code_list" => code_list(args_json),
         "code_exec" => code_exec(args_json),
+        "task_add" => task_add_tool(args_json, mem).await,
+        "task_list" => task_list_tool(mem).await,
+        "task_done" => task_status_tool(args_json, mem, "done").await,
+        "task_cancel" => task_status_tool(args_json, mem, "cancelled").await,
         other => format!("ERROR: unknown tool '{other}'"),
     }
 }
@@ -412,6 +425,41 @@ fn code_exec(args: &str) -> String {
     run_in(&dir, &a.command)
 }
 
+// ── durable task list (Power 4) ─────────────────────────────────────────────
+#[derive(Deserialize)]
+struct TitleArg { title: String }
+#[derive(Deserialize)]
+struct IdArg { id: i64 }
+
+async fn task_add_tool(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let a: TitleArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let id = mem.task_add(&a.title).await;
+    if id < 0 { return "ERROR: could not add task".to_string(); }
+    format!("added task #{id}: {}", a.title)
+}
+
+async fn task_list_tool(mem: &crate::memory::MemoryHandle) -> String {
+    let rows = mem.task_list().await;
+    if rows.is_empty() {
+        return "No tasks yet.".to_string();
+    }
+    let mut out = String::from("Tasks:\n");
+    for (id, title, status) in rows {
+        let mark = match status.as_str() { "done" => "x", _ => " " };
+        out.push_str(&format!("  [{mark}] #{id} {title}\n"));
+    }
+    out
+}
+
+async fn task_status_tool(args: &str, mem: &crate::memory::MemoryHandle, status: &str) -> String {
+    let a: IdArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.task_set_status(a.id, status).await {
+        format!("task #{} marked {status}", a.id)
+    } else {
+        format!("ERROR: no task #{}", a.id)
+    }
+}
+
 // ── app launch / wait / reliable paste ──────────────────────────────────────
 #[derive(Deserialize)]
 struct NameArg { name: String }
@@ -420,13 +468,15 @@ struct SecondsArg { seconds: u64 }
 
 fn open_app(args: &str) -> String {
     let a: NameArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    // Search the Start Menu for a matching app shortcut (handles installed GUI
-    // apps like the Codex app), and launch it. Fall back to Start-Process by
-    // name (PATH / App Paths) if no shortcut matches.
-    let name_lit = format!("'{}'", a.name.replace('\'', "''"));
-    // 1) GUI app shortcut in the Start Menu -> launch it.
-    // 2) else a CLI tool on PATH (e.g. codex) -> open it in a terminal window.
-    // 3) else let the OS try by name.
+    open_app_os(&a.name)
+}
+
+// Windows: search the Start Menu for a matching shortcut (handles installed GUI
+// apps like the Codex app); else a CLI tool on PATH -> open it in a terminal;
+// else let the OS try by name.
+#[cfg(windows)]
+fn open_app_os(name: &str) -> String {
+    let name_lit = format!("'{}'", name.replace('\'', "''"));
     let script = r#"$n=__NAME__;
 $sm=@("$env:ProgramData\Microsoft\Windows\Start Menu\Programs","$env:APPDATA\Microsoft\Windows\Start Menu\Programs");
 $lnk=Get-ChildItem -Path $sm -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "*$n*" } | Select-Object -First 1 -ExpandProperty FullName;
@@ -440,10 +490,44 @@ else { Start-Process $n; "started $n" }"#
     match out {
         Ok(o) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { format!("opened {}", a.name) } else { s }
+            if s.is_empty() { format!("opened {name}") } else { s }
         }
-        Ok(o) => format!("ERROR: couldn't open '{}': {}", a.name, String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
-        Err(e) => format!("ERROR opening {}: {e}", a.name),
+        Ok(o) => format!("ERROR: couldn't open '{name}': {}", String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
+        Err(e) => format!("ERROR opening {name}: {e}"),
+    }
+}
+
+// macOS: `open -a <App>` launches a GUI app by name. If that fails, treat the
+// name as a CLI tool and run it in a new Terminal window via AppleScript.
+#[cfg(target_os = "macos")]
+fn open_app_os(name: &str) -> String {
+    let gui = std::process::Command::new("open").args(["-a", name]).output();
+    if let Ok(o) = &gui {
+        if o.status.success() {
+            return format!("opened {name}");
+        }
+    }
+    // Fall back: run it as a command in a new Terminal window.
+    let osa = format!("tell application \"Terminal\" to do script \"{}\"", name.replace('"', "\\\""));
+    match std::process::Command::new("osascript").args(["-e", &osa]).output() {
+        Ok(o) if o.status.success() => format!("opened {name} in Terminal"),
+        _ => format!("ERROR: couldn't open '{name}' (tried open -a and Terminal)"),
+    }
+}
+
+// Linux: prefer a desktop launcher via gtk-launch; else run the binary if it is
+// on PATH; else hand it to xdg-open.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_app_os(name: &str) -> String {
+    if std::process::Command::new("gtk-launch").arg(name).spawn().is_ok() {
+        return format!("opened {name}");
+    }
+    if std::process::Command::new(name).spawn().is_ok() {
+        return format!("started {name}");
+    }
+    match std::process::Command::new("xdg-open").arg(name).spawn() {
+        Ok(_) => format!("opened {name}"),
+        Err(e) => format!("ERROR opening {name}: {e}"),
     }
 }
 
@@ -687,14 +771,22 @@ async fn browse_js(args: &str) -> String {
 
 async fn fetch_url(args: &str) -> String {
     let a: UrlArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    match reqwest::get(&a.url).await {
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            format!("HTTP {status}\n{}", body.chars().take(2000).collect::<String>())
+    // Retry-with-backoff for transient network failures (Power 4 recovery).
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(300 * (1 << (attempt - 1)))).await;
         }
-        Err(e) => format!("ERROR fetching {}: {e}", a.url),
+        match reqwest::get(&a.url).await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return format!("HTTP {status}\n{}", body.chars().take(2000).collect::<String>());
+            }
+            Err(e) => last_err = e.to_string(),
+        }
     }
+    format!("ERROR fetching {} after 3 tries: {last_err}", a.url)
 }
 
 // ── news_search via Hacker News Algolia (by date = newest first) ────────────

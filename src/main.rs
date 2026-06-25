@@ -58,6 +58,11 @@ efficiently: write all the files you can before the first build. If a build or t
 FAILS, read the stderr, fix the files, and run it again — keep going until it passes or \
 you are truly stuck. Do not claim it works until code_exec shows it builds and tests \
 pass. Report the project path at the end.\n\
+BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add \
+(one task per step), then work through them and call task_done as you finish each. \
+If you are restarted or interrupted, call task_list to see what is left and resume. \
+RECOVERY: when a tool returns an ERROR, do not give up at once. Read the error, \
+adjust your approach, and try a couple of times before reporting that you are stuck.\n\
 NEWS / WEB FACTS: always include the source link(s) for anything you found online.\n\
 LISTINGS: when the user asks to list files or for detail, give the FULL list, do not \
 summarize as a count.\n\

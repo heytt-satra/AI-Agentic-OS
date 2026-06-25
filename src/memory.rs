@@ -32,6 +32,10 @@ enum MemCmd {
     // Full-history dumps for the training-dataset exporter (Stage 1).
     AllMessages { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     AllAudit { reply: oneshot::Sender<Vec<(i64, String, String, bool)>> },
+    // Durable task list (Power 4).
+    TaskAdd { title: String, reply: oneshot::Sender<i64> },
+    TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
+    TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -209,6 +213,31 @@ impl MemoryHandle {
         }
         rx.await.unwrap_or_default()
     }
+
+    // ── durable task list (Power 4) ─────────────────────────────────────────
+    pub async fn task_add(&self, title: &str) -> i64 {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::TaskAdd { title: title.to_string(), reply }).await.is_err() {
+            return -1;
+        }
+        rx.await.unwrap_or(-1)
+    }
+
+    pub async fn task_list(&self) -> Vec<(i64, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::TaskList { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn task_set_status(&self, id: i64, status: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::TaskSetStatus { id, status: status.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
 }
 
 // ── Everything below runs ON the owner thread, with exclusive Connection access ─
@@ -239,6 +268,12 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS activity (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             kind TEXT NOT NULL, app TEXT NOT NULL, detail TEXT NOT NULL
+         );
+         -- Durable task list (Power 4): multi-step goals survive restarts.
+         -- status = open | done | cancelled.
+         CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
          );",
     )
     .context("creating tables")?;
@@ -366,7 +401,36 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let rows = query_all_audit(conn).unwrap_or_default();
             let _ = reply.send(rows);
         }
+        MemCmd::TaskAdd { title, reply } => {
+            let _ = conn.execute(
+                "INSERT INTO tasks (ts, title, status) VALUES (?1, ?2, 'open')",
+                params![now_secs(), title],
+            );
+            let _ = reply.send(conn.last_insert_rowid());
+        }
+        MemCmd::TaskList { reply } => {
+            let rows = query_tasks(conn).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::TaskSetStatus { id, status, reply } => {
+            let n = conn
+                .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
+                .unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
     }
+}
+
+// Tasks that still matter (not cancelled), oldest first: (id, title, status).
+fn query_tasks(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, status FROM tasks WHERE status != 'cancelled' ORDER BY id ASC LIMIT 100",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 // Full message history in chronological order (ts, role, content).
