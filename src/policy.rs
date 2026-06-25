@@ -1,66 +1,78 @@
-// ── src/policy.rs : the safety gate every action passes through ──────────────
+// ── src/policy.rs : the safety gate ─────────────────────────────────────────
 //
-// Before Jarvis runs ANY tool, we ask the policy: is this safe to do
-// automatically, or must the human approve it? This is what makes "full device
-// control" not be "a loaded gun" — the LLM proposes, the policy + human dispose.
+// Posture (per the owner): Jarvis is an agentic OS layer that should just DO
+// things. We ONLY ask for approval when an action could damage the underlying
+// operating system or destroy data irreversibly. Everything else runs silently.
 //
-// Tiered model (the posture you chose):
-//   - read-only / reversible  -> AUTO (read_file, list_dir, news_search, ...)
-//   - destructive / external / system-changing -> ASK (run_shell, write_file,
-//     delete, open apps, ...)
-// Approvals can be remembered ("always allow this exact action"), EXCEPT when
-// the current turn has touched untrusted web content (injection defense).
+// ASK only for:
+//   - delete_path                    (irreversible)
+//   - run_shell with a DANGEROUS command (rm/format/registry/shutdown/...)
+//   - write_file / open_path into a SYSTEM location (Windows dir, Program Files)
+// Everything else (read, list, write in user space, open apps, type, click,
+// see screen, browse) runs automatically.
 
 use serde_json::Value;
 
 pub struct Risk {
     pub needs_approval: bool,
-    pub label: String, // human-readable "what will happen"
-    pub key: String,   // stable id for remembered allow/deny rules
+    pub label: String,
+    pub key: String,
 }
 
 pub fn assess(tool: &str, args_json: &str) -> Risk {
     let v: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
     let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
 
-    // Pull the salient argument so remembered rules are SPECIFIC (e.g. allow
-    // exactly `git status`, not "all shell commands").
     let (needs_approval, salient, label) = match tool {
-        // --- auto: read-only / safe ---
-        "read_file" => (false, field("path"), format!("read file {}", field("path"))),
-        "list_dir" => (false, field("path"), format!("list {}", field("path"))),
-        "news_search" => (false, field("query"), format!("search news '{}'", field("query"))),
-        "fetch_url" => (false, field("url"), format!("fetch {}", field("url"))),
-        "browse_url" => (false, field("url"), format!("browse {}", field("url"))),
-        "get_current_time" => (false, String::new(), "check the time".into()),
-        "wait" => (false, String::new(), "wait".into()),
-        "recall_activity" => (false, field("query"), "recall your activity".into()),
-
-        // --- ask: changes the system / world ---
-        "run_shell" => (true, field("command"), format!("run shell: {}", field("command"))),
-        "write_file" => (true, field("path"), format!("write file {}", field("path"))),
+        // irreversible
         "delete_path" => (true, field("path"), format!("DELETE {}", field("path"))),
-        "open_path" => (true, field("target"), format!("open {}", field("target"))),
-        "open_app" => (true, field("name"), format!("launch app: {}", field("name"))),
-        "paste_text" => (true, field("text"), format!("paste: {}", field("text").chars().take(40).collect::<String>())),
-        "type_text" => (true, field("text"), format!("type: {}", field("text").chars().take(40).collect::<String>())),
-        "press_keys" => (true, field("combo"), format!("press keys: {}", field("combo"))),
-        "mouse_click" => {
-            let x = v.get("x").and_then(|x| x.as_i64()).unwrap_or(0);
-            let y = v.get("y").and_then(|x| x.as_i64()).unwrap_or(0);
-            (true, format!("{x},{y}"), format!("click at {x},{y}"))
-        }
-        "see_screen" => (true, String::new(), "screenshot your screen and send it to a vision model".into()),
-        "click_on" => (true, field("target"), format!("see the screen and click '{}'", field("target"))),
-        "browse_js" => (true, field("url"), format!("run JavaScript on {}", field("url"))),
 
-        // unknown tools default to ASK (safe default)
-        other => (true, String::new(), format!("run unknown tool '{other}'")),
+        // shell: only the dangerous ones
+        "run_shell" => {
+            let cmd = field("command");
+            (is_dangerous_shell(&cmd), cmd.clone(), format!("run shell: {cmd}"))
+        }
+
+        // writing/opening only flagged if it targets the OS itself
+        "write_file" => {
+            let p = field("path");
+            let sys = is_system_path(&p);
+            let label = if sys { format!("write SYSTEM file {p}") } else { format!("write {p}") };
+            (sys, p.clone(), label)
+        }
+        "open_path" => {
+            let t = field("target");
+            (is_system_path(&t), t.clone(), format!("open {t}"))
+        }
+
+        // everything else just runs
+        _ => (false, String::new(), String::new()),
     };
 
-    Risk {
-        needs_approval,
-        label,
-        key: format!("{tool}:{salient}"),
-    }
+    Risk { needs_approval, label, key: format!("{tool}:{salient}") }
+}
+
+// Commands that can wreck the system or destroy data. Matched case-insensitively
+// as substrings — deliberately broad; false positives just cause one prompt.
+fn is_dangerous_shell(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    const BAD: &[&str] = &[
+        "rm -rf", "rm -r", "remove-item", "del ", "erase ", "rmdir", "rd /s", "rd ",
+        "format ", "format-volume", "diskpart", "mkfs", "dd if=", "dd of=",
+        "reg add", "reg delete", "reg ", "set-itemproperty hklm", "new-item hklm",
+        "shutdown", "restart-computer", "stop-computer", "bcdedit", "takeown",
+        "icacls", "cipher /w", "fsutil", "net user", "net localgroup", "schtasks /create",
+        "\\windows\\system32", "c:\\windows", "/system/", "sudo rm", "sc delete", "sc config",
+    ];
+    BAD.iter().any(|b| c.contains(b))
+}
+
+// Paths inside the OS itself (not the user's own files).
+fn is_system_path(p: &str) -> bool {
+    let c = p.to_lowercase();
+    c.contains("\\windows") || c.contains("/windows")
+        || c.contains("program files")
+        || c.contains("system32")
+        || c.contains("hklm") || c.contains("hkey_")
+        || c.starts_with("/etc") || c.starts_with("/usr") || c.starts_with("/bin") || c.starts_with("/sys")
 }

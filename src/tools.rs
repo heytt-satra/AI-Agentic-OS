@@ -93,46 +93,102 @@ struct ShellArg { command: String }
 #[derive(Deserialize)]
 struct SearchArgs { query: String }
 
+// Resolve natural paths: ~, and bare "desktop/downloads/documents/..." map to
+// the user's real folders (fixes Jarvis making a literal ./desktop folder).
+fn resolve_path(p: &str) -> String {
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+    let t = p.trim();
+    if t == "~" {
+        return home;
+    }
+    if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
+        return format!("{}/{}", home.trim_end_matches(['/', '\\']), rest);
+    }
+    let norm = t.replace('\\', "/");
+    let lower = norm.to_lowercase();
+    for f in ["desktop", "downloads", "documents", "pictures", "music", "videos"] {
+        let cap = {
+            let mut c = f.chars();
+            c.next().map(|x| x.to_uppercase().collect::<String>()).unwrap_or_default() + c.as_str()
+        };
+        if lower == f {
+            return format!("{}/{}", home.trim_end_matches(['/', '\\']), cap);
+        }
+        if let Some(rest) = norm.get(f.len() + 1..) {
+            if lower.starts_with(&format!("{f}/")) {
+                return format!("{}/{}/{}", home.trim_end_matches(['/', '\\']), cap, rest);
+            }
+        }
+    }
+    t.to_string()
+}
+
 fn read_file(args: &str) -> String {
     let a: PathArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    match std::fs::read_to_string(&a.path) {
+    let path = resolve_path(&a.path);
+    match std::fs::read_to_string(&path) {
         Ok(t) => t.chars().take(8000).collect(),
-        Err(e) => format!("ERROR reading {}: {e}", a.path),
+        Err(e) => format!("ERROR reading {path}: {e}"),
     }
 }
 
 fn write_file(args: &str) -> String {
     let a: WriteArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    if let Some(parent) = std::path::Path::new(&a.path).parent() {
+    let path = resolve_path(&a.path);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
         if !parent.as_os_str().is_empty() {
             let _ = std::fs::create_dir_all(parent);
         }
     }
-    match std::fs::write(&a.path, a.content.as_bytes()) {
-        Ok(()) => format!("wrote {} bytes to {}", a.content.len(), a.path),
-        Err(e) => format!("ERROR writing {}: {e}", a.path),
+    match std::fs::write(&path, a.content.as_bytes()) {
+        Ok(()) => format!("wrote {} bytes to {path}", a.content.len()),
+        Err(e) => format!("ERROR writing {path}: {e}"),
     }
 }
 
 fn list_dir(args: &str) -> String {
     let a: PathArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    match std::fs::read_dir(&a.path) {
+    let path = resolve_path(&a.path);
+    match std::fs::read_dir(&path) {
         Ok(rd) => {
-            let mut out = format!("Contents of {}:\n", a.path);
+            let mut entries: Vec<(bool, String, u64)> = Vec::new();
             for entry in rd.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let kind = if entry.path().is_dir() { "dir " } else { "file" };
-                out.push_str(&format!("  [{kind}] {name}\n"));
+                let md = entry.metadata().ok();
+                let is_dir = md.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let size = md.map(|m| m.len()).unwrap_or(0);
+                entries.push((is_dir, name, size));
+            }
+            entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+            let mut out = format!("Contents of {path} ({} items):\n", entries.len());
+            for (is_dir, name, size) in entries {
+                if is_dir {
+                    out.push_str(&format!("  [dir]  {name}\n"));
+                } else {
+                    out.push_str(&format!("  [file] {name} ({})\n", human_size(size)));
+                }
             }
             out
         }
-        Err(e) => format!("ERROR listing {}: {e}", a.path),
+        Err(e) => format!("ERROR listing {path}: {e}"),
     }
+}
+
+fn human_size(bytes: u64) -> String {
+    const U: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut s = bytes as f64;
+    let mut i = 0;
+    while s >= 1024.0 && i < 3 {
+        s /= 1024.0;
+        i += 1;
+    }
+    format!("{s:.1} {}", U[i])
 }
 
 fn delete_path(args: &str) -> String {
     let a: PathArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    let p = std::path::Path::new(&a.path);
+    let resolved = resolve_path(&a.path);
+    let p = std::path::Path::new(&resolved);
     let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
     match r {
         Ok(()) => format!("deleted {}", a.path),
@@ -203,21 +259,28 @@ async fn wait_tool(args: &str) -> String {
     format!("waited {secs}s")
 }
 
-// Reliable text entry: put the text on the clipboard, then send Ctrl+V. Avoids
-// the stuck/repeated-key problems of per-character simulation.
-fn paste_text(args: &str) -> String {
-    let a: TextArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+// Reliable text entry: clipboard + Ctrl+V. Per-character key simulation caused
+// the stuck/repeated-key bug ("Lensr mmmm"), so BOTH paste_text and type_text
+// route here.
+fn do_paste(text: &str) -> String {
     let mut clipboard = match arboard::Clipboard::new() { Ok(c) => c, Err(e) => return format!("ERROR: clipboard: {e}") };
-    if let Err(e) = clipboard.set_text(a.text.clone()) {
+    if let Err(e) = clipboard.set_text(text.to_string()) {
         return format!("ERROR: set clipboard: {e}");
     }
-    std::thread::sleep(std::time::Duration::from_millis(400)); // let focus settle
+    std::thread::sleep(std::time::Duration::from_millis(350)); // let focus settle
     let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
     let _ = enigo.key(Key::Control, Direction::Press);
     let _ = enigo.key(Key::Unicode('v'), Direction::Click);
     let _ = enigo.key(Key::Control, Direction::Release);
-    std::thread::sleep(std::time::Duration::from_millis(100)); // keep clipboard alive through paste
-    format!("pasted {} chars", a.text.len())
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    format!("entered {} chars", text.len())
+}
+
+fn paste_text(args: &str) -> String {
+    match serde_json::from_str::<TextArg>(args) {
+        Ok(a) => do_paste(&a.text),
+        Err(e) => format!("ERROR: bad args: {e}"),
+    }
 }
 
 // ── input simulation (app & window control) ────────────────────────────────
@@ -233,12 +296,7 @@ fn new_enigo() -> Result<Enigo, String> {
 }
 
 fn type_text(args: &str) -> String {
-    let a: TextArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
-    match enigo.text(&a.text) {
-        Ok(()) => format!("typed {} chars", a.text.len()),
-        Err(e) => format!("ERROR typing: {e}"),
-    }
+    paste_text(args) // route to the reliable clipboard paste
 }
 
 fn map_key(token: &str) -> Key {
