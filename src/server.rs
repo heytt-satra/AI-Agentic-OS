@@ -95,7 +95,26 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
         let mut tainted = false;
         let mut answered = false;
         for _ in 0..MAX_STEPS {
-            let reply = match st.provider.chat(&messages, Some(tools::definitions())).await {
+            // Streamed model call: content tokens go to the browser live.
+            let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let reply = {
+                let fut = st.provider.chat_stream(&messages, Some(tools::definitions()), dtx);
+                tokio::pin!(fut);
+                loop {
+                    tokio::select! {
+                        Some(piece) = drx.recv() => {
+                            let _ = send(&mut socket, serde_json::json!({"type":"delta","text":piece})).await;
+                        }
+                        r = &mut fut => {
+                            while let Ok(piece) = drx.try_recv() {
+                                let _ = send(&mut socket, serde_json::json!({"type":"delta","text":piece})).await;
+                            }
+                            break r;
+                        }
+                    }
+                }
+            };
+            let reply = match reply {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = send(&mut socket, serde_json::json!({"type":"error","text":format!("{e}")})).await;
@@ -134,7 +153,8 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
 
             let answer = reply.message.content.unwrap_or_else(|| "(no answer)".into());
             st.mem.log("assistant", &answer).await;
-            let _ = send(&mut socket, serde_json::json!({"type":"answer","text":answer})).await;
+            // Content was already streamed as deltas; just finalize the bubble.
+            let _ = send(&mut socket, serde_json::json!({"type":"done"})).await;
             answered = true;
             break;
         }
@@ -305,6 +325,7 @@ const log=document.getElementById('log'), input=document.getElementById('in'),
       toolEl=document.getElementById('tool'), connEl=document.getElementById('conn'),
       modelEl=document.getElementById('model');
 let state='idle';
+let cur=null; // the live answer bubble being streamed into
 
 // ── reactive orb: thin amber arcs, geometry encodes state (no glowing sphere)
 const cv=document.getElementById('orb'), ctx=cv.getContext('2d');
@@ -359,8 +380,10 @@ function connect(){
     if(m.type==='hello'){ modelEl.textContent='model: '+m.model; }
     else if(m.type==='state'){ if(m.state!=='speaking') state=m.state; }
     else if(m.type==='tool'){ flashTool(m.name); }
+    else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');} cur.textContent+=m.text; state='speaking'; log.scrollTop=log.scrollHeight; }
+    else if(m.type==='done'){ cur=null; state='idle'; }
     else if(m.type==='answer'){ typewriter(addMsg('jarvis','Jarvis'), m.text); }
-    else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; state='idle'; }
+    else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; state='idle'; }
     else if(m.type==='approval'){ showApproval(m); }
   };
 }
@@ -387,7 +410,7 @@ input.addEventListener('keydown',(e)=>{
     const text=input.value.trim();
     addMsg('user','You').textContent=text;
     ws.send(JSON.stringify({type:'user',text}));
-    input.value='';
+    input.value=''; cur=null;
   }
 });
 </script>

@@ -85,6 +85,7 @@ struct ChatRequest {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<Tool>>,
+    stream: bool,
 }
 
 #[derive(Deserialize)]
@@ -132,6 +133,7 @@ impl Provider {
             messages: messages.to_vec(),
             max_tokens: 1024,
             tools,
+            stream: false,
         };
         let url = format!("{}/chat/completions", self.base_url);
         let response = self
@@ -160,6 +162,112 @@ impl Provider {
         Ok(Reply {
             message: choice.message,
             finish_reason: choice.finish_reason.unwrap_or_default(),
+        })
+    }
+
+    // Streaming chat: forwards content tokens to `dtx` as they arrive (for the
+    // live HUD), accumulates tool_calls + full content, returns the Reply when
+    // the stream ends. Tool-call turns produce no content deltas.
+    pub async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: Option<Vec<Tool>>,
+        dtx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<Reply> {
+        use futures_util::StreamExt;
+        let body = ChatRequest {
+            model: self.model.clone(),
+            messages: messages.to_vec(),
+            max_tokens: 1024,
+            tools,
+            stream: true,
+        };
+        let url = format!("{}/chat/completions", self.base_url);
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", "https://lensr.in")
+            .header("X-Title", "Jarvis-OS")
+            .json(&body)
+            .send()
+            .await
+            .context("HTTP request failed")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("LLM API returned {status}: {text}");
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut content = String::new();
+        let mut finish = String::new();
+        // (id, name, args) accumulated per tool_call index across fragments
+        let mut tools_acc: Vec<(String, String, String)> = Vec::new();
+
+        while let Some(item) = stream.next().await {
+            let bytes = item.context("stream chunk error")?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(nl) = buffer.find('\n') {
+                let line: String = buffer.drain(..=nl).collect();
+                let line = line.trim();
+                let Some(data) = line.strip_prefix("data: ") else { continue };
+                if data == "[DONE]" {
+                    break;
+                }
+                let v: serde_json::Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let choice = &v["choices"][0];
+                if let Some(fr) = choice["finish_reason"].as_str() {
+                    finish = fr.to_string();
+                }
+                let delta = &choice["delta"];
+                if let Some(c) = delta["content"].as_str() {
+                    if !c.is_empty() {
+                        content.push_str(c);
+                        let _ = dtx.send(c.to_string());
+                    }
+                }
+                if let Some(tcs) = delta["tool_calls"].as_array() {
+                    for tc in tcs {
+                        let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                        while tools_acc.len() <= idx {
+                            tools_acc.push((String::new(), String::new(), String::new()));
+                        }
+                        if let Some(id) = tc["id"].as_str() {
+                            if !id.is_empty() { tools_acc[idx].0 = id.to_string(); }
+                        }
+                        if let Some(n) = tc["function"]["name"].as_str() {
+                            if !n.is_empty() { tools_acc[idx].1 = n.to_string(); }
+                        }
+                        if let Some(args) = tc["function"]["arguments"].as_str() {
+                            tools_acc[idx].2.push_str(args);
+                        }
+                    }
+                }
+            }
+        }
+
+        let tool_calls = if tools_acc.is_empty() {
+            None
+        } else {
+            Some(tools_acc.into_iter().map(|(id, name, arguments)| ToolCall {
+                id,
+                kind: "function".to_string(),
+                function: FunctionCall { name, arguments },
+            }).collect())
+        };
+        Ok(Reply {
+            message: Message {
+                role: "assistant".to_string(),
+                content: if content.is_empty() { None } else { Some(content) },
+                tool_calls,
+                tool_call_id: None,
+            },
+            finish_reason: finish,
         })
     }
 
