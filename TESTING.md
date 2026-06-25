@@ -72,6 +72,25 @@ Watch the **injection defense**: ask it to browse a page AND then do something
 risky in the same turn — even if you'd "always allowed" that action before, it
 will ask again (because the turn touched the web).
 
+## Second brain (activity tracking)
+When you run `cargo run` or `serve`, Jarvis tracks what you do in the background
+(focused app/window + clipboard) into its memory. Ask it:
+```
+what was I doing in the last hour?
+how much time did I spend in Premiere today?
+what did I copy earlier?
+```
+Controls (in `.env` or environment):
+- `JARVIS_TRACKING=off` — turn tracking off entirely.
+- `ACTIVITY_INTERVAL_SECS=5` — how often it samples the focused window (default 5).
+- `SCREENSHOT_INTERVAL_SECS=300` — also save periodic screenshots (default 0 = off).
+The daily digest (`cargo run -- digest`) now uses this to summarize your day.
+
+## Reliable typing into apps
+To put text into an app, ask naturally — Jarvis now does open_app -> wait ->
+paste (clipboard), which fixes the earlier garbled typing. Example:
+`open notepad and write "Lensr shoot Monday 9am"` (approve each step).
+
 ## Gotchas
 - Screen vision: set `OPENROUTER_VISION_MODEL` in `.env` (DeepSeek can't see).
 - Browser: needs Chrome or Edge installed (you have it).
