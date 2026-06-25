@@ -6,6 +6,7 @@
 
 mod activity;
 mod coder;
+mod dataset;
 mod embeddings;
 mod memory;
 mod policy;
@@ -89,6 +90,13 @@ async fn main() -> Result<()> {
         }
         Some("digest") => {
             run_digest(&provider, &mem).await;
+            return Ok(());
+        }
+        Some("dataset") => {
+            // Export the training dataset (own-model Stage 1).
+            //   jarvis dataset [output.jsonl]
+            let out = std::env::args().nth(2).unwrap_or_else(|| "jarvis-dataset.jsonl".to_string());
+            run_dataset_export(&mem, &out).await;
             return Ok(());
         }
         Some("serve") => {
@@ -194,6 +202,42 @@ async fn main() -> Result<()> {
 
     println!("\nGoodbye, sir.");
     Ok(())
+}
+
+// Own-model Stage 1: export everything Jarvis has collected into a labeled
+// JSONL training set, and print a summary so you can see the data growing.
+async fn run_dataset_export(mem: &MemoryHandle, out_path: &str) {
+    let messages = mem.all_messages().await;
+    let audit = mem.all_audit().await;
+    let (examples, stats) = dataset::build(&messages, &audit);
+
+    let jsonl = dataset::to_jsonl(&examples);
+    match std::fs::write(out_path, jsonl.as_bytes()) {
+        Ok(()) => {
+            println!("Wrote {} training examples to {out_path}", examples.len());
+            println!(
+                "  good: {}   neutral: {}   bad: {}   (skipped {} noise turns)",
+                stats.good, stats.neutral, stats.bad, stats.skipped
+            );
+            println!(
+                "  source: {} messages, {} tool-call audit rows",
+                messages.len(),
+                audit.len()
+            );
+            // Preview a representative example: the first one that actually used
+            // tools, falling back to the first example.
+            let preview = examples.iter().find(|e| !e.steps.is_empty()).or(examples.first());
+            if let Some(ex) = preview {
+                println!("\nExample (preview):");
+                if let Ok(pretty) = serde_json::to_string_pretty(ex) {
+                    for line in pretty.lines().take(28) {
+                        println!("  {line}");
+                    }
+                }
+            }
+        }
+        Err(e) => eprintln!("ERROR writing {out_path}: {e}"),
+    }
 }
 
 // One user turn = the agent loop until the model gives a final answer.

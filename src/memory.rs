@@ -29,6 +29,9 @@ enum MemCmd {
     LogActivity { kind: String, app: String, detail: String },
     ActivityRecent { n: i64, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
     ActivitySearch { query: String, n: i64, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
+    // Full-history dumps for the training-dataset exporter (Stage 1).
+    AllMessages { reply: oneshot::Sender<Vec<(i64, String, String)>> },
+    AllAudit { reply: oneshot::Sender<Vec<(i64, String, String, bool)>> },
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -187,6 +190,25 @@ impl MemoryHandle {
         }
         rx.await.unwrap_or_default()
     }
+
+    // Whole message history (ts, role, content) in chronological order, for the
+    // training-dataset exporter.
+    pub async fn all_messages(&self) -> Vec<(i64, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::AllMessages { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    // Whole audit history (ts, tool, args, ok) in chronological order.
+    pub async fn all_audit(&self) -> Vec<(i64, String, String, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::AllAudit { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
 }
 
 // ── Everything below runs ON the owner thread, with exclusive Connection access ─
@@ -336,7 +358,37 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let rows = query_activity(conn, Some(&query), n).unwrap_or_default();
             let _ = reply.send(rows);
         }
+        MemCmd::AllMessages { reply } => {
+            let rows = query_all_messages(conn).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::AllAudit { reply } => {
+            let rows = query_all_audit(conn).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
     }
+}
+
+// Full message history in chronological order (ts, role, content).
+fn query_all_messages(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
+    let mut stmt = conn.prepare("SELECT ts, role, content FROM messages ORDER BY id ASC")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+// Full audit history in chronological order (ts, tool, args, ok).
+fn query_all_audit(conn: &Connection) -> Result<Vec<(i64, String, String, bool)>> {
+    let mut stmt = conn.prepare("SELECT ts, tool, args, ok FROM audit ORDER BY id ASC")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)? != 0))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 fn query_activity(conn: &Connection, query: Option<&str>, n: i64) -> Result<Vec<(i64, String, String, String)>> {

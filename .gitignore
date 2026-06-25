@@ -10,3 +10,7 @@
 /jarvis.db
 /jarvis.db-wal
 /jarvis.db-shm
+
+# exported training data - private conversation history, never commit
+/jarvis-dataset.jsonl
+*.jsonl
