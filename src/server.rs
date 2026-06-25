@@ -226,87 +226,121 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>JARVIS</title>
 <style>
+  /* JARVIS-OS HUD - cleaner/minimal instrument aesthetic (see DESIGN.md)
+     amber = system, cyan = live data only, red = danger only. */
   :root{
-    --bg:#05080b; --panel:#0a0f14; --amber:#ffb000; --amber-dim:#a9791f;
-    --ink:#cfd8df; --dim:#5b6b76; --line:rgba(255,176,0,.16);
-    --mono:'SF Mono','JetBrains Mono','Cascadia Code',Consolas,ui-monospace,monospace;
+    --bg:#04060a; --surface:#0a0f14;
+    --amber:#ffb000; --amber-soft:#ffd98a; --amber-dim:#a9791f;
+    --cyan:#39d3c0; --red:#ff5c5c;
+    --ink:#cdd6df; --muted:#5d6b77; --line:rgba(255,176,0,.14);
+    --mono:'SF Mono','JetBrains Mono','Cascadia Code','Cascadia Mono',Consolas,ui-monospace,monospace;
   }
   *{box-sizing:border-box}
   html,body{height:100%;margin:0}
   body{
+    /* one very faint grid - calm, not a scanline field */
     background:
-      repeating-linear-gradient(0deg, transparent 0 38px, rgba(255,176,0,.025) 38px 39px),
-      repeating-linear-gradient(90deg, transparent 0 38px, rgba(255,176,0,.025) 38px 39px),
-      var(--bg);
+      repeating-linear-gradient(0deg, transparent 0 47px, rgba(255,176,0,.018) 47px 48px),
+      repeating-linear-gradient(90deg, transparent 0 47px, rgba(255,176,0,.018) 47px 48px),
+      radial-gradient(120% 120% at 50% 0%, #060a10 0%, var(--bg) 60%);
     color:var(--ink); font-family:var(--mono); display:flex; flex-direction:column;
-    overflow:hidden;
+    overflow:hidden; -webkit-font-smoothing:antialiased;
   }
+  /* bracket-framed viewport */
+  .frame{position:fixed; pointer-events:none; width:26px; height:26px; z-index:5;
+    border-color:var(--line); border-style:solid; border-width:0}
+  .frame.tl{top:16px; left:16px; border-top-width:1px; border-left-width:1px}
+  .frame.tr{top:16px; right:16px; border-top-width:1px; border-right-width:1px}
+  .frame.bl{bottom:16px; left:16px; border-bottom-width:1px; border-left-width:1px}
+  .frame.br{bottom:16px; right:16px; border-bottom-width:1px; border-right-width:1px}
+
   header{
     display:flex; align-items:center; justify-content:space-between;
-    padding:14px 22px; border-bottom:1px solid var(--line); letter-spacing:.5em;
-    font-size:13px; color:var(--amber); text-transform:uppercase;
+    padding:20px 34px 14px; font-size:15px; color:var(--amber);
+    text-transform:uppercase; letter-spacing:.5em;
   }
-  header .stat{letter-spacing:.08em; font-size:11px; color:var(--dim); display:flex; gap:18px}
-  header .dot{color:var(--amber)}
+  header .wm{font-weight:600}
+  header .stat{letter-spacing:.16em; font-size:10.5px; color:var(--muted);
+    text-transform:uppercase; display:flex; gap:22px}
+  header .stat b{color:var(--amber-dim); font-weight:400}
+  #conn .dot{color:var(--cyan)}
+
   main{flex:1; display:flex; flex-direction:column; align-items:center; min-height:0}
-  #orbWrap{padding:18px 0 6px; position:relative}
+  #orbWrap{padding:14px 0 2px; position:relative}
   canvas{display:block}
-  #tool{height:16px; font-size:11px; letter-spacing:.18em; color:var(--amber-dim);
-    text-transform:uppercase; opacity:0; transition:opacity .25s}
+  #tool{height:15px; font-size:10.5px; letter-spacing:.22em; color:var(--cyan);
+    text-transform:uppercase; opacity:0; transition:opacity .3s}
+  #state{height:14px; font-size:10px; letter-spacing:.3em; color:var(--muted);
+    text-transform:uppercase; margin-top:2px}
+
   #log{
-    width:min(880px,92vw); flex:1; overflow-y:auto; padding:10px 4px 8px;
-    display:flex; flex-direction:column; gap:14px; scrollbar-width:thin;
+    width:min(900px,90vw); flex:1; overflow-y:auto; padding:14px 4px 10px;
+    display:flex; flex-direction:column; gap:18px; scrollbar-width:thin;
+    scrollbar-color:var(--line) transparent;
   }
-  .msg{font-size:14px; line-height:1.55; white-space:pre-wrap; word-wrap:break-word}
-  .msg .who{font-size:10px; letter-spacing:.2em; text-transform:uppercase; color:var(--dim); display:block; margin-bottom:3px}
-  .user .who{color:var(--dim)}
+  #log::-webkit-scrollbar{width:6px}
+  #log::-webkit-scrollbar-thumb{background:var(--line)}
+  .msg{font-size:14px; line-height:1.55; white-space:pre-wrap; word-wrap:break-word;
+    animation:rise .4s ease-out both}
+  @keyframes rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
+  .msg .who{font-size:10px; letter-spacing:.24em; text-transform:uppercase;
+    color:var(--muted); display:block; margin-bottom:5px}
   .user .body{color:var(--ink)}
   .jarvis .who{color:var(--amber)}
-  .jarvis .body{color:#ffd98a}
-  .err .body{color:#ff6b6b}
-  footer{width:min(880px,92vw); padding:12px 0 22px}
+  .jarvis .body{color:var(--amber-soft)}
+  .err .who{color:var(--red)}
+  .err .body{color:var(--red)}
+
+  footer{width:min(900px,90vw); padding:12px 0 26px}
   .inbar{
-    display:flex; align-items:center; gap:10px; border:1px solid var(--line);
-    background:var(--panel); padding:12px 14px; transition:border-color .2s, box-shadow .2s;
+    display:flex; align-items:center; gap:12px; border:1px solid var(--line);
+    border-radius:2px; background:var(--surface); padding:13px 16px;
+    transition:border-color .2s, box-shadow .2s;
   }
-  .inbar:focus-within{border-color:var(--amber); box-shadow:0 0 0 1px rgba(255,176,0,.25)}
+  .inbar:focus-within{border-color:var(--amber); box-shadow:0 0 0 1px rgba(255,176,0,.2)}
   .inbar .chev{color:var(--amber)}
   input{
     flex:1; background:transparent; border:0; outline:0; color:var(--ink);
     font-family:var(--mono); font-size:14px; caret-color:var(--amber);
   }
-  input::placeholder{color:var(--dim)}
-  #approvalWrap{position:absolute;inset:0;background:rgba(3,5,8,.8);display:none;
-    align-items:center;justify-content:center}
+  input::placeholder{color:var(--muted)}
+
+  #approvalWrap{position:fixed;inset:0;background:rgba(2,4,7,.82);display:none;
+    align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(2px)}
   #approvalWrap.show{display:flex}
-  .approval{width:min(520px,90vw);border:1px solid var(--amber);background:#0a0f14;padding:20px 22px}
-  .approval .h{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--amber);margin-bottom:10px}
-  .approval .lbl{font-size:14px;color:#ffd98a;word-break:break-word;margin-bottom:6px}
-  .approval .warn{font-size:11px;color:#ff9b6b;margin-bottom:14px;min-height:14px}
+  .approval{width:min(520px,90vw);border:1px solid var(--red);border-radius:2px;
+    background:var(--surface);padding:22px 24px}
+  .approval .h{font-size:10.5px;letter-spacing:.24em;text-transform:uppercase;
+    color:var(--red);margin-bottom:12px}
+  .approval .lbl{font-size:14px;color:var(--amber-soft);word-break:break-word;margin-bottom:6px}
+  .approval .warn{font-size:11px;color:var(--red);margin-bottom:16px;min-height:14px}
   .approval .btns{display:flex;gap:10px}
-  .approval button{flex:1;font-family:var(--mono);font-size:12px;letter-spacing:.08em;
-    text-transform:uppercase;padding:10px;background:transparent;color:var(--ink);
-    border:1px solid var(--line);cursor:pointer;transition:.15s}
+  .approval button{flex:1;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+    text-transform:uppercase;padding:11px;background:transparent;color:var(--ink);
+    border:1px solid var(--line);border-radius:2px;cursor:pointer;transition:.15s}
   .approval button:hover{border-color:var(--amber);color:var(--amber)}
-  .approval button.deny:hover{border-color:#ff6b6b;color:#ff6b6b}
+  .approval button.deny:hover{border-color:var(--red);color:var(--red)}
 </style>
 </head>
 <body>
+  <div class="frame tl"></div><div class="frame tr"></div>
+  <div class="frame bl"></div><div class="frame br"></div>
   <header>
-    <span>J&nbsp;A&nbsp;R&nbsp;V&nbsp;I&nbsp;S</span>
+    <span class="wm">JARVIS</span>
     <span class="stat">
-      <span id="model">model: …</span>
-      <span id="conn"><span class="dot">●</span> connecting</span>
+      <span id="model">MODEL <b>…</b></span>
+      <span id="conn"><span class="dot">●</span> CONNECTING</span>
     </span>
   </header>
   <main>
     <div id="orbWrap"><canvas id="orb" width="260" height="260"></canvas></div>
     <div id="tool"></div>
+    <div id="state">STANDBY</div>
     <div id="log"></div>
     <footer>
       <div class="inbar">
         <span class="chev">&gt;</span>
-        <input id="in" autocomplete="off" placeholder="Speak to Jarvis…" autofocus/>
+        <input id="in" autocomplete="off" placeholder="Speak to Jarvis" autofocus/>
       </div>
     </footer>
   </main>
@@ -323,32 +357,53 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <script>
 const log=document.getElementById('log'), input=document.getElementById('in'),
       toolEl=document.getElementById('tool'), connEl=document.getElementById('conn'),
-      modelEl=document.getElementById('model');
+      modelEl=document.getElementById('model'), stateEl=document.getElementById('state');
 let state='idle';
 let cur=null, curRaw=''; // the live answer bubble + its raw accumulated text
 function plainify(s){return s.replace(/\*\*/g,'').replace(/__/g,'').replace(/—/g,' - ').replace(/–/g,'-').replace(/^#{1,6}\s*/gm,'').replace(/^\s*[\*\-]\s+/gm,'- ');}
+const STATE_LABEL={idle:'STANDBY',thinking:'THINKING',working:'WORKING',speaking:'RESPONDING'};
+function setState(s){ state=s; stateEl.textContent=STATE_LABEL[s]||'STANDBY'; }
 
-// ── reactive orb: thin amber arcs, geometry encodes state (no glowing sphere)
+// ── arc-reactor orb: calm by default, geometry encodes state.
+//    amber structure + a single cyan live-ring. Restrained motion.
 const cv=document.getElementById('orb'), ctx=cv.getContext('2d');
 const cx=130, cy=130; let t=0;
-function speed(){return state==='thinking'?3.2:state==='working'?2.2:state==='speaking'?1.4:0.5;}
+function speed(){return state==='thinking'?1.9:state==='working'?1.4:state==='speaking'?1.0:0.35;}
+function amber(a){return 'rgba(255,176,0,'+a+')';}
+function cyan(a){return 'rgba(57,211,192,'+a+')';}
 function draw(){
   t+=0.016*speed();
   ctx.clearRect(0,0,260,260);
-  const rings=[ {r:46,seg:0.7,dir:1,w:2}, {r:66,seg:0.45,dir:-1,w:1.5},
-                {r:88,seg:0.6,dir:1,w:1}, {r:108,seg:0.3,dir:-1,w:1} ];
-  const pulse = state==='idle' ? 0.6+0.18*Math.sin(t*1.6)
-              : state==='speaking' ? 0.7+0.3*Math.abs(Math.sin(t*5))
-              : 0.85;
-  rings.forEach((rg,i)=>{
-    const a0=t*rg.dir + i*1.1, a1=a0+Math.PI*2*rg.seg;
+  const active = state!=='idle';
+  const breathe = 0.5+0.5*Math.sin(t*(active?2.4:1.0)); // 0..1
+
+  // faint tick ring (the reactor bezel) - static, structural
+  const ticks=60;
+  for(let i=0;i<ticks;i++){
+    const a=i/ticks*Math.PI*2, big=(i%5===0);
+    const r0=big?100:104, r1=110;
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*r0, cy+Math.sin(a)*r0);
+    ctx.lineTo(cx+Math.cos(a)*r1, cy+Math.sin(a)*r1);
+    ctx.strokeStyle=amber(big?0.22:0.10); ctx.lineWidth=1; ctx.stroke();
+  }
+  // two thin amber arcs, slow counter-rotation
+  const arcs=[{r:84,seg:0.62,dir:1,w:1.5},{r:64,seg:0.4,dir:-1,w:1}];
+  arcs.forEach((rg,i)=>{
+    const a0=t*rg.dir+i*1.4, a1=a0+Math.PI*2*rg.seg;
     ctx.beginPath(); ctx.arc(cx,cy,rg.r,a0,a1);
-    ctx.strokeStyle='rgba(255,176,0,'+(0.25+0.6*pulse*(1-i*0.18))+')';
-    ctx.lineWidth=rg.w; ctx.stroke();
+    ctx.strokeStyle=amber(0.4+0.35*breathe); ctx.lineWidth=rg.w; ctx.stroke();
   });
-  // core aperture
-  ctx.beginPath(); ctx.arc(cx,cy,14+ (state!=='idle'?2*Math.sin(t*6):0),0,Math.PI*2);
-  ctx.strokeStyle='rgba(255,176,0,'+(0.5+0.5*pulse)+')'; ctx.lineWidth=2; ctx.stroke();
+  // cyan live-ring: the "alive" signal. dim at idle, present when active.
+  const live = active ? 0.55+0.4*breathe : 0.16+0.08*breathe;
+  ctx.beginPath(); ctx.arc(cx,cy,46,0,Math.PI*2);
+  ctx.strokeStyle=cyan(live); ctx.lineWidth=1.5; ctx.stroke();
+  // core aperture (amber), gentle breath
+  const cr=15+(active?2.5*breathe:1.2*breathe);
+  ctx.beginPath(); ctx.arc(cx,cy,cr,0,Math.PI*2);
+  ctx.strokeStyle=amber(0.55+0.4*breathe); ctx.lineWidth=2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy,cr*0.42,0,Math.PI*2);
+  ctx.fillStyle=cyan(active?0.5*breathe:0.12); ctx.fill();
   requestAnimationFrame(draw);
 }
 draw();
@@ -360,31 +415,31 @@ function addMsg(cls, who){
   return d.querySelector('.body');
 }
 function typewriter(el, text){
-  let i=0; state='speaking';
+  let i=0; setState('speaking');
   (function step(){
     if(i<=text.length){ el.textContent=text.slice(0,i); i+=Math.max(1,Math.round(text.length/220));
       log.scrollTop=log.scrollHeight; setTimeout(step,12);}
-    else { state='idle'; }
+    else { setState('idle'); }
   })();
 }
 function flashTool(name){ toolEl.textContent='◢ '+name; toolEl.style.opacity=1;
-  clearTimeout(flashTool._t); flashTool._t=setTimeout(()=>toolEl.style.opacity=0,1600); }
+  clearTimeout(flashTool._t); flashTool._t=setTimeout(()=>toolEl.style.opacity=0,1800); }
 
 // ── websocket
 let ws;
 function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-  ws.onopen=()=>{connEl.innerHTML='<span class="dot">●</span> online';};
-  ws.onclose=()=>{connEl.innerHTML='<span class="dot" style="color:#ff6b6b">●</span> offline'; setTimeout(connect,1500);};
+  ws.onopen=()=>{connEl.innerHTML='<span class="dot">●</span> ONLINE';};
+  ws.onclose=()=>{connEl.innerHTML='<span class="dot" style="color:var(--red)">●</span> OFFLINE'; setTimeout(connect,1500);};
   ws.onmessage=(e)=>{
     const m=JSON.parse(e.data);
-    if(m.type==='hello'){ modelEl.textContent='model: '+m.model; }
-    else if(m.type==='state'){ if(m.state!=='speaking') state=m.state; }
+    if(m.type==='hello'){ modelEl.innerHTML='MODEL <b>'+m.model+'</b>'; }
+    else if(m.type==='state'){ if(m.state!=='speaking') setState(m.state); }
     else if(m.type==='tool'){ flashTool(m.name); }
-    else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); state='speaking'; log.scrollTop=log.scrollHeight; }
-    else if(m.type==='done'){ cur=null; curRaw=''; state='idle'; }
+    else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); setState('speaking'); log.scrollTop=log.scrollHeight; }
+    else if(m.type==='done'){ cur=null; curRaw=''; setState('idle'); }
     else if(m.type==='answer'){ typewriter(addMsg('jarvis','Jarvis'), plainify(m.text)); }
-    else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; state='idle'; }
+    else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; setState('idle'); }
     else if(m.type==='approval'){ showApproval(m); }
   };
 }
