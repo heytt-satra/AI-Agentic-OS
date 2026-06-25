@@ -33,12 +33,15 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         "fetch_url" => (false, field("url"), format!("fetch {}", field("url"))),
         "browse_url" => (false, field("url"), format!("browse {}", field("url"))),
         "get_current_time" => (false, String::new(), "check the time".into()),
+        "wait" => (false, String::new(), "wait".into()),
 
         // --- ask: changes the system / world ---
         "run_shell" => (true, field("command"), format!("run shell: {}", field("command"))),
         "write_file" => (true, field("path"), format!("write file {}", field("path"))),
         "delete_path" => (true, field("path"), format!("DELETE {}", field("path"))),
         "open_path" => (true, field("target"), format!("open {}", field("target"))),
+        "open_app" => (true, field("name"), format!("launch app: {}", field("name"))),
+        "paste_text" => (true, field("text"), format!("paste: {}", field("text").chars().take(40).collect::<String>())),
         "type_text" => (true, field("text"), format!("type: {}", field("text").chars().take(40).collect::<String>())),
         "press_keys" => (true, field("combo"), format!("press keys: {}", field("combo"))),
         "mouse_click" => {

@@ -28,7 +28,11 @@ pub fn definitions() -> Vec<Tool> {
         f("delete_path", "Delete a file or folder. Requires approval. Irreversible.", str_prop("path", "path to delete")),
         f("open_path", "Open an app, file, or URL with the OS default handler. Requires approval.", str_prop("target", "app name, file path, or URL")),
         f("run_shell", "Run any shell command on this machine (PowerShell on Windows). Requires approval. This is the universal tool — file ops, apps, system settings, installs, automation.", str_prop("command", "the command")),
-        f("type_text", "Type text into whatever app/window is currently focused. Requires approval.", str_prop("text", "the text to type")),
+        f("open_app", "Launch an application by name (e.g. 'notepad', 'chrome', 'code'). Resolves via the OS so it works for installed apps. Requires approval. Use this for apps; use open_path for files/URLs.", str_prop("name", "application name")),
+        f("wait", "Pause for N seconds. Use after opening an app to let it appear and take focus before typing.",
+          serde_json::json!({"type":"object","properties":{"seconds":{"type":"integer"}},"required":["seconds"]})),
+        f("paste_text", "Type text reliably by pasting it (clipboard + Ctrl+V) into the focused app. PREFER THIS over type_text for any real text. Requires approval.", str_prop("text", "the text to paste")),
+        f("type_text", "Type text key-by-key into the focused app (use only for special cases; prefer paste_text). Requires approval.", str_prop("text", "the text to type")),
         f("press_keys", "Press a keyboard shortcut into the focused window, e.g. 'ctrl+s', 'alt+tab', 'enter'. Requires approval.", str_prop("combo", "key combo like ctrl+s")),
         f("mouse_click", "Move the mouse to screen coords (x,y) and left-click. Requires approval. Use with screen vision to know where to click.",
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
@@ -50,6 +54,9 @@ pub async fn execute(name: &str, args_json: &str) -> String {
         "delete_path" => delete_path(args_json),
         "open_path" => open_path(args_json),
         "run_shell" => run_shell(args_json),
+        "open_app" => open_app(args_json),
+        "wait" => wait_tool(args_json).await,
+        "paste_text" => paste_text(args_json),
         "type_text" => type_text(args_json),
         "press_keys" => press_keys(args_json),
         "mouse_click" => mouse_click(args_json),
@@ -160,6 +167,51 @@ fn run_shell(args: &str) -> String {
         }
         Err(e) => format!("ERROR running command: {e}"),
     }
+}
+
+// ── app launch / wait / reliable paste ──────────────────────────────────────
+#[derive(Deserialize)]
+struct NameArg { name: String }
+#[derive(Deserialize)]
+struct SecondsArg { seconds: u64 }
+
+fn open_app(args: &str) -> String {
+    let a: NameArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    // Start-Process resolves installed apps + anything on PATH, and errors
+    // clearly if the app isn't found (unlike the silent `start`).
+    let escaped = a.name.replace('\'', "''");
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("Start-Process '{escaped}'")])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => format!("launched {}", a.name),
+        Ok(o) => format!("ERROR: couldn't launch '{}': {}", a.name, String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
+        Err(e) => format!("ERROR launching {}: {e}", a.name),
+    }
+}
+
+async fn wait_tool(args: &str) -> String {
+    let a: SecondsArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let secs = a.seconds.min(15);
+    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    format!("waited {secs}s")
+}
+
+// Reliable text entry: put the text on the clipboard, then send Ctrl+V. Avoids
+// the stuck/repeated-key problems of per-character simulation.
+fn paste_text(args: &str) -> String {
+    let a: TextArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let mut clipboard = match arboard::Clipboard::new() { Ok(c) => c, Err(e) => return format!("ERROR: clipboard: {e}") };
+    if let Err(e) = clipboard.set_text(a.text.clone()) {
+        return format!("ERROR: set clipboard: {e}");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400)); // let focus settle
+    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+    let _ = enigo.key(Key::Control, Direction::Press);
+    let _ = enigo.key(Key::Unicode('v'), Direction::Click);
+    let _ = enigo.key(Key::Control, Direction::Release);
+    std::thread::sleep(std::time::Duration::from_millis(100)); // keep clipboard alive through paste
+    format!("pasted {} chars", a.text.len())
 }
 
 // ── input simulation (app & window control) ────────────────────────────────
