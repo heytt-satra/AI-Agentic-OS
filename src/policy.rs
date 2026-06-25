@@ -38,6 +38,13 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         "write_file" => (true, field("path"), format!("write file {}", field("path"))),
         "delete_path" => (true, field("path"), format!("DELETE {}", field("path"))),
         "open_path" => (true, field("target"), format!("open {}", field("target"))),
+        "type_text" => (true, field("text"), format!("type: {}", field("text").chars().take(40).collect::<String>())),
+        "press_keys" => (true, field("combo"), format!("press keys: {}", field("combo"))),
+        "mouse_click" => {
+            let x = v.get("x").and_then(|x| x.as_i64()).unwrap_or(0);
+            let y = v.get("y").and_then(|x| x.as_i64()).unwrap_or(0);
+            (true, format!("{x},{y}"), format!("click at {x},{y}"))
+        }
 
         // unknown tools default to ASK (safe default)
         other => (true, String::new(), format!("run unknown tool '{other}'")),

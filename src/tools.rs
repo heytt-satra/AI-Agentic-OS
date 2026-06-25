@@ -9,6 +9,7 @@
 // execute() returns a plain result string fed back to the model.
 
 use crate::provider::{FunctionDef, Tool};
+use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::Deserialize;
 
 pub fn definitions() -> Vec<Tool> {
@@ -27,6 +28,10 @@ pub fn definitions() -> Vec<Tool> {
         f("delete_path", "Delete a file or folder. Requires approval. Irreversible.", str_prop("path", "path to delete")),
         f("open_path", "Open an app, file, or URL with the OS default handler. Requires approval.", str_prop("target", "app name, file path, or URL")),
         f("run_shell", "Run any shell command on this machine (PowerShell on Windows). Requires approval. This is the universal tool — file ops, apps, system settings, installs, automation.", str_prop("command", "the command")),
+        f("type_text", "Type text into whatever app/window is currently focused. Requires approval.", str_prop("text", "the text to type")),
+        f("press_keys", "Press a keyboard shortcut into the focused window, e.g. 'ctrl+s', 'alt+tab', 'enter'. Requires approval.", str_prop("combo", "key combo like ctrl+s")),
+        f("mouse_click", "Move the mouse to screen coords (x,y) and left-click. Requires approval. Use with screen vision to know where to click.",
+          serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
     ]
@@ -41,6 +46,9 @@ pub async fn execute(name: &str, args_json: &str) -> String {
         "delete_path" => delete_path(args_json),
         "open_path" => open_path(args_json),
         "run_shell" => run_shell(args_json),
+        "type_text" => type_text(args_json),
+        "press_keys" => press_keys(args_json),
+        "mouse_click" => mouse_click(args_json),
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
         other => format!("ERROR: unknown tool '{other}'"),
@@ -144,6 +152,68 @@ fn run_shell(args: &str) -> String {
             s
         }
         Err(e) => format!("ERROR running command: {e}"),
+    }
+}
+
+// ── input simulation (app & window control) ────────────────────────────────
+#[derive(Deserialize)]
+struct TextArg { text: String }
+#[derive(Deserialize)]
+struct ComboArg { combo: String }
+#[derive(Deserialize)]
+struct ClickArgs { x: i32, y: i32 }
+
+fn new_enigo() -> Result<Enigo, String> {
+    Enigo::new(&Settings::default()).map_err(|e| format!("ERROR: input device: {e}"))
+}
+
+fn type_text(args: &str) -> String {
+    let a: TextArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+    match enigo.text(&a.text) {
+        Ok(()) => format!("typed {} chars", a.text.len()),
+        Err(e) => format!("ERROR typing: {e}"),
+    }
+}
+
+fn map_key(token: &str) -> Key {
+    match token {
+        "ctrl" | "control" => Key::Control,
+        "alt" => Key::Alt,
+        "shift" => Key::Shift,
+        "win" | "meta" | "cmd" | "super" => Key::Meta,
+        "enter" | "return" => Key::Return,
+        "tab" => Key::Tab,
+        "esc" | "escape" => Key::Escape,
+        "space" => Key::Space,
+        "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
+        other => Key::Unicode(other.chars().next().unwrap_or(' ')),
+    }
+}
+fn is_modifier(t: &str) -> bool {
+    matches!(t, "ctrl" | "control" | "alt" | "shift" | "win" | "meta" | "cmd" | "super")
+}
+
+fn press_keys(args: &str) -> String {
+    let a: ComboArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+    let parts: Vec<String> = a.combo.split('+').map(|s| s.trim().to_lowercase()).collect();
+    let mods: Vec<Key> = parts.iter().filter(|p| is_modifier(p)).map(|p| map_key(p)).collect();
+    let finals: Vec<Key> = parts.iter().filter(|p| !is_modifier(p)).map(|p| map_key(p)).collect();
+    for m in &mods { let _ = enigo.key(*m, Direction::Press); }
+    for k in &finals { let _ = enigo.key(*k, Direction::Click); }
+    for m in mods.iter().rev() { let _ = enigo.key(*m, Direction::Release); }
+    format!("pressed {}", a.combo)
+}
+
+fn mouse_click(args: &str) -> String {
+    let a: ClickArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+    let _ = enigo.move_mouse(a.x, a.y, Coordinate::Abs);
+    match enigo.button(Button::Left, Direction::Click) {
+        Ok(()) => format!("clicked at {},{}", a.x, a.y),
+        Err(e) => format!("ERROR clicking: {e}"),
     }
 }
 
