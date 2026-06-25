@@ -100,6 +100,8 @@ struct Choice {
 
 // ── The Provider itself ─────────────────────────────────────────────────────
 // Holds the HTTP client + config. Built once, reused for every call.
+// Clone is cheap: reqwest::Client is an Arc internally; the strings are small.
+#[derive(Clone)]
 pub struct Provider {
     client: reqwest::Client,
     api_key: String,

@@ -12,6 +12,7 @@ use anyhow::Result;
 use memory::MemoryHandle;
 use provider::{Message, Provider};
 use std::io::{self, Write};
+use std::time::Duration;
 
 const MAX_STEPS: u32 = 8;
 
@@ -36,6 +37,35 @@ async fn main() -> Result<()> {
 
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
+
+    // `jarvis once` = run a single heartbeat tick and exit. This is the cron /
+    // OpenClaw-style path: spin up, do the checklist, terminate (token-cheap).
+    if std::env::args().nth(1).as_deref() == Some("once") {
+        run_heartbeat(&provider, &mem).await;
+        return Ok(());
+    }
+
+    // Otherwise: start the background heartbeat ticker, then run the REPL.
+    // Both the ticker task and the REPL share the provider (cloned) and the
+    // memory handle (cloned) — safe because memory is an actor.
+    let hb_secs: u64 = std::env::var("HEARTBEAT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800); // default 30 min
+    {
+        let p = provider.clone();
+        let m = mem.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(hb_secs));
+            ticker.tick().await; // the first tick fires immediately; skip it so
+                                 // we wait one full interval before the first run
+            loop {
+                ticker.tick().await;
+                run_heartbeat(&p, &m).await;
+            }
+        });
+    }
+    println!("(heartbeat every {hb_secs}s)");
 
     println!("Jarvis online ({}).", provider.model());
     println!(
@@ -122,4 +152,25 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         return Ok(answer);
     }
     anyhow::bail!("hit MAX_STEPS ({MAX_STEPS}) without finishing")
+}
+
+// One heartbeat tick: read the checklist, run the agent on it, brief the user.
+async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
+    let checklist = std::fs::read_to_string("HEARTBEAT.md")
+        .unwrap_or_else(|_| "Search the news for the latest in AI.".to_string());
+
+    let mut messages = vec![
+        Message::system(PERSONA),
+        Message::user(format!(
+            "HEARTBEAT: scheduled self-check. Work the checklist below with your tools, \
+             then give a SHORT briefing (a few lines max). If nothing's notable, say so.\n\n{checklist}"
+        )),
+    ];
+    mem.log("user", "[heartbeat tick]").await;
+    tracing::info!("heartbeat tick");
+
+    match run_turn(provider, mem, &mut messages).await {
+        Ok(answer) => println!("\n[heartbeat] {answer}\n"),
+        Err(e) => eprintln!("[heartbeat] error: {e}"),
+    }
 }
