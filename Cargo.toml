@@ -27,10 +27,17 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 xcap = "0.9.6"
 
-# Release builds: optimize for speed + size, strip symbols. The result is a
-# single self-contained executable per OS (SQLite + TLS are compiled in).
+# Release builds: optimized + self-contained, but NOT max-LTO (that made builds
+# take ~7 min). "thin" LTO is ~as fast at runtime and links much quicker.
 [profile.release]
 opt-level = 3
-lto = true        # link-time optimization: smaller, faster binary
-strip = true      # remove debug symbols (much smaller file)
-codegen-units = 1 # better optimization at the cost of slower compile
+lto = "thin"
+strip = true
+# (no codegen-units=1 — let cargo parallelize for faster builds)
+
+# THE FAST-ITERATION TRICK: compile DEPENDENCIES optimized even in debug builds,
+# while your own code stays a quick debug compile. Result: `cargo run` (debug)
+# builds in seconds AND candle/embeddings run fast. The first build after this
+# change recompiles deps once (slow), then every build is fast.
+[profile.dev.package."*"]
+opt-level = 3

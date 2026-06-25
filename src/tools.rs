@@ -37,6 +37,7 @@ pub fn definitions() -> Vec<Tool> {
         f("mouse_click", "Move the mouse to screen coords (x,y) and left-click. Requires approval. Use with screen vision to know where to click.",
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
+        f("click_on", "See the screen and click on a described UI element (e.g. 'the Save button', 'the search box'). Screenshots, locates it with vision, then clicks. Requires approval. This is the reliable way to click things.", str_prop("target", "what to click, in plain words")),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
         f("browse_js", "Open a URL in a headless browser and run a JavaScript snippet on the page (click, fill forms, extract data). Requires approval. Return value is sent back.",
           serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
@@ -65,6 +66,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "press_keys" => press_keys(args_json),
         "mouse_click" => mouse_click(args_json),
         "see_screen" => see_screen(args_json).await,
+        "click_on" => click_on(args_json).await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -287,26 +289,24 @@ struct VisionArg { question: String }
 // Sync helper: capture + encode the screen to a base64 data URL. ALL the
 // non-Send types (Monitor, image) live and die here, so the async caller's
 // future stays Send (required by spawned tasks).
-fn screenshot_data_url() -> Result<String, String> {
+fn screenshot_data_url() -> Result<(String, u32, u32), String> {
     use base64::Engine as _;
     let monitors = xcap::Monitor::all().map_err(|e| format!("ERROR: screen capture: {e}"))?;
     let monitor = monitors.into_iter().next().ok_or("ERROR: no monitor found")?;
     let img = monitor.capture_image().map_err(|e| format!("ERROR capturing screen: {e}"))?;
+    let (w, h) = (img.width(), img.height());
     let mut bytes: Vec<u8> = Vec::new();
     let dynimg = xcap::image::DynamicImage::ImageRgba8(img);
     let mut cursor = std::io::Cursor::new(&mut bytes);
     dynimg
         .write_to(&mut cursor, xcap::image::ImageFormat::Png)
         .map_err(|e| format!("ERROR encoding screenshot: {e}"))?;
-    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)))
+    let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+    Ok((url, w, h))
 }
 
-async fn see_screen(args: &str) -> String {
-    let a: VisionArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-
-    let data_url = match screenshot_data_url() { Ok(u) => u, Err(e) => return e };
-
-    // ask a VISION model about it (via OpenRouter)
+// Reusable: ask a vision model a question about an image (returns text or ERROR).
+async fn vision_ask(data_url: &str, prompt: &str) -> String {
     let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
     if key.is_empty() {
         return "ERROR: OPENROUTER_API_KEY not set".into();
@@ -316,7 +316,7 @@ async fn see_screen(args: &str) -> String {
         "model": model,
         "max_tokens": 700,
         "messages": [{ "role": "user", "content": [
-            { "type": "text", "text": a.question },
+            { "type": "text", "text": prompt },
             { "type": "image_url", "image_url": { "url": data_url } }
         ]}]
     });
@@ -329,20 +329,60 @@ async fn see_screen(args: &str) -> String {
         .json(&body)
         .send()
         .await;
-    let text = match resp {
+    match resp {
         Ok(r) => {
             let s = r.status();
             let t = r.text().await.unwrap_or_default();
             if !s.is_success() {
                 return format!("ERROR vision {s}: {} (set OPENROUTER_VISION_MODEL to a vision-capable model)", t.chars().take(300).collect::<String>());
             }
-            t
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+            v["choices"][0]["message"]["content"].as_str().unwrap_or("(no vision response)").to_string()
         }
-        Err(e) => return format!("ERROR vision request: {e}"),
-    };
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-    let answer = v["choices"][0]["message"]["content"].as_str().unwrap_or("(no vision response)");
+        Err(e) => format!("ERROR vision request: {e}"),
+    }
+}
+
+async fn see_screen(args: &str) -> String {
+    let a: VisionArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let (data_url, _w, _h) = match screenshot_data_url() { Ok(x) => x, Err(e) => return e };
+    let answer = vision_ask(&data_url, &a.question).await;
+    if answer.starts_with("ERROR") { return answer; }
     format!("Screen analysis: {answer}")
+}
+
+// ── see-then-act: screenshot, ask vision for coordinates, then click ─────────
+#[derive(Deserialize)]
+struct ClickOnArg { target: String }
+
+fn extract_xy(s: &str) -> Option<(i64, i64)> {
+    // The model may wrap JSON in prose/code fences; grab the first {...}.
+    let start = s.find('{')?;
+    let end = s[start..].find('}')? + start + 1;
+    let v: serde_json::Value = serde_json::from_str(&s[start..end]).ok()?;
+    Some((v.get("x")?.as_i64()?, v.get("y")?.as_i64()?))
+}
+
+async fn click_on(args: &str) -> String {
+    let a: ClickOnArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let (data_url, w, h) = match screenshot_data_url() { Ok(x) => x, Err(e) => return e };
+    let prompt = format!(
+        "This is a {w}x{h} pixel screenshot. Find the UI element that best matches: \"{}\". \
+         Reply with ONLY JSON giving the pixel coordinates of its CENTER to click: \
+         {{\"x\":<int>,\"y\":<int>}}. If it is not visible, reply {{\"x\":-1,\"y\":-1}}.",
+        a.target
+    );
+    let ans = vision_ask(&data_url, &prompt).await;
+    if ans.starts_with("ERROR") { return ans; }
+    match extract_xy(&ans) {
+        Some((x, y)) if x >= 0 && y >= 0 => {
+            let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+            let _ = enigo.move_mouse(x as i32, y as i32, Coordinate::Abs);
+            let _ = enigo.button(Button::Left, Direction::Click);
+            format!("clicked '{}' at {x},{y}", a.target)
+        }
+        _ => format!("Could not locate '{}' on screen (vision: {})", a.target, ans.chars().take(120).collect::<String>()),
+    }
 }
 
 // ── browser automation (real headless Chrome via CDP) ───────────────────────

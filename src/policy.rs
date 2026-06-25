@@ -51,6 +51,7 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
             (true, format!("{x},{y}"), format!("click at {x},{y}"))
         }
         "see_screen" => (true, String::new(), "screenshot your screen and send it to a vision model".into()),
+        "click_on" => (true, field("target"), format!("see the screen and click '{}'", field("target"))),
         "browse_js" => (true, field("url"), format!("run JavaScript on {}", field("url"))),
 
         // unknown tools default to ASK (safe default)
