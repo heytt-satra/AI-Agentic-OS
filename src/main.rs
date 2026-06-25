@@ -38,11 +38,19 @@ async fn main() -> Result<()> {
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
 
-    // `jarvis once` = run a single heartbeat tick and exit. This is the cron /
-    // OpenClaw-style path: spin up, do the checklist, terminate (token-cheap).
-    if std::env::args().nth(1).as_deref() == Some("once") {
-        run_heartbeat(&provider, &mem).await;
-        return Ok(());
+    // Sub-commands that run once and exit (cron-friendly):
+    //   jarvis once    -> a single heartbeat tick
+    //   jarvis digest  -> review recent activity, write a daily digest
+    match std::env::args().nth(1).as_deref() {
+        Some("once") => {
+            run_heartbeat(&provider, &mem).await;
+            return Ok(());
+        }
+        Some("digest") => {
+            run_digest(&provider, &mem).await;
+            return Ok(());
+        }
+        _ => {}
     }
 
     // Otherwise: start the background heartbeat ticker, then run the REPL.
@@ -127,6 +135,11 @@ async fn main() -> Result<()> {
             Ok(answer) => println!("Jarvis: {answer}\n"),
             Err(e) => println!("Jarvis: (something went wrong: {e})\n"),
         }
+
+        // Keep the context bounded: persona + a recent window. Full history
+        // still lives in SQLite memory; this only trims the in-RAM transcript
+        // we send to the model each turn (saves tokens on long sessions).
+        trim_messages(&mut messages, 16);
     }
 
     println!("\nGoodbye, sir.");
@@ -167,6 +180,24 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     anyhow::bail!("hit MAX_STEPS ({MAX_STEPS}) without finishing")
 }
 
+// Bound the in-RAM transcript: keep messages[0] (the persona) + the last
+// `keep` messages. We then drop any leading "tool" message, because a tool
+// result with no preceding assistant tool_call would be an invalid sequence.
+fn trim_messages(messages: &mut Vec<Message>, keep: usize) {
+    if messages.len() <= keep + 1 {
+        return; // +1 for the persona; nothing to trim yet
+    }
+    let persona = messages[0].clone();
+    let start = messages.len() - keep;
+    let mut window: Vec<Message> = messages[start..].to_vec();
+    while window.first().map(|m| m.role.as_str()) == Some("tool") {
+        window.remove(0);
+    }
+    messages.clear();
+    messages.push(persona);
+    messages.extend(window);
+}
+
 // One heartbeat tick: read the checklist, run the agent on it, brief the user.
 async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
     let checklist = std::fs::read_to_string("HEARTBEAT.md")
@@ -185,5 +216,41 @@ async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
     match run_turn(provider, mem, &mut messages).await {
         Ok(answer) => println!("\n[heartbeat] {answer}\n"),
         Err(e) => eprintln!("[heartbeat] error: {e}"),
+    }
+}
+
+// Daily digest: summarize recent activity + tool feedback into a short briefing.
+// No tools needed — we feed the model what memory already knows.
+async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
+    let dialog = mem.recent_dialog(30).await;
+    let audit = mem.recent_audit(30).await;
+
+    let dialog_txt = dialog
+        .iter()
+        .map(|(r, c)| format!("{r}: {}", c.chars().take(160).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let audit_txt = audit
+        .iter()
+        .map(|(tool, decision, ok)| format!("- {tool} [{decision}, ok={ok}]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "Write my daily digest from the activity below. Three short sections:\n\
+         **Did** (what got done), **Noticed** (anything noteworthy), **Needs you** \
+         (decisions or follow-ups for me). Keep it tight. If a section is empty, say 'nothing'.\n\n\
+         RECENT CONVERSATION:\n{dialog_txt}\n\nRECENT TOOL ACTIONS:\n{audit_txt}"
+    );
+
+    let messages = vec![Message::system(PERSONA), Message::user(prompt)];
+    // One plain call, no tools.
+    match provider.chat(&messages, None).await {
+        Ok(reply) => {
+            let text = reply.message.content.unwrap_or_else(|| "(no digest)".into());
+            println!("\n=== Daily Digest ===\n{text}\n");
+            mem.log("assistant", &format!("[digest] {text}")).await;
+        }
+        Err(e) => eprintln!("digest error: {e}"),
     }
 }

@@ -22,6 +22,7 @@ enum MemCmd {
     AuditCount { reply: oneshot::Sender<i64> },
     RecentDialog { n: i64, reply: oneshot::Sender<Vec<(String, String)>> },
     Search { query: String, n: i64, reply: oneshot::Sender<Vec<(String, String)>> },
+    RecentAudit { n: i64, reply: oneshot::Sender<Vec<(String, String, bool)>> },
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -98,6 +99,15 @@ impl MemoryHandle {
     pub async fn recent_dialog(&self, n: i64) -> Vec<(String, String)> {
         let (reply, rx) = oneshot::channel();
         if self.tx.send(MemCmd::RecentDialog { n, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    // Recent tool-call feedback rows (tool, decision, ok) for the digest.
+    pub async fn recent_audit(&self, n: i64) -> Vec<(String, String, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::RecentAudit { n, reply }).await.is_err() {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
@@ -200,7 +210,29 @@ fn handle_cmd(conn: &Connection, cmd: MemCmd) {
             let rows = query_search(conn, &query, n).unwrap_or_default();
             let _ = reply.send(rows);
         }
+        MemCmd::RecentAudit { n, reply } => {
+            let rows = query_recent_audit(conn, n).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
     }
+}
+
+fn query_recent_audit(conn: &Connection, n: i64) -> Result<Vec<(String, String, bool)>> {
+    let mut stmt = conn
+        .prepare("SELECT tool, decision, ok FROM audit ORDER BY id DESC LIMIT ?1")?;
+    let rows = stmt.query_map(params![n], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    out.reverse();
+    Ok(out)
 }
 
 // Turn arbitrary user text into a safe FTS5 MATCH expression. We extract word
