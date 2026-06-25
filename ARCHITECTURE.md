@@ -28,6 +28,30 @@ examples/
    fine-tuned re-ranker or RL loop would learn from. It costs nothing to collect
    now and is unrecoverable if we skip it. Treat it as a first-class asset.
 
+## Permission model (the safety gate — READ THIS)
+
+The tool sandbox is GONE on purpose: tools in `tools.rs` can touch the whole
+device (read/write any file, run any shell command, open apps/URLs, delete).
+Safety lives in `policy.rs` + the approval flow, NOT in the tools.
+
+Flow per tool call (in both agent loops — `main::run_turn` and
+`server::handle_socket`):
+1. `policy::assess(tool, args)` → `Risk { needs_approval, label, key }`.
+   Read-only/safe (read_file, list_dir, fetch_url, news_search) = auto.
+   System-changing (run_shell, write_file, delete_path, open_path) = ask.
+2. If approval needed: check remembered rule via `mem.check_permission(tool,key)`
+   — but ONLY when the turn is not web-tainted. Else prompt the human
+   (console: y/a/N; HUD: approval modal over WebSocket). "always" persists via
+   `mem.remember_permission`.
+3. **Injection defense:** once a turn calls `fetch_url`/`news_search` (untrusted
+   web), `tainted=true` and remembered "always" rules are suspended for the rest
+   of that turn — a malicious page can't ride a saved approval to run shell.
+4. Every call is logged to `audit` with the real decision (auto/approved/
+   approved-always/denied) — the feedback dataset doubles as a security log.
+
+`key = "{tool}:{salient_arg}"` so remembered rules are SPECIFIC (allow exactly
+`echo hi`, not all shell). Unknown tools default to needs-approval.
+
 ## DO NOT GENERATE — antipatterns we already rejected (eng review)
 
 1. **No `Arc<Mutex<Connection>>`.** rusqlite `Connection` is `!Send`; sharing it
