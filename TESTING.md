@@ -7,11 +7,16 @@ already has `cargo` on PATH.
 
 | Command | What it does |
 |---|---|
-| `cargo run` | Talk to Jarvis (REPL). Type messages; `exit` to quit. |
+| `cargo run --release -- serve` | **Futuristic web HUD** — opens the amber UI in your browser. Best experience. |
+| `cargo run` | Talk to Jarvis in the terminal (REPL). `exit` to quit. |
 | `cargo run -- once` | One heartbeat tick (reads HEARTBEAT.md, briefs you), then exits. |
 | `cargo run -- digest` | Print a daily digest of recent activity, then exits. |
 | `cargo run --example streaming` | Watch tokens stream live. |
-| `cargo run --release` | Optimized build (slower first compile, faster run). |
+
+## Speed note (important)
+Always use **`--release`** for real use — the local embedding model runs 10-30x
+faster optimized. `cargo run` (debug) is for quick code checks only. The HUD in
+particular should be run as `cargo run --release -- serve`.
 
 ## Quick capability test (type into `cargo run`, one line at a time)
 
