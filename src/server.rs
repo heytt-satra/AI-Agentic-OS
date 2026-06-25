@@ -25,7 +25,7 @@ fn max_steps() -> u32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(20)
+        .unwrap_or(40)
 }
 
 #[derive(Clone)]
@@ -167,7 +167,25 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             break;
         }
         if !answered {
-            let _ = send(&mut socket, serde_json::json!({"type":"error","text":"hit step limit"})).await;
+            // Out of tool-call budget. Ask for a short status (no tools) instead
+            // of erroring; the conversation persists so the user can say "continue".
+            messages.push(Message::user(
+                "You have reached the step limit for this turn. Stop calling tools. In two \
+                 or three sentences, tell me what you accomplished, what still remains, and \
+                 the project path if relevant. Be honest about what is not finished.",
+            ));
+            match st.provider.chat(&messages, None).await {
+                Ok(r) => {
+                    let answer = r.message.content.unwrap_or_else(|| {
+                        "Hit the step limit before finishing, sir. Say 'continue' and I'll resume.".into()
+                    });
+                    st.mem.log("assistant", &answer).await;
+                    let _ = send(&mut socket, serde_json::json!({"type":"answer","text":answer})).await;
+                }
+                Err(_) => {
+                    let _ = send(&mut socket, serde_json::json!({"type":"answer","text":"Hit the step limit before finishing, sir. Say 'continue' and I'll resume where I left off."})).await;
+                }
+            }
         }
         let _ = send(&mut socket, serde_json::json!({"type":"state","state":"idle"})).await;
         crate::trim_messages(&mut messages, 16);

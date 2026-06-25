@@ -28,7 +28,7 @@ fn max_steps() -> u32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(20)
+        .unwrap_or(40)
 }
 
 // Jarvis's persona lives in the system message (seed of the plan's PERSONA.md).
@@ -50,10 +50,13 @@ them to the real folders.\n\
 WRITING SOFTWARE: when asked to build code, a program, a script, or an app, use \
 code-builder mode, not loose files. First call code_new_project (pick the language). \
 Write every source file with code_write_file using paths relative to the project. \
-Then build and test with code_exec (e.g. 'cargo build', 'cargo test'). If a build or \
-test FAILS, read the stderr, fix the files, and run it again — keep going until it \
-passes or you are truly stuck. Do not claim it works until code_exec shows it builds \
-and tests pass. Report the project path at the end.\n\
+Then build and test with code_exec (e.g. 'cargo build', 'cargo test'). To add a \
+dependency, use code_exec with the package manager ('cargo add serde --features derive', \
+'npm install x', 'pip install x') instead of hand-writing version numbers. Work \
+efficiently: write all the files you can before the first build. If a build or test \
+FAILS, read the stderr, fix the files, and run it again — keep going until it passes or \
+you are truly stuck. Do not claim it works until code_exec shows it builds and tests \
+pass. Report the project path at the end.\n\
 NEWS / WEB FACTS: always include the source link(s) for anything you found online.\n\
 LISTINGS: when the user asks to list files or for detail, give the FULL list, do not \
 summarize as a count.\n\
@@ -231,7 +234,21 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         mem.log("assistant", &answer).await;
         return Ok(answer);
     }
-    anyhow::bail!("hit MAX_STEPS ({steps}) without finishing")
+    // Ran out of tool-call budget. Instead of erroring, ask the model (no tools)
+    // for a short status: what got done and what is left. The conversation
+    // persists, so the user can just say "continue" to resume with a fresh budget.
+    messages.push(Message::user(
+        "You have reached the step limit for this turn. Stop calling tools. In two or \
+         three sentences, tell me what you accomplished, what still remains, and the \
+         project path if relevant. Be honest about what is not finished.",
+    ));
+    let summary = provider.chat(messages, None).await?;
+    let answer = summary
+        .message
+        .content
+        .unwrap_or_else(|| format!("Hit the step limit ({steps}) before finishing, sir. Say 'continue' and I'll pick up where I left off."));
+    mem.log("assistant", &answer).await;
+    Ok(answer)
 }
 
 // Decide whether a tool call may run, prompting on the console when needed.
