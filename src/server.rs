@@ -325,7 +325,8 @@ const log=document.getElementById('log'), input=document.getElementById('in'),
       toolEl=document.getElementById('tool'), connEl=document.getElementById('conn'),
       modelEl=document.getElementById('model');
 let state='idle';
-let cur=null; // the live answer bubble being streamed into
+let cur=null, curRaw=''; // the live answer bubble + its raw accumulated text
+function plainify(s){return s.replace(/\*\*/g,'').replace(/__/g,'').replace(/—/g,' - ').replace(/–/g,'-').replace(/^#{1,6}\s*/gm,'').replace(/^\s*[\*\-]\s+/gm,'- ');}
 
 // ── reactive orb: thin amber arcs, geometry encodes state (no glowing sphere)
 const cv=document.getElementById('orb'), ctx=cv.getContext('2d');
@@ -380,9 +381,9 @@ function connect(){
     if(m.type==='hello'){ modelEl.textContent='model: '+m.model; }
     else if(m.type==='state'){ if(m.state!=='speaking') state=m.state; }
     else if(m.type==='tool'){ flashTool(m.name); }
-    else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');} cur.textContent+=m.text; state='speaking'; log.scrollTop=log.scrollHeight; }
-    else if(m.type==='done'){ cur=null; state='idle'; }
-    else if(m.type==='answer'){ typewriter(addMsg('jarvis','Jarvis'), m.text); }
+    else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); state='speaking'; log.scrollTop=log.scrollHeight; }
+    else if(m.type==='done'){ cur=null; curRaw=''; state='idle'; }
+    else if(m.type==='answer'){ typewriter(addMsg('jarvis','Jarvis'), plainify(m.text)); }
     else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; state='idle'; }
     else if(m.type==='approval'){ showApproval(m); }
   };
@@ -410,7 +411,7 @@ input.addEventListener('keydown',(e)=>{
     const text=input.value.trim();
     addMsg('user','You').textContent=text;
     ws.send(JSON.stringify({type:'user',text}));
-    input.value=''; cur=null;
+    input.value=''; cur=null; curRaw='';
   }
 });
 </script>

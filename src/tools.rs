@@ -93,32 +93,30 @@ struct ShellArg { command: String }
 #[derive(Deserialize)]
 struct SearchArgs { query: String }
 
-// Resolve natural paths: ~, and bare "desktop/downloads/documents/..." map to
-// the user's real folders (fixes Jarvis making a literal ./desktop folder).
+// Resolve natural paths to the user's REAL folders using the OS known-folder
+// API (so 'desktop' maps to OneDrive\Desktop when redirected, not a fake one).
 fn resolve_path(p: &str) -> String {
-    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
     let t = p.trim();
-    if t == "~" {
-        return home;
-    }
-    if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
-        return format!("{}/{}", home.trim_end_matches(['/', '\\']), rest);
-    }
     let norm = t.replace('\\', "/");
-    let lower = norm.to_lowercase();
-    for f in ["desktop", "downloads", "documents", "pictures", "music", "videos"] {
-        let cap = {
-            let mut c = f.chars();
-            c.next().map(|x| x.to_uppercase().collect::<String>()).unwrap_or_default() + c.as_str()
-        };
-        if lower == f {
-            return format!("{}/{}", home.trim_end_matches(['/', '\\']), cap);
+    let mut parts = norm.splitn(2, '/');
+    let first = parts.next().unwrap_or("").to_lowercase();
+    let rest = parts.next().filter(|r| !r.is_empty());
+
+    let base: Option<std::path::PathBuf> = match first.as_str() {
+        "~" | "home" => dirs::home_dir(),
+        "desktop" => dirs::desktop_dir(),
+        "downloads" | "download" => dirs::download_dir(),
+        "documents" | "docs" => dirs::document_dir(),
+        "pictures" => dirs::picture_dir(),
+        "music" => dirs::audio_dir(),
+        "videos" | "video" => dirs::video_dir(),
+        _ => None,
+    };
+    if let Some(mut b) = base {
+        if let Some(r) = rest {
+            b.push(r);
         }
-        if let Some(rest) = norm.get(f.len() + 1..) {
-            if lower.starts_with(&format!("{f}/")) {
-                return format!("{}/{}/{}", home.trim_end_matches(['/', '\\']), cap, rest);
-            }
-        }
+        return b.to_string_lossy().to_string();
     }
     t.to_string()
 }
@@ -239,16 +237,25 @@ struct SecondsArg { seconds: u64 }
 
 fn open_app(args: &str) -> String {
     let a: NameArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    // Start-Process resolves installed apps + anything on PATH, and errors
-    // clearly if the app isn't found (unlike the silent `start`).
-    let escaped = a.name.replace('\'', "''");
+    // Search the Start Menu for a matching app shortcut (handles installed GUI
+    // apps like the Codex app), and launch it. Fall back to Start-Process by
+    // name (PATH / App Paths) if no shortcut matches.
+    let name_lit = format!("'{}'", a.name.replace('\'', "''"));
+    let script = r#"$n=__NAME__;
+$sm=@("$env:ProgramData\Microsoft\Windows\Start Menu\Programs","$env:APPDATA\Microsoft\Windows\Start Menu\Programs");
+$lnk=Get-ChildItem -Path $sm -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "*$n*" } | Select-Object -First 1 -ExpandProperty FullName;
+if($lnk){ Start-Process $lnk; "opened $lnk" } else { Start-Process $n; "started $n" }"#
+        .replace("__NAME__", &name_lit);
     let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("Start-Process '{escaped}'")])
+        .args(["-NoProfile", "-Command", &script])
         .output();
     match out {
-        Ok(o) if o.status.success() => format!("launched {}", a.name),
-        Ok(o) => format!("ERROR: couldn't launch '{}': {}", a.name, String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
-        Err(e) => format!("ERROR launching {}: {e}", a.name),
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { format!("opened {}", a.name) } else { s }
+        }
+        Ok(o) => format!("ERROR: couldn't open '{}': {}", a.name, String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
+        Err(e) => format!("ERROR opening {}: {e}", a.name),
     }
 }
 

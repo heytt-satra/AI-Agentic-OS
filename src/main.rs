@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
 
         // ── run the agent on this turn ──────────────────────────────────────
         match run_turn(&provider, &mem, &mut messages).await {
-            Ok(answer) => println!("Jarvis: {answer}\n"),
+            Ok(answer) => println!("Jarvis: {}\n", plainify(&answer)),
             Err(e) => println!("Jarvis: (something went wrong: {e})\n"),
         }
 
@@ -254,6 +254,15 @@ async fn decide_console(
     }
 }
 
+// Strip markdown the user doesn't want (** bold, __ , em/en dashes). The model
+// ignores prose instructions to avoid them, so we remove them deterministically.
+pub fn plainify(s: &str) -> String {
+    s.replace("**", "")
+        .replace("__", "")
+        .replace('\u{2014}', " - ")
+        .replace('\u{2013}', "-")
+}
+
 // Bound the in-RAM transcript: keep messages[0] (the persona) + the last
 // `keep` messages. We then drop any leading "tool" message, because a tool
 // result with no preceding assistant tool_call would be an invalid sequence.
@@ -330,7 +339,7 @@ async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
     // One plain call, no tools.
     match provider.chat(&messages, None).await {
         Ok(reply) => {
-            let text = reply.message.content.unwrap_or_else(|| "(no digest)".into());
+            let text = plainify(&reply.message.content.unwrap_or_else(|| "(no digest)".into()));
             println!("\n=== Daily Digest ===\n{text}\n");
             mem.log("assistant", &format!("[digest] {text}")).await;
         }

@@ -2341,6 +2341,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "dirs",
  "dotenvy",
  "enigo",
  "futures-util",
