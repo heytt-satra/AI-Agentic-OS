@@ -235,16 +235,33 @@ fn query_recent_audit(conn: &Connection, n: i64) -> Result<Vec<(String, String, 
     Ok(out)
 }
 
-// Turn arbitrary user text into a safe FTS5 MATCH expression. We extract word
-// tokens (length >= 2) and join them with OR. This both sanitizes (user text
-// can't inject FTS syntax) and broadens the match to "any of these words".
+// Common filler words. Matching on these makes "what is my company?" rank the
+// repeated QUESTION above the ANSWER, because every question shares them. We
+// drop them so the query is the meaningful words only (e.g. just "company").
+const STOPWORDS: &[&str] = &[
+    "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "in", "on",
+    "for", "and", "or", "my", "me", "i", "you", "your", "it", "its", "this",
+    "that", "what", "who", "where", "when", "why", "how", "do", "does", "did",
+    "can", "could", "would", "should", "with", "about", "tell", "give", "get",
+];
+
+// Turn arbitrary user text into a safe FTS5 MATCH expression: meaningful word
+// tokens (>= 2 chars, not stopwords) joined with OR. Sanitizes too (user text
+// can't inject FTS syntax). If everything was a stopword, fall back to all
+// tokens so we still match something.
 fn to_fts_query(text: &str) -> String {
-    let toks: Vec<String> = text
+    let all: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| s.len() >= 2)
         .map(|s| s.to_lowercase())
         .collect();
-    toks.join(" OR ")
+    let meaningful: Vec<String> = all
+        .iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    let chosen = if meaningful.is_empty() { all } else { meaningful };
+    chosen.join(" OR ")
 }
 
 fn query_search(conn: &Connection, query: &str, n: i64) -> Result<Vec<(String, String)>> {
@@ -252,18 +269,29 @@ fn query_search(conn: &Connection, query: &str, n: i64) -> Result<Vec<(String, S
     if match_q.is_empty() {
         return Ok(Vec::new());
     }
-    // ORDER BY rank = best (bm25) matches first. Restrict to dialog turns.
+    // Fetch MORE than we need, then dedupe identical content in Rust. Without
+    // this, repeated identical messages (e.g. the same question asked twice)
+    // crowd out the top-N and starve the actual answer. (Keyword search is
+    // lexical; semantic embeddings — coming next — fix this properly.)
+    let fetch = (n * 4).max(12);
     let mut stmt = conn.prepare(
         "SELECT role, content FROM mem_fts
          WHERE mem_fts MATCH ?1 AND role IN ('user','assistant')
          ORDER BY rank LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![match_q, n], |row| {
+    let rows = stmt.query_map(params![match_q, fetch], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        let (role, content) = r?;
+        if seen.insert(content.clone()) {
+            out.push((role, content));
+            if out.len() as i64 >= n {
+                break;
+            }
+        }
     }
     Ok(out)
 }
