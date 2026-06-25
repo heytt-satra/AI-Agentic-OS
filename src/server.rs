@@ -330,6 +330,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
     font-family:var(--mono); font-size:14px; caret-color:var(--amber);
   }
   input::placeholder{color:var(--muted)}
+  /* voice controls */
+  .toggle{cursor:pointer; user-select:none}
+  .toggle.on{color:var(--cyan)}
+  #mic{font-family:var(--mono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); background:transparent; border:1px solid var(--line); border-radius:2px;
+    padding:7px 11px; cursor:pointer; transition:.15s; white-space:nowrap}
+  #mic:hover{border-color:var(--amber); color:var(--amber)}
+  #mic.live{border-color:var(--cyan); color:var(--cyan); animation:micpulse 1s ease-in-out infinite}
+  @keyframes micpulse{0%,100%{opacity:1}50%{opacity:.5}}
 
   #approvalWrap{position:fixed;inset:0;background:rgba(2,4,7,.82);display:none;
     align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(2px)}
@@ -355,6 +364,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <span class="wm">JARVIS</span>
     <span class="stat">
       <span id="model">MODEL <b>…</b></span>
+      <span id="voice" class="toggle">VOICE OFF</span>
       <span id="conn"><span class="dot">●</span> CONNECTING</span>
     </span>
   </header>
@@ -367,6 +377,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       <div class="inbar">
         <span class="chev">&gt;</span>
         <input id="in" autocomplete="off" placeholder="Speak to Jarvis" autofocus/>
+        <button id="mic" title="Push to talk">&#9679; Talk</button>
       </div>
     </footer>
   </main>
@@ -463,8 +474,8 @@ function connect(){
     else if(m.type==='state'){ if(m.state!=='speaking') setState(m.state); }
     else if(m.type==='tool'){ flashTool(m.name); }
     else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); setState('speaking'); log.scrollTop=log.scrollHeight; }
-    else if(m.type==='done'){ cur=null; curRaw=''; setState('idle'); }
-    else if(m.type==='answer'){ typewriter(addMsg('jarvis','Jarvis'), plainify(m.text)); }
+    else if(m.type==='done'){ speak(plainify(curRaw)); cur=null; curRaw=''; setState('idle'); }
+    else if(m.type==='answer'){ const txt=plainify(m.text); typewriter(addMsg('jarvis','Jarvis'), txt); speak(txt); }
     else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; setState('idle'); }
     else if(m.type==='approval'){ showApproval(m); }
   };
@@ -487,14 +498,54 @@ document.getElementById('apOnce').onclick=()=>respond('once');
 document.getElementById('apAlways').onclick=()=>respond('always');
 document.getElementById('apDeny').onclick=()=>respond('deny');
 
-input.addEventListener('keydown',(e)=>{
-  if(e.key==='Enter' && input.value.trim()){
-    const text=input.value.trim();
-    addMsg('user','You').textContent=text;
-    ws.send(JSON.stringify({type:'user',text}));
-    input.value=''; cur=null; curRaw='';
-  }
-});
+function sendText(text){
+  text=(text||'').trim(); if(!text) return;
+  addMsg('user','You').textContent=text;
+  ws.send(JSON.stringify({type:'user',text}));
+  input.value=''; cur=null; curRaw='';
+}
+input.addEventListener('keydown',(e)=>{ if(e.key==='Enter') sendText(input.value); });
+
+// ── voice OUT: speak Jarvis's replies with the browser's built-in TTS (no deps)
+let voiceOn=false;
+const voiceBtn=document.getElementById('voice');
+voiceBtn.onclick=()=>{
+  voiceOn=!voiceOn;
+  voiceBtn.textContent='VOICE '+(voiceOn?'ON':'OFF');
+  voiceBtn.classList.toggle('on',voiceOn);
+  if(!voiceOn && window.speechSynthesis) speechSynthesis.cancel();
+};
+function speak(text){
+  if(!voiceOn || !window.speechSynthesis || !text) return;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  u.rate=1.04; u.pitch=0.9;
+  speechSynthesis.speak(u);
+}
+
+// ── voice IN: push-to-talk via the browser Web Speech API (no deps, Chromium)
+const micBtn=document.getElementById('mic');
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null, listening=false, finalText='';
+if(SR){
+  rec=new SR(); rec.lang='en-US'; rec.interimResults=true; rec.continuous=false;
+  rec.onstart=()=>{ listening=true; finalText=''; micBtn.classList.add('live'); micBtn.innerHTML='&#9679; Listening'; flashTool('listening'); };
+  rec.onresult=(e)=>{
+    let interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t=e.results[i][0].transcript;
+      if(e.results[i].isFinal) finalText+=t; else interim+=t;
+    }
+    input.value=(finalText+interim).trim();
+  };
+  rec.onerror=()=>{ listening=false; micBtn.classList.remove('live'); micBtn.innerHTML='&#9679; Talk'; };
+  rec.onend=()=>{ listening=false; micBtn.classList.remove('live'); micBtn.innerHTML='&#9679; Talk';
+    if(input.value.trim()) sendText(input.value); };
+  micBtn.onclick=()=>{ if(listening){ try{rec.stop();}catch(_){} } else { try{rec.start();}catch(_){} } };
+} else {
+  micBtn.title='Voice input needs a Chromium browser (Chrome/Edge)';
+  micBtn.onclick=()=>alert('Voice input needs a Chromium browser (Chrome or Edge).');
+}
 </script>
 </body>
 </html>"##;
