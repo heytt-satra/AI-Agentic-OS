@@ -97,7 +97,26 @@ struct SearchArgs { query: String }
 // API (so 'desktop' maps to OneDrive\Desktop when redirected, not a fake one).
 fn resolve_path(p: &str) -> String {
     let t = p.trim();
-    let norm = t.replace('\\', "/");
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let mut norm = t.replace('\\', "/");
+
+    // Strip a leading ~ or the home-dir prefix so an absolute path like
+    // C:/Users/heytt/Desktop/x OR ~/Desktop/x reduces to "desktop/x", which
+    // then remaps to the REAL (OneDrive-redirected) Desktop below.
+    if norm == "~" {
+        return home.replace('/', "\\");
+    }
+    if let Some(r) = norm.strip_prefix("~/") {
+        norm = r.to_string();
+    } else if !home.is_empty() {
+        let nl = norm.to_lowercase();
+        let hl = home.to_lowercase();
+        if let Some(stripped) = nl.strip_prefix(&format!("{hl}/")) {
+            let _ = stripped;
+            norm = norm[home.len() + 1..].to_string();
+        }
+    }
+
     let mut parts = norm.splitn(2, '/');
     let first = parts.next().unwrap_or("").to_lowercase();
     let rest = parts.next().filter(|r| !r.is_empty());
@@ -241,10 +260,15 @@ fn open_app(args: &str) -> String {
     // apps like the Codex app), and launch it. Fall back to Start-Process by
     // name (PATH / App Paths) if no shortcut matches.
     let name_lit = format!("'{}'", a.name.replace('\'', "''"));
+    // 1) GUI app shortcut in the Start Menu -> launch it.
+    // 2) else a CLI tool on PATH (e.g. codex) -> open it in a terminal window.
+    // 3) else let the OS try by name.
     let script = r#"$n=__NAME__;
 $sm=@("$env:ProgramData\Microsoft\Windows\Start Menu\Programs","$env:APPDATA\Microsoft\Windows\Start Menu\Programs");
 $lnk=Get-ChildItem -Path $sm -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "*$n*" } | Select-Object -First 1 -ExpandProperty FullName;
-if($lnk){ Start-Process $lnk; "opened $lnk" } else { Start-Process $n; "started $n" }"#
+if($lnk){ Start-Process $lnk; "opened app: $lnk" }
+elseif(Get-Command $n -ErrorAction SilentlyContinue){ Start-Process powershell -ArgumentList '-NoExit','-Command',$n; "opened $n in a terminal" }
+else { Start-Process $n; "started $n" }"#
         .replace("__NAME__", &name_lit);
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
