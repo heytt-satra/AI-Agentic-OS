@@ -59,14 +59,22 @@ fan-out to multiple surfaces (Telegram, Tauri HUD) — only needed once there is
 more than one output surface. Today there's one (the console), so a bus would
 still be one-publisher/one-subscriber ceremony.
 
-## Memory recall (smarter than last-N)
+## Memory recall (semantic, local)
 
-`mem_fts` is an FTS5 index over message content. Per user turn we run
-`MemoryHandle::search(query, n)` (bm25 `ORDER BY rank`) to inject the most
-RELEVANT past messages, plus a small recent-dialog window for continuity.
-Next upgrade: true semantic recall via local embeddings (the "use our own model"
-seam) — store embedding vectors + cosine similarity, or sqlite-vec (mind the
-runtime extension-loading trap, antipattern #5).
+Per user turn, `MemoryHandle::search(query, n)` returns the most relevant past
+messages, injected as context. Two layers:
+- **Primary: semantic.** `embeddings.rs` runs BGE-small via candle (pure Rust,
+  CPU, local) to embed each dialog message into a 384-d vector stored as a BLOB
+  in `embeddings`. Recall embeds the query and ranks by cosine similarity. This
+  finds messages by MEANING (e.g. "where do I work?" recalls "my company is
+  Lensr") — what keyword search can't do.
+- **Fallback: keyword (FTS5).** If the model can't load (offline), recall uses
+  `mem_fts` with stopword-filtered bm25 + dedupe.
+
+The embedder lives ON the memory actor thread (already blocking, so CPU
+inference is fine there) and never crosses threads. Model weights download once
+to the HF cache (data, not an install) — the binary stays self-contained.
+This is the "use our own model" milestone: no API, no key, works offline.
 
 ## Orientation for a cold session
 
