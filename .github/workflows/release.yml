@@ -1,0 +1,42 @@
+# Build self-contained Jarvis binaries for Windows, macOS, and Linux.
+# Triggered when you push a version tag like v0.1.0. Each job produces ONE
+# executable that needs nothing installed alongside it (SQLite + TLS are
+# compiled in), and uploads it to a GitHub Release.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: jarvis.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: jarvis
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: jarvis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/jarvis-${{ matrix.target }}${{ matrix.bin == 'jarvis.exe' && '.exe' || '' }}"
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
