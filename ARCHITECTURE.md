@@ -9,8 +9,11 @@ does not re-derive decisions or reintroduce bugs we already designed out.
 src/
   main.rs       jarvis talk REPL + run_turn() agent loop (MAX_STEPS cap)
   provider.rs   LLM access behind one `Provider` type. base_url is env-driven.
-  tools.rs      the agent's hands: read_file, write_file (sandboxed to workspace/),
-                fetch_url, run_shell (Tier-2, human approval). Returns ToolOutcome.
+  tools.rs      the agent's hands (FULL DEVICE): read_file, write_file, list_dir,
+                delete_path, open_path, run_shell, type_text, press_keys,
+                mouse_click, see_screen (screenshot+vision), browse_url, browse_js,
+                fetch_url, news_search. Safety is in policy.rs, not here.
+  policy.rs     the permission gate: assess(tool,args) -> auto vs needs-approval.
   memory.rs     SQLite: `messages` (episodic) + `audit` (feedback dataset).
 examples/
   streaming.rs  SSE token streaming demo (for voice latency-masking later).
