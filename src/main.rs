@@ -7,6 +7,7 @@
 mod embeddings;
 mod memory;
 mod provider;
+mod server;
 mod tools;
 
 use anyhow::Result;
@@ -18,7 +19,7 @@ use std::time::Duration;
 const MAX_STEPS: u32 = 8;
 
 // Jarvis's persona lives in the system message (seed of the plan's PERSONA.md).
-const PERSONA: &str = "You are Jarvis, a concise, dry, capable personal assistant. \
+pub const PERSONA: &str = "You are Jarvis, a concise, dry, capable personal assistant. \
 Address the user as 'sir'. Keep spoken answers short. You have tools to read/write \
 files in a workspace, fetch URLs, and run shell commands (which require the user's \
 approval). Use them when useful rather than guessing.";
@@ -49,6 +50,11 @@ async fn main() -> Result<()> {
         }
         Some("digest") => {
             run_digest(&provider, &mem).await;
+            return Ok(());
+        }
+        Some("serve") => {
+            // Launch the futuristic web HUD (open the printed URL in a browser).
+            server::serve(provider, mem).await?;
             return Ok(());
         }
         _ => {}
@@ -184,7 +190,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
 // Bound the in-RAM transcript: keep messages[0] (the persona) + the last
 // `keep` messages. We then drop any leading "tool" message, because a tool
 // result with no preceding assistant tool_call would be an invalid sequence.
-fn trim_messages(messages: &mut Vec<Message>, keep: usize) {
+pub fn trim_messages(messages: &mut Vec<Message>, keep: usize) {
     if messages.len() <= keep + 1 {
         return; // +1 for the persona; nothing to trim yet
     }
