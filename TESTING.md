@@ -39,9 +39,48 @@ exit
 
 This proves memory survives restarts and recalls by MEANING, not keywords.
 
+## Testing the full device powers
+
+Run `cargo run --release` (terminal) or `cargo run --release -- serve` (HUD).
+Safe actions (read, list, search, browse) run automatically. Dangerous ones
+(write, shell, delete, type, click, screenshot, run-JS) pause for approval:
+terminal shows `[y]es once / [a]lways / [N]o`; the HUD shows an Allow/Deny modal.
+
+Try these one per turn:
+
+```
+# shell + filesystem
+list the files in my Downloads folder and tell me the 3 biggest
+create a folder called shoots on my desktop with a README inside     # approve
+
+# app & window control (it will launch + type)
+open Notepad, then type "Lensr shoot Monday 9am"                      # approve each step
+
+# screen vision (needs OPENROUTER_VISION_MODEL set in .env)
+take a screenshot and tell me what app is in focus                   # approve
+
+# browser automation (uses your installed Chrome/Edge)
+browse https://news.ycombinator.com and list the top 3 story titles
+
+# memory (restart between these two)
+remember my favorite lens is the 35mm
+# ...exit, run again...
+what's my favorite lens?
+```
+
+Watch the **injection defense**: ask it to browse a page AND then do something
+risky in the same turn — even if you'd "always allowed" that action before, it
+will ask again (because the turn touched the web).
+
+## Gotchas
+- Screen vision: set `OPENROUTER_VISION_MODEL` in `.env` (DeepSeek can't see).
+- Browser: needs Chrome or Edge installed (you have it).
+- App/window control types into whatever window is FOCUSED — click the target
+  app first, or let Jarvis open it.
+
 ## What you'll see
-- `· using <tool>` — Jarvis chose a tool.
-- `⚠ Approve? [y/N]` — the safety gate for shell commands.
+- `· <action>` — Jarvis running a tool (or `· denied: ...`).
+- `[y]es once / [a]lways / [N]o` — the approval gate.
 - `[memory] semantic embeddings ready` — local embedding model loaded.
 
 ## Config / data
