@@ -31,6 +31,7 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         "list_dir" => (false, field("path"), format!("list {}", field("path"))),
         "news_search" => (false, field("query"), format!("search news '{}'", field("query"))),
         "fetch_url" => (false, field("url"), format!("fetch {}", field("url"))),
+        "browse_url" => (false, field("url"), format!("browse {}", field("url"))),
         "get_current_time" => (false, String::new(), "check the time".into()),
 
         // --- ask: changes the system / world ---
@@ -46,6 +47,7 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
             (true, format!("{x},{y}"), format!("click at {x},{y}"))
         }
         "see_screen" => (true, String::new(), "screenshot your screen and send it to a vision model".into()),
+        "browse_js" => (true, field("url"), format!("run JavaScript on {}", field("url"))),
 
         // unknown tools default to ASK (safe default)
         other => (true, String::new(), format!("run unknown tool '{other}'")),

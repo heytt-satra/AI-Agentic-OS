@@ -33,6 +33,9 @@ pub fn definitions() -> Vec<Tool> {
         f("mouse_click", "Move the mouse to screen coords (x,y) and left-click. Requires approval. Use with screen vision to know where to click.",
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
+        f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
+        f("browse_js", "Open a URL in a headless browser and run a JavaScript snippet on the page (click, fill forms, extract data). Requires approval. Return value is sent back.",
+          serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
     ]
@@ -51,6 +54,8 @@ pub async fn execute(name: &str, args_json: &str) -> String {
         "press_keys" => press_keys(args_json),
         "mouse_click" => mouse_click(args_json),
         "see_screen" => see_screen(args_json).await,
+        "browse_url" => browse_url(args_json).await,
+        "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
         other => format!("ERROR: unknown tool '{other}'"),
@@ -282,6 +287,53 @@ async fn see_screen(args: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
     let answer = v["choices"][0]["message"]["content"].as_str().unwrap_or("(no vision response)");
     format!("Screen analysis: {answer}")
+}
+
+// ── browser automation (real headless Chrome via CDP) ───────────────────────
+#[derive(Deserialize)]
+struct BrowseArg { url: String }
+#[derive(Deserialize)]
+struct BrowseJsArgs { url: String, script: String }
+
+// headless_chrome is synchronous, so we run it on a blocking thread. The
+// browser is created and dropped inside the closure (so nothing !Send escapes).
+fn run_browser(url: String, script: Option<String>) -> Result<String, String> {
+    use headless_chrome::{Browser, LaunchOptions};
+    let opts = LaunchOptions::default_builder()
+        .headless(true)
+        .build()
+        .map_err(|e| format!("ERROR: browser options: {e}"))?;
+    let browser = Browser::new(opts)
+        .map_err(|e| format!("ERROR launching Chrome ({e}). Is Chrome or Edge installed?"))?;
+    let tab = browser.new_tab().map_err(|e| format!("ERROR: new tab: {e}"))?;
+    tab.navigate_to(&url).map_err(|e| format!("ERROR navigating: {e}"))?;
+    tab.wait_until_navigated().map_err(|e| format!("ERROR loading: {e}"))?;
+
+    let js = script.unwrap_or_else(|| "document.body.innerText".to_string());
+    let result = tab.evaluate(&js, true).map_err(|e| format!("ERROR running JS: {e}"))?;
+    let out = match result.value {
+        Some(v) => v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()),
+        None => "(no return value)".to_string(),
+    };
+    Ok(out.chars().take(4000).collect())
+}
+
+async fn browse_url(args: &str) -> String {
+    let a: BrowseArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    match tokio::task::spawn_blocking(move || run_browser(a.url, None)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => e,
+        Err(e) => format!("ERROR: browser task: {e}"),
+    }
+}
+
+async fn browse_js(args: &str) -> String {
+    let a: BrowseJsArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    match tokio::task::spawn_blocking(move || run_browser(a.url, Some(a.script))).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => e,
+        Err(e) => format!("ERROR: browser task: {e}"),
+    }
 }
 
 async fn fetch_url(args: &str) -> String {

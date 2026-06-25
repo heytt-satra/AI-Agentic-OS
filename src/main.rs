@@ -178,8 +178,8 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                 };
                 let ok = tools::result_ok(&result);
                 mem.log_audit(&name, &args, &decision, ok).await;
-                if name == "fetch_url" || name == "news_search" {
-                    tainted = true; // any later risky action must re-ask
+                if matches!(name.as_str(), "fetch_url" | "news_search" | "browse_url" | "browse_js") {
+                    tainted = true; // read untrusted web -> later risky actions re-ask
                 }
                 mem.log("tool", &result).await;
                 messages.push(Message::tool_result(call.id, result));
