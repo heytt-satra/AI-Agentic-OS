@@ -44,14 +44,29 @@ examples/
    (LoadExtensionGuard) or static compilation + the libclang/DLL chain. Recall is
    naive last-N for now; add the vector store deliberately in v0.2.
 
-## Deferred until concurrency exists (NOT yet)
+## Concurrency (NOW LIVE as of the heartbeat)
 
-The full **event bus + dedicated single-writer thread** is correct *when there
-are multiple concurrent producers* (scheduler + channels + REPL). v0.1a is a
-single-threaded REPL, so building that now would be one publisher and one
-subscriber: ceremony, not safety. The shape is documented here; we light it up
-when the scheduler/Telegram channel land (v0.2). Until then `memory.rs` keeps one
-owned `Connection` on the main task — simple and correct for one user.
+The heartbeat made concurrency real (background ticker task + REPL), so the
+single-writer design is implemented:
+- `memory.rs` is an **actor**: a dedicated OS thread owns the `Connection`;
+  callers hold a cloneable `MemoryHandle` and send commands over an mpsc channel,
+  with `oneshot` return-addresses for reads. This satisfies antipatterns #1-#3.
+- `Provider` is `Clone` (cheap; reqwest::Client is Arc inside) and shared across
+  the REPL and the heartbeat task.
+
+Still deferred (add when it's justified): a general **event/broadcast bus** for
+fan-out to multiple surfaces (Telegram, Tauri HUD) — only needed once there is
+more than one output surface. Today there's one (the console), so a bus would
+still be one-publisher/one-subscriber ceremony.
+
+## Memory recall (smarter than last-N)
+
+`mem_fts` is an FTS5 index over message content. Per user turn we run
+`MemoryHandle::search(query, n)` (bm25 `ORDER BY rank`) to inject the most
+RELEVANT past messages, plus a small recent-dialog window for continuity.
+Next upgrade: true semantic recall via local embeddings (the "use our own model"
+seam) — store embedding vectors + cosine similarity, or sqlite-vec (mind the
+runtime extension-loading trap, antipattern #5).
 
 ## Orientation for a cold session
 

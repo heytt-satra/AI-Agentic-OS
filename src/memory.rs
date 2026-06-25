@@ -21,6 +21,7 @@ enum MemCmd {
     Count { reply: oneshot::Sender<i64> },
     AuditCount { reply: oneshot::Sender<i64> },
     RecentDialog { n: i64, reply: oneshot::Sender<Vec<(String, String)>> },
+    Search { query: String, n: i64, reply: oneshot::Sender<Vec<(String, String)>> },
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -101,6 +102,16 @@ impl MemoryHandle {
         }
         rx.await.unwrap_or_default()
     }
+
+    // Relevance recall: the N past dialog messages most relevant to `query`.
+    pub async fn search(&self, query: &str, n: i64) -> Vec<(String, String)> {
+        let (reply, rx) = oneshot::channel();
+        let cmd = MemCmd::Search { query: query.to_string(), n, reply };
+        if self.tx.send(cmd).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
 }
 
 // ── Everything below runs ON the owner thread, with exclusive Connection access ─
@@ -116,9 +127,25 @@ fn open_db(path: &str) -> Result<Connection> {
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             tool TEXT NOT NULL, args TEXT NOT NULL,
             decision TEXT NOT NULL, ok INTEGER NOT NULL
-         );",
+         );
+         -- Full-text search index over message content. FTS5 ranks matches by
+         -- relevance (bm25), so we can recall the MOST RELEVANT past messages
+         -- for a query, not just the most recent. rowid mirrors messages.id.
+         CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(role UNINDEXED, content);",
     )
     .context("creating tables")?;
+
+    // One-time backfill: if the FTS index is empty but we already have messages
+    // (from before this feature existed), index them now.
+    let fts_n: i64 = conn.query_row("SELECT count(*) FROM mem_fts", [], |r| r.get(0)).unwrap_or(0);
+    let msg_n: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap_or(0);
+    if fts_n == 0 && msg_n > 0 {
+        conn.execute(
+            "INSERT INTO mem_fts(rowid, role, content) SELECT id, role, content FROM messages",
+            [],
+        )
+        .context("backfilling FTS index")?;
+    }
     Ok(conn)
 }
 
@@ -132,10 +159,20 @@ fn now_secs() -> i64 {
 fn handle_cmd(conn: &Connection, cmd: MemCmd) {
     match cmd {
         MemCmd::Log { role, content } => {
-            let _ = conn.execute(
-                "INSERT INTO messages (ts, role, content) VALUES (?1, ?2, ?3)",
-                params![now_secs(), role, content],
-            );
+            if conn
+                .execute(
+                    "INSERT INTO messages (ts, role, content) VALUES (?1, ?2, ?3)",
+                    params![now_secs(), role, content],
+                )
+                .is_ok()
+            {
+                // Mirror into the FTS index using the same rowid as messages.id.
+                let id = conn.last_insert_rowid();
+                let _ = conn.execute(
+                    "INSERT INTO mem_fts(rowid, role, content) VALUES (?1, ?2, ?3)",
+                    params![id, role, content],
+                );
+            }
         }
         MemCmd::LogAudit { tool, args, decision, ok } => {
             let _ = conn.execute(
@@ -159,7 +196,44 @@ fn handle_cmd(conn: &Connection, cmd: MemCmd) {
             let rows = query_recent_dialog(conn, n).unwrap_or_default();
             let _ = reply.send(rows);
         }
+        MemCmd::Search { query, n, reply } => {
+            let rows = query_search(conn, &query, n).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
     }
+}
+
+// Turn arbitrary user text into a safe FTS5 MATCH expression. We extract word
+// tokens (length >= 2) and join them with OR. This both sanitizes (user text
+// can't inject FTS syntax) and broadens the match to "any of these words".
+fn to_fts_query(text: &str) -> String {
+    let toks: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() >= 2)
+        .map(|s| s.to_lowercase())
+        .collect();
+    toks.join(" OR ")
+}
+
+fn query_search(conn: &Connection, query: &str, n: i64) -> Result<Vec<(String, String)>> {
+    let match_q = to_fts_query(query);
+    if match_q.is_empty() {
+        return Ok(Vec::new());
+    }
+    // ORDER BY rank = best (bm25) matches first. Restrict to dialog turns.
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM mem_fts
+         WHERE mem_fts MATCH ?1 AND role IN ('user','assistant')
+         ORDER BY rank LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![match_q, n], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 fn query_recent_dialog(conn: &Connection, n: i64) -> Result<Vec<(String, String)>> {

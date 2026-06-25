@@ -77,11 +77,11 @@ async fn main() -> Result<()> {
     // The live conversation for THIS session, seeded with the persona...
     let mut messages: Vec<Message> = vec![Message::system(PERSONA)];
 
-    // ...and with recent dialog from PAST sessions, so Jarvis has continuity.
-    // (Naive last-N recall; v0.2 makes this semantic.)
-    let recalled = mem.recent_dialog(8).await;
+    // ...and with the last few turns for short-term continuity. (Relevance
+    // recall, below, pulls in older relevant facts per-question.)
+    let recalled = mem.recent_dialog(4).await;
     if !recalled.is_empty() {
-        println!("(recalling {} messages from past sessions)\n", recalled.len());
+        println!("(continuity: last {} messages)\n", recalled.len());
         for (role, content) in recalled {
             messages.push(match role.as_str() {
                 "assistant" => Message::assistant(content),
@@ -104,6 +104,19 @@ async fn main() -> Result<()> {
         }
         if input == "exit" || input == "quit" {
             break;
+        }
+
+        // Smarter memory: pull the most RELEVANT past messages for THIS query
+        // (not just recent ones) and inject them as context for this turn.
+        let relevant = mem.search(input, 3).await;
+        if !relevant.is_empty() {
+            let ctx = relevant
+                .iter()
+                .map(|(r, c)| format!("- ({r}) {c}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            messages.push(Message::system(format!("Possibly relevant memory:\n{ctx}")));
+            tracing::info!(hits = relevant.len(), "relevance recall");
         }
 
         messages.push(Message::user(input));
