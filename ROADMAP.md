@@ -4,9 +4,20 @@ Where we are and where we're going. Today Jarvis is a working agentic OS: an age
 
 This roadmap covers the four directions chosen in the design consultation: code-builder, cross-platform, voice, and deeper autonomy. They are ordered by leverage, not locked sequence.
 
-## Power 1 - Code-builder mode (plan, write, run, test code)
+## Power 1 - Code-builder mode (plan, write, run, test code)  [SHIPPED v1]
 
 Goal: ask Jarvis to build software and it actually ships working code, not a snippet.
+
+Shipped: an isolated workspace under `~/jarvis-projects/<name>` with five tools -
+`code_new_project` (scaffold a toolchain), `code_write_file` (path-safe, project-relative),
+`code_read_file`, `code_list` (file tree), and `code_exec` (build/test/run/git with the
+project as the working directory). The existing agent loop is the self-correct loop:
+`code_exec` returns the real exit code + stdout + stderr, the model reads failures and
+fixes until green. Step budget raised to 20 (JARVIS_MAX_STEPS). Verified end to end:
+"build a rust CLI that prints fibonacci, then run it" scaffolds, builds, and runs clean.
+
+Still to do: structured `apply_patch` edits (vs full-file rewrites), and feeding
+build/test outcomes into the Cursor-style feedback dataset.
 
 - A `project` workspace concept: a sandboxed directory per task, isolated from the rest of the disk.
 - New tools: `run_tests`, `run_build`, `git_*` (init/commit/diff/status), `apply_patch` (structured edits, not blind overwrites).

@@ -18,7 +18,15 @@ use axum::response::{Html, Response};
 use axum::routing::get;
 use axum::Router;
 
-const MAX_STEPS: u32 = 8;
+// Per-turn tool-call budget for the HUD path. Generous for code-building;
+// overridable via JARVIS_MAX_STEPS. Only a backstop — the model stops when done.
+fn max_steps() -> u32 {
+    std::env::var("JARVIS_MAX_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(20)
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -94,7 +102,7 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
 
         let mut tainted = false;
         let mut answered = false;
-        for _ in 0..MAX_STEPS {
+        for _ in 0..max_steps() {
             // Streamed model call: content tokens go to the browser live.
             let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let reply = {

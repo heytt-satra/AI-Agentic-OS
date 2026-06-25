@@ -45,6 +45,17 @@ pub fn definitions() -> Vec<Tool> {
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
         f("recall_activity", "Look up what the user has been doing (their tracked app/window/clipboard activity = their 'second brain'). Use for 'what was I doing', 'what apps did I use', 'how long in X'. Optional query filters by app/keyword.",
           serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"optional app/keyword filter; empty = most recent activity"}},"required":[]})),
+
+        // ── code-builder mode: write/build/test real software in an isolated workspace
+        f("code_new_project", "Start a new software project in an isolated workspace (under ~/jarvis-projects/<name>). Optionally scaffolds a toolchain. Use this FIRST whenever asked to build code or software. Returns the project path and suggested build/test commands.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"project name, e.g. 'todo-cli'"},"language":{"type":"string","description":"rust | node | python | go | web | (empty for plain folder)"}},"required":["name"]})),
+        f("code_write_file", "Write a source file INSIDE a project (path is relative to the project root, e.g. 'src/main.rs'). Creates parent folders. Use this for all code, not write_file.",
+          serde_json::json!({"type":"object","properties":{"project":{"type":"string"},"path":{"type":"string","description":"path relative to the project root"},"content":{"type":"string"}},"required":["project","path","content"]})),
+        f("code_read_file", "Read a source file from a project (path relative to the project root).",
+          serde_json::json!({"type":"object","properties":{"project":{"type":"string"},"path":{"type":"string"}},"required":["project","path"]})),
+        f("code_list", "Show a project's file tree (skips target/node_modules/.git).", str_prop("project", "project name")),
+        f("code_exec", "Run a command with the project as the working directory. This is how you build, test, run, and use git: e.g. 'cargo build', 'cargo test', 'npm install', 'pytest', 'git init', 'git commit -m ...'. Returns exit code, stdout, and stderr so you can read failures and fix them.",
+          serde_json::json!({"type":"object","properties":{"project":{"type":"string"},"command":{"type":"string","description":"the shell command to run inside the project"}},"required":["project","command"]})),
     ]
 }
 
@@ -71,6 +82,11 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
+        "code_new_project" => code_new_project(args_json),
+        "code_write_file" => code_write_file(args_json),
+        "code_read_file" => code_read_file(args_json),
+        "code_list" => code_list(args_json),
+        "code_exec" => code_exec(args_json),
         other => format!("ERROR: unknown tool '{other}'"),
     }
 }
@@ -246,6 +262,154 @@ fn run_shell(args: &str) -> String {
         }
         Err(e) => format!("ERROR running command: {e}"),
     }
+}
+
+// ── code-builder mode (Power 1) ─────────────────────────────────────────────
+// All of these route through crate::coder for workspace + path safety. They let
+// Jarvis scaffold a project, write files into it, and build/test/run/git inside
+// it — the agent loop reads code_exec failures and self-corrects.
+
+#[derive(Deserialize)]
+struct NewProjectArgs { name: String, #[serde(default)] language: String }
+#[derive(Deserialize)]
+struct ProjWriteArgs { project: String, path: String, content: String }
+#[derive(Deserialize)]
+struct ProjReadArgs { project: String, path: String }
+#[derive(Deserialize)]
+struct ProjArg { project: String }
+#[derive(Deserialize)]
+struct ProjExecArgs { project: String, command: String }
+
+// PATH augmented with the usual toolchain bin dirs, so code_exec finds cargo,
+// rustc, npm, etc. even from a non-interactive shell that didn't load the user
+// profile PATH. Without this the model has to reconstruct PATH from the registry.
+fn toolchain_path() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        let h = home.to_string_lossy();
+        for sub in [".cargo/bin", ".local/bin", "go/bin", ".dotnet/tools"] {
+            parts.push(format!("{h}/{sub}").replace('/', std::path::MAIN_SEPARATOR_STR));
+        }
+    }
+    if !cfg!(windows) {
+        for p in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"] {
+            parts.push(p.to_string());
+        }
+    }
+    if let Ok(existing) = std::env::var("PATH") {
+        parts.push(existing);
+    }
+    parts.join(if cfg!(windows) { ";" } else { ":" })
+}
+
+// Run a shell command with `dir` as the working directory. Same shape as
+// run_shell but cwd-scoped, PATH-augmented for toolchains, and with a larger
+// output budget so build/test failures come back readable.
+fn run_in(dir: &std::path::Path, command: &str) -> String {
+    let path = toolchain_path();
+    let output = if cfg!(windows) {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", command])
+            .current_dir(dir)
+            .env("PATH", &path)
+            .output()
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", command])
+            .current_dir(dir)
+            .env("PATH", &path)
+            .output()
+    };
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let mut s = format!("exit={}\n", out.status);
+            if !stdout.trim().is_empty() {
+                s.push_str(&format!("stdout:\n{}\n", stdout.chars().take(8000).collect::<String>()));
+            }
+            if !stderr.trim().is_empty() {
+                s.push_str(&format!("stderr:\n{}\n", stderr.chars().take(6000).collect::<String>()));
+            }
+            s
+        }
+        Err(e) => format!("ERROR running command: {e}"),
+    }
+}
+
+fn code_new_project(args: &str) -> String {
+    let a: NewProjectArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let dir = crate::coder::project_dir(&a.name);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return format!("ERROR creating project dir {}: {e}", dir.display());
+    }
+    let lang = a.language.trim().to_lowercase();
+    let mut notes = String::new();
+
+    // Toolchain scaffold (cargo init / npm init / go mod), if applicable.
+    if let Some(cmd) = crate::coder::scaffold_command(&lang) {
+        let out = run_in(&dir, cmd);
+        notes.push_str(&format!("scaffold `{cmd}`:\n{out}\n"));
+    } else {
+        // Drop a starter file for languages without a scaffolder.
+        match lang.as_str() {
+            "python" => { let _ = std::fs::write(dir.join("main.py"), "def main():\n    print(\"hello\")\n\n\nif __name__ == \"__main__\":\n    main()\n"); let _ = std::fs::write(dir.join("requirements.txt"), ""); }
+            "web" => { let _ = std::fs::write(dir.join("index.html"), "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>app</title></head>\n<body><h1>hello</h1></body></html>\n"); }
+            _ => {}
+        }
+    }
+
+    let detected = crate::coder::detect_language(&dir);
+    let (build, test) = crate::coder::hints(detected);
+    format!(
+        "Project '{}' ready at {}\nlanguage: {}\nbuild with code_exec: {}\ntest with code_exec:  {}\n{}",
+        crate::coder::slugify(&a.name), dir.display(), detected, build, test,
+        if notes.is_empty() { String::new() } else { format!("\n{notes}") }
+    )
+}
+
+fn code_write_file(args: &str) -> String {
+    let a: ProjWriteArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let dir = crate::coder::project_dir(&a.project);
+    if !dir.exists() {
+        return format!("ERROR: project '{}' does not exist — call code_new_project first", a.project);
+    }
+    let path = match crate::coder::safe_join(&dir, &a.path) { Ok(p) => p, Err(e) => return e };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&path, a.content.as_bytes()) {
+        Ok(()) => format!("wrote {} bytes to {}", a.content.len(), a.path),
+        Err(e) => format!("ERROR writing {}: {e}", a.path),
+    }
+}
+
+fn code_read_file(args: &str) -> String {
+    let a: ProjReadArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let dir = crate::coder::project_dir(&a.project);
+    let path = match crate::coder::safe_join(&dir, &a.path) { Ok(p) => p, Err(e) => return e };
+    match std::fs::read_to_string(&path) {
+        Ok(t) => t.chars().take(12000).collect(),
+        Err(e) => format!("ERROR reading {}: {e}", a.path),
+    }
+}
+
+fn code_list(args: &str) -> String {
+    let a: ProjArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let dir = crate::coder::project_dir(&a.project);
+    if !dir.exists() {
+        return format!("ERROR: project '{}' does not exist", a.project);
+    }
+    format!("{} ({}):\n{}", a.project, dir.display(), crate::coder::tree(&dir))
+}
+
+fn code_exec(args: &str) -> String {
+    let a: ProjExecArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let dir = crate::coder::project_dir(&a.project);
+    if !dir.exists() {
+        return format!("ERROR: project '{}' does not exist — call code_new_project first", a.project);
+    }
+    run_in(&dir, &a.command)
 }
 
 // ── app launch / wait / reliable paste ──────────────────────────────────────

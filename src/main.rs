@@ -5,6 +5,7 @@
 // Everything is logged to SQLite memory.
 
 mod activity;
+mod coder;
 mod embeddings;
 mod memory;
 mod policy;
@@ -18,7 +19,17 @@ use provider::{Message, Provider};
 use std::io::{self, Write};
 use std::time::Duration;
 
-const MAX_STEPS: u32 = 8;
+// The agent's per-turn tool-call budget. Code-building needs many steps
+// (write several files, build, read the failure, fix, build again), so this is
+// generous and overridable via JARVIS_MAX_STEPS. It is only a backstop — the
+// model stops as soon as it has an answer.
+fn max_steps() -> u32 {
+    std::env::var("JARVIS_MAX_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(20)
+}
 
 // Jarvis's persona lives in the system message (seed of the plan's PERSONA.md).
 pub const PERSONA: &str = "You are Jarvis, an agentic OS that controls the user's device. \
@@ -36,6 +47,13 @@ ENTERING TEXT: to type into an app, call open_app then immediately call type_tex
 pastes reliably). To click something, use click_on with a plain description.\n\
 PATHS: use natural locations like 'desktop/notes.txt' or 'downloads' — the tools resolve \
 them to the real folders.\n\
+WRITING SOFTWARE: when asked to build code, a program, a script, or an app, use \
+code-builder mode, not loose files. First call code_new_project (pick the language). \
+Write every source file with code_write_file using paths relative to the project. \
+Then build and test with code_exec (e.g. 'cargo build', 'cargo test'). If a build or \
+test FAILS, read the stderr, fix the files, and run it again — keep going until it \
+passes or you are truly stuck. Do not claim it works until code_exec shows it builds \
+and tests pass. Report the project path at the end.\n\
 NEWS / WEB FACTS: always include the source link(s) for anything you found online.\n\
 LISTINGS: when the user asks to list files or for detail, give the FULL list, do not \
 summarize as a count.\n\
@@ -179,7 +197,8 @@ async fn main() -> Result<()> {
 // Borrows `messages` mutably so tool results accumulate into the conversation.
 async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Message>) -> Result<String> {
     let mut tainted = false; // becomes true once we read untrusted web content
-    for _step in 1..=MAX_STEPS {
+    let steps = max_steps();
+    for _step in 1..=steps {
         let reply = provider.chat(messages, Some(tools::definitions())).await?;
         messages.push(reply.message.clone());
 
@@ -212,7 +231,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         mem.log("assistant", &answer).await;
         return Ok(answer);
     }
-    anyhow::bail!("hit MAX_STEPS ({MAX_STEPS}) without finishing")
+    anyhow::bail!("hit MAX_STEPS ({steps}) without finishing")
 }
 
 // Decide whether a tool call may run, prompting on the console when needed.

@@ -45,6 +45,13 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
             (is_system_path(&t), t.clone(), format!("open {t}"))
         }
 
+        // code-builder runs in an isolated workspace, so it is autonomous —
+        // except a destructive command inside code_exec still gets a prompt.
+        "code_exec" => {
+            let cmd = field("command");
+            (is_dangerous_shell(&cmd), cmd.clone(), format!("code: {cmd}"))
+        }
+
         // everything else just runs
         _ => (false, String::new(), String::new()),
     };
