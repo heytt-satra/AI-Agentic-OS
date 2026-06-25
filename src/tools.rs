@@ -59,6 +59,15 @@ pub fn definitions() -> Vec<Tool> {
             }),
         ),
         f(
+            "news_search",
+            "Search recent tech, startup, and finance news/discussions (via Hacker News). Use ONCE for current-events questions, then answer from the results.",
+            serde_json::json!({
+                "type":"object",
+                "properties": { "query": { "type":"string", "description":"topic, e.g. 'AI' or 'interest rates'" } },
+                "required": ["query"]
+            }),
+        ),
+        f(
             "run_shell",
             "Run a shell command on the user's machine. Requires the user's approval.",
             serde_json::json!({
@@ -91,6 +100,7 @@ pub async fn execute(name: &str, args_json: &str) -> ToolOutcome {
         "read_file" => auto(read_file(args_json)),
         "write_file" => auto(write_file(args_json)),
         "fetch_url" => auto(fetch_url(args_json).await),
+        "news_search" => auto(news_search(args_json).await),
         "run_shell" => run_shell(args_json), // sets its own decision (approved/denied)
         other => auto(format!("ERROR: unknown tool '{other}'")),
     }
@@ -169,6 +179,63 @@ async fn fetch_url(args_json: &str) -> String {
         }
         Err(e) => format!("ERROR fetching {}: {e}", args.url),
     }
+}
+
+// ── news_search (keyless, via the Hacker News Algolia API) ──────────────────
+#[derive(Deserialize)]
+struct SearchArgs { query: String }
+
+// We only deserialize the fields we use; serde ignores the rest of the JSON.
+#[derive(Deserialize)]
+struct HnResponse { hits: Vec<HnHit> }
+#[derive(Deserialize)]
+struct HnHit {
+    title: Option<String>,
+    url: Option<String>,
+    points: Option<i64>,
+    num_comments: Option<i64>,
+}
+
+async fn news_search(args_json: &str) -> String {
+    let args: SearchArgs = match serde_json::from_str(args_json) {
+        Ok(a) => a,
+        Err(e) => return format!("ERROR: bad arguments: {e}"),
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://hn.algolia.com/api/v1/search")
+        .query(&[
+            ("query", args.query.as_str()),
+            ("tags", "story"),
+            ("hitsPerPage", "6"),
+        ])
+        .send()
+        .await;
+
+    let body = match resp {
+        Ok(r) => r.text().await.unwrap_or_default(),
+        Err(e) => return format!("ERROR fetching news: {e}"),
+    };
+
+    let parsed: HnResponse = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => return format!("ERROR parsing news: {e}"),
+    };
+
+    if parsed.hits.is_empty() {
+        return format!("No stories found for '{}'.", args.query);
+    }
+
+    let mut out = format!("Top stories for '{}':\n", args.query);
+    for (i, h) in parsed.hits.iter().enumerate() {
+        let title = h.title.clone().unwrap_or_else(|| "(untitled)".into());
+        let url = h.url.clone().unwrap_or_else(|| "(no url)".into());
+        let pts = h.points.unwrap_or(0);
+        let cmt = h.num_comments.unwrap_or(0);
+        out.push_str(&format!("{}. {title}  [{pts} pts, {cmt} comments]\n   {url}\n", i + 1));
+    }
+    out
 }
 
 // ── run_shell (Tier 2: HUMAN APPROVAL required) ─────────────────────────────
