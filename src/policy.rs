@@ -34,6 +34,7 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         "browse_url" => (false, field("url"), format!("browse {}", field("url"))),
         "get_current_time" => (false, String::new(), "check the time".into()),
         "wait" => (false, String::new(), "wait".into()),
+        "recall_activity" => (false, field("query"), "recall your activity".into()),
 
         // --- ask: changes the system / world ---
         "run_shell" => (true, field("command"), format!("run shell: {}", field("command"))),

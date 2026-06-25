@@ -117,7 +117,7 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                     let _ = send(&mut socket, serde_json::json!({"type":"state","state":"working"})).await;
 
                     let result = if run {
-                        tools::execute(&name, &args).await
+                        tools::execute(&name, &args, &st.mem).await
                     } else {
                         "DENIED by user".to_string()
                     };

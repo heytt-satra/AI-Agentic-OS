@@ -26,6 +26,9 @@ enum MemCmd {
     RecentAudit { n: i64, reply: oneshot::Sender<Vec<(String, String, bool)>> },
     CheckPerm { tool: String, key: String, reply: oneshot::Sender<Option<bool>> },
     RememberPerm { tool: String, key: String, allow: bool },
+    LogActivity { kind: String, app: String, detail: String },
+    ActivityRecent { n: i64, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
+    ActivitySearch { query: String, n: i64, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -141,6 +144,31 @@ impl MemoryHandle {
             .await;
     }
 
+    // ── second-brain activity log ───────────────────────────────────────────
+    pub async fn log_activity(&self, kind: &str, app: &str, detail: &str) {
+        let _ = self
+            .tx
+            .send(MemCmd::LogActivity { kind: kind.to_string(), app: app.to_string(), detail: detail.to_string() })
+            .await;
+    }
+
+    pub async fn activity_recent(&self, n: i64) -> Vec<(i64, String, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ActivityRecent { n, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn activity_search(&self, query: &str, n: i64) -> Vec<(i64, String, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        let cmd = MemCmd::ActivitySearch { query: query.to_string(), n, reply };
+        if self.tx.send(cmd).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     // Recent tool-call feedback rows (tool, decision, ok) for the digest.
     pub async fn recent_audit(&self, n: i64) -> Vec<(String, String, bool)> {
         let (reply, rx) = oneshot::channel();
@@ -183,6 +211,12 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS permissions (
             tool TEXT NOT NULL, key TEXT NOT NULL, allow INTEGER NOT NULL,
             PRIMARY KEY (tool, key)
+         );
+         -- The 'second brain': a log of what you were doing over time.
+         -- kind = window | clipboard | screenshot. app + detail describe it.
+         CREATE TABLE IF NOT EXISTS activity (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            kind TEXT NOT NULL, app TEXT NOT NULL, detail TEXT NOT NULL
          );",
     )
     .context("creating tables")?;
@@ -288,7 +322,44 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
                 params![tool, key, allow as i64],
             );
         }
+        MemCmd::LogActivity { kind, app, detail } => {
+            let _ = conn.execute(
+                "INSERT INTO activity (ts, kind, app, detail) VALUES (?1, ?2, ?3, ?4)",
+                params![now_secs(), kind, app, detail],
+            );
+        }
+        MemCmd::ActivityRecent { n, reply } => {
+            let rows = query_activity(conn, None, n).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::ActivitySearch { query, n, reply } => {
+            let rows = query_activity(conn, Some(&query), n).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
     }
+}
+
+fn query_activity(conn: &Connection, query: Option<&str>, n: i64) -> Result<Vec<(i64, String, String, String)>> {
+    let mut rows = Vec::new();
+    if let Some(q) = query {
+        let like = format!("%{}%", q);
+        let mut stmt = conn.prepare(
+            "SELECT ts, kind, app, detail FROM activity
+             WHERE app LIKE ?1 OR detail LIKE ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let mapped = stmt.query_map(params![like, n], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?;
+        for r in mapped { rows.push(r?); }
+    } else {
+        let mut stmt = conn.prepare("SELECT ts, kind, app, detail FROM activity ORDER BY id DESC LIMIT ?1")?;
+        let mapped = stmt.query_map(params![n], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?;
+        for r in mapped { rows.push(r?); }
+    }
+    rows.reverse(); // chronological
+    Ok(rows)
 }
 
 // Embed any dialog messages that don't yet have a vector (e.g. messages saved

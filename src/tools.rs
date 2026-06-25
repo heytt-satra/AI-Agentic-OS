@@ -42,12 +42,16 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
+        f("recall_activity", "Look up what the user has been doing (their tracked app/window/clipboard activity = their 'second brain'). Use for 'what was I doing', 'what apps did I use', 'how long in X'. Optional query filters by app/keyword.",
+          serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"optional app/keyword filter; empty = most recent activity"}},"required":[]})),
     ]
 }
 
-// Dispatch. async because some tools await the network.
-pub async fn execute(name: &str, args_json: &str) -> String {
+// Dispatch. async because some tools await the network. `mem` is passed so
+// memory-backed tools (recall_activity) can query the second brain.
+pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHandle) -> String {
     match name {
+        "recall_activity" => recall_activity(args_json, mem).await,
         "read_file" => read_file(args_json),
         "write_file" => write_file(args_json),
         "list_dir" => list_dir(args_json),
@@ -410,6 +414,29 @@ struct HnHit {
     points: Option<i64>,
     created_at: Option<String>,
     created_at_i: Option<i64>,
+}
+
+async fn recall_activity(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let q = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|v| v.get("query").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let rows = if q.trim().is_empty() {
+        mem.activity_recent(40).await
+    } else {
+        mem.activity_search(&q, 40).await
+    };
+    if rows.is_empty() {
+        return "No tracked activity yet (the second-brain tracker may be off or just started).".into();
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mut out = String::from("Your recent activity (most recent last):\n");
+    for (ts, kind, app, detail) in rows {
+        let mins = ((now - ts).max(0)) / 60;
+        let d: String = detail.chars().take(90).collect();
+        out.push_str(&format!("- {mins}m ago [{kind}] {app} {d}\n"));
+    }
+    out
 }
 
 async fn news_search(args: &str) -> String {

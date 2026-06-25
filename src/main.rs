@@ -4,6 +4,7 @@
 // Inner loop (run_turn): the agent's tool loop with a MAX_STEPS safety cap.
 // Everything is logged to SQLite memory.
 
+mod activity;
 mod embeddings;
 mod memory;
 mod policy;
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
         }
         Some("serve") => {
             // Launch the futuristic web HUD (open the printed URL in a browser).
+            activity::spawn(mem.clone()); // second-brain tracking
             server::serve(provider, mem).await?;
             return Ok(());
         }
@@ -86,6 +88,9 @@ async fn main() -> Result<()> {
         });
     }
     println!("(heartbeat every {hb_secs}s)");
+
+    // Second-brain: track what you're doing in the background.
+    activity::spawn(mem.clone());
 
     println!("Jarvis online ({}).", provider.model());
     println!(
@@ -175,7 +180,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                 let (decision, run) = decide_console(mem, &name, &risk, tainted).await;
                 let result = if run {
                     println!("  · {}", risk.label);
-                    tools::execute(&name, &args).await
+                    tools::execute(&name, &args, mem).await
                 } else {
                     println!("  · denied: {}", risk.label);
                     "DENIED by user".to_string()
@@ -281,6 +286,7 @@ async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
 async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
     let dialog = mem.recent_dialog(30).await;
     let audit = mem.recent_audit(30).await;
+    let activity = mem.activity_recent(40).await;
 
     let dialog_txt = dialog
         .iter()
@@ -293,10 +299,18 @@ async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let activity_txt = activity
+        .iter()
+        .map(|(_ts, kind, app, detail)| format!("- [{kind}] {app} {}", detail.chars().take(60).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let prompt = format!(
         "Write my daily digest from the activity below. Three short sections:\n\
-         **Did** (what got done), **Noticed** (anything noteworthy), **Needs you** \
-         (decisions or follow-ups for me). Keep it tight. If a section is empty, say 'nothing'.\n\n\
+         **Did** (what got done — use the apps/windows I spent time in), **Noticed** \
+         (anything noteworthy), **Needs you** (decisions or follow-ups for me). Keep it \
+         tight. If a section is empty, say 'nothing'.\n\n\
+         WHAT I WAS DOING (apps/windows/clipboard):\n{activity_txt}\n\n\
          RECENT CONVERSATION:\n{dialog_txt}\n\nRECENT TOOL ACTIONS:\n{audit_txt}"
     );
 
