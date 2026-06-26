@@ -114,6 +114,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // `jarvis setup` runs BEFORE we need an API key, so a brand-new user can
+    // choose their brain (API key or local) and we write their .env for them.
+    if std::env::args().nth(1).as_deref() == Some("setup") {
+        return run_setup();
+    }
+
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
 
@@ -239,6 +245,72 @@ async fn main() -> Result<()> {
 
     println!("\nGoodbye, sir.");
     Ok(())
+}
+
+// First-run setup: let the user pick how to power Jarvis's brain and write the
+// .env for them. Two modes: bring an API key (cheapest to start, any machine) or
+// run a local model (free per use, needs Ollama + a decent GPU).
+fn run_setup() -> Result<()> {
+    use std::io::{stdin, stdout, Write};
+    println!("\nJarvis setup. Choose how to power the brain:\n");
+    println!("  [1] API key  - cheapest to start, works on any machine (OpenRouter/DeepSeek, a few cents of use)");
+    println!("  [2] Local    - free per use, runs entirely on your machine (needs Ollama + a decent GPU)\n");
+    print!("Enter 1 or 2: ");
+    let _ = stdout().flush();
+    let mut choice = String::new();
+    let _ = stdin().read_line(&mut choice);
+
+    let mut env = std::fs::read_to_string(".env").unwrap_or_default();
+    if choice.trim() == "2" {
+        env = upsert_env(&env, "OPENROUTER_BASE_URL", "http://localhost:11434/v1");
+        env = upsert_env(&env, "OPENROUTER_API_KEY", "ollama");
+        env = upsert_env(&env, "OPENROUTER_MODEL", "qwen2.5-coder:7b");
+        std::fs::write(".env", env)?;
+        println!("\nLocal mode set. One-time steps:");
+        println!("  1. Install Ollama:  winget install Ollama.Ollama   (mac: brew install ollama)");
+        println!("  2. Pull the model:  ollama pull qwen2.5-coder:7b");
+        println!("  3. Start Jarvis:    jarvis");
+        println!("\nNo API key, no per-use cost. The first reply is slow while the model loads into VRAM.");
+    } else {
+        print!("\nPaste your OpenRouter API key (get one at https://openrouter.ai/keys): ");
+        let _ = stdout().flush();
+        let mut key = String::new();
+        let _ = stdin().read_line(&mut key);
+        let key = key.trim();
+        if !key.is_empty() {
+            env = upsert_env(&env, "OPENROUTER_API_KEY", key);
+        }
+        env = upsert_env(&env, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
+        env = upsert_env(&env, "OPENROUTER_MODEL", "deepseek/deepseek-v4-flash");
+        std::fs::write(".env", env)?;
+        println!("\nAPI mode set with DeepSeek (very cheap). Start Jarvis:  jarvis");
+    }
+    Ok(())
+}
+
+// Set key=value in .env content: replace the existing line (even if commented)
+// or append it. Keeps the rest of the file intact.
+fn upsert_env(content: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let prefix = format!("{key}=");
+    let mut lines: Vec<String> = content
+        .lines()
+        .map(|line| {
+            let bare = line.trim_start().trim_start_matches('#').trim_start();
+            if bare.starts_with(&prefix) {
+                found = true;
+                format!("{key}={value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        lines.push(format!("{key}={value}"));
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 // Own-model Stage 1: export everything Jarvis has collected into a labeled
