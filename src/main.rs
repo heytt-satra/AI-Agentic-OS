@@ -82,6 +82,25 @@ summarize as a count.\n\
 HONESTY: if a tool returns an ERROR or you could not do something, say so plainly. \
 NEVER claim you did something you did not actually do.";
 
+// The Outreach Writer skill, baked in permanently. Appended to the system prompt
+// so EVERY email / DM / connection note Jarvis writes follows it. The hard rule:
+// research the real prospect first, use only verified facts, never fabricate.
+pub const OUTREACH_GUIDE: &str = "OUTREACH RULES (MANDATORY for every cold email, LinkedIn note, or DM you write):\n\
+1) NEVER write outreach from memory or assumptions. FIRST gather real facts: run web_search on the specific person and their company, and use extract_contacts / fetch their site or profile. Base the whole message only on what you actually find.\n\
+2) FACTUAL ONLY. Use only verified facts. Never invent names, numbers, clients, results, or details. If you cannot verify a claim, leave it out. No misinformation, ever.\n\
+3) Personalize to THIS person using what you found - it must be impossible to send to anyone else.\n\
+METHOD (the Outreach Writer skill):\n\
+Subject: pick ONE, do not mix - name their pain, or open a fear loop (a dread scenario left unresolved), or hold up a mirror (a sharp specific observation that makes them wonder how you noticed).\n\
+Body: (a) THEIR WORLD - 1-3 lines of specific observation about what they do, built, or changed; no flattery, observation only; (b) THE PAIN - name the exact problem they live with, in their words, why it keeps happening, what it costs; (c) ONE line on what you remove from their life (not a product description); (d) PROOF - 2 or 3 specific real names or numbers relevant to them; (e) ONE low-friction ask (a 15-minute call, a yes or no). Write nothing after the CTA.\n\
+LinkedIn connection note: 300 characters max - one specific observation plus one reason to connect, no pitch, no ask. LinkedIn DM (1-2 days after they accept): under 150 words - observation, their pain, one or two lines on what you do, 2-3 proofs, soft close.\n\
+Job-hunting outreach: position the sender across technical depth, customer understanding, product thinking, and business outcomes; show what they shipped, not titles; never say 'I am looking for a job' - say what you can do for them.\n\
+STYLE: plain English, no word chosen to impress, NO em dashes (use commas or short sentences), specific over general, observations over compliments, exactly one ask. Never open with 'I hope this finds you well' or any filler. The pain is the pitch.";
+
+// The full system prompt: persona + the always-on outreach skill.
+pub fn system_prompt() -> String {
+    format!("{PERSONA}\n\n{OUTREACH_GUIDE}")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -159,7 +178,7 @@ async fn main() -> Result<()> {
     );
 
     // The live conversation for THIS session, seeded with the persona...
-    let mut messages: Vec<Message> = vec![Message::system(PERSONA)];
+    let mut messages: Vec<Message> = vec![Message::system(system_prompt())];
 
     // ...and with the last few turns for short-term continuity. (Relevance
     // recall, below, pulls in older relevant facts per-question.)
@@ -385,7 +404,7 @@ async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
         .unwrap_or_else(|_| "Search the news for the latest in AI.".to_string());
 
     let mut messages = vec![
-        Message::system(PERSONA),
+        Message::system(system_prompt()),
         Message::user(format!(
             "HEARTBEAT: scheduled self-check. Work the checklist below with your tools, \
              then give a SHORT briefing (a few lines max). If nothing's notable, say so.\n\n{checklist}"
@@ -433,7 +452,7 @@ async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
          RECENT CONVERSATION:\n{dialog_txt}\n\nRECENT TOOL ACTIONS:\n{audit_txt}"
     );
 
-    let messages = vec![Message::system(PERSONA), Message::user(prompt)];
+    let messages = vec![Message::system(system_prompt()), Message::user(prompt)];
     // One plain call, no tools.
     match provider.chat(&messages, None).await {
         Ok(reply) => {

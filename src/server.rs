@@ -66,7 +66,7 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
     )
     .await;
 
-    let mut messages = vec![Message::system(crate::PERSONA)];
+    let mut messages = vec![Message::system(crate::system_prompt())];
 
     while let Some(Ok(msg)) = socket.recv().await {
         let text = match msg {
