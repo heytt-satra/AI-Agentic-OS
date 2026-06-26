@@ -36,6 +36,22 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Leads / outreach engine.
+    LeadAdd { lead: Lead, reply: oneshot::Sender<i64> },
+    LeadList { reply: oneshot::Sender<Vec<(i64, Lead)>> },
+    LeadSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+}
+
+// One lead/contact row (without the id/ts the DB assigns).
+#[derive(Clone, Default)]
+pub struct Lead {
+    pub name: String,
+    pub org: String,
+    pub email: String,
+    pub phone: String,
+    pub url: String,
+    pub note: String,
+    pub status: String,
 }
 
 // ── The handle other code holds. Clone is cheap (clones a channel sender). ──
@@ -238,6 +254,31 @@ impl MemoryHandle {
         }
         rx.await.unwrap_or(false)
     }
+
+    // ── leads / outreach engine ─────────────────────────────────────────────
+    pub async fn lead_add(&self, lead: Lead) -> i64 {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LeadAdd { lead, reply }).await.is_err() {
+            return -1;
+        }
+        rx.await.unwrap_or(-1)
+    }
+
+    pub async fn lead_list(&self) -> Vec<(i64, Lead)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LeadList { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn lead_set_status(&self, id: i64, status: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LeadSetStatus { id, status: status.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
 }
 
 // ── Everything below runs ON the owner thread, with exclusive Connection access ─
@@ -274,6 +315,15 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
+         );
+         -- Leads / contacts for the research+outreach engine.
+         -- status = new | contacted | replied | dropped.
+         CREATE TABLE IF NOT EXISTS leads (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            name TEXT NOT NULL DEFAULT '', org TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'new'
          );",
     )
     .context("creating tables")?;
@@ -418,7 +468,47 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
                 .unwrap_or(0);
             let _ = reply.send(n > 0);
         }
+        MemCmd::LeadAdd { lead, reply } => {
+            let status = if lead.status.is_empty() { "new".to_string() } else { lead.status.clone() };
+            let _ = conn.execute(
+                "INSERT INTO leads (ts, name, org, email, phone, url, note, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![now_secs(), lead.name, lead.org, lead.email, lead.phone, lead.url, lead.note, status],
+            );
+            let _ = reply.send(conn.last_insert_rowid());
+        }
+        MemCmd::LeadList { reply } => {
+            let rows = query_leads(conn).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::LeadSetStatus { id, status, reply } => {
+            let n = conn
+                .execute("UPDATE leads SET status=?2 WHERE id=?1", params![id, status])
+                .unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
     }
+}
+
+// All leads not dropped, oldest first.
+fn query_leads(conn: &Connection) -> Result<Vec<(i64, Lead)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, org, email, phone, url, note, status FROM leads \
+         WHERE status != 'dropped' ORDER BY id ASC LIMIT 500",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                Lead {
+                    name: r.get(1)?, org: r.get(2)?, email: r.get(3)?, phone: r.get(4)?,
+                    url: r.get(5)?, note: r.get(6)?, status: r.get(7)?,
+                },
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 // Tasks that still matter (not cancelled), oldest first: (id, title, status).

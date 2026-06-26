@@ -46,6 +46,17 @@ pub fn definitions() -> Vec<Tool> {
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
         f("web_search", "Search the web for ANYTHING - leads, companies, people, jobs, suppliers, research, current facts - and get back the top results as title, url, and snippet. This is how you FIND things online before fetching or browsing them. Use it whenever the user wants you to find or look something up.", str_prop("query", "what to search for")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
+
+        // ── research + outreach engine: find -> collect -> reach out
+        f("extract_contacts", "Fetch a web page and pull out the email addresses and phone numbers on it. Use on a lead's website (often the home or contact page) to find how to reach them.", str_prop("url", "the page URL to scan")),
+        f("lead_add", "Save a lead/contact to the outreach list (survives restarts). Use after web_search/extract_contacts to keep the good ones. Only name is required; include email, phone, org, url, note when known.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"org":{"type":"string"},"email":{"type":"string"},"phone":{"type":"string"},"url":{"type":"string"},"note":{"type":"string"}},"required":["name"]})),
+        f("lead_list", "List saved leads with id, name, org, email, phone, url and status (new/contacted/replied/dropped).",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("lead_update", "Update a lead's status by id: new | contacted | replied | dropped.",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"}},"required":["id","status"]})),
+        f("email_compose", "Open a prefilled email in the user's Gmail in their browser, ready to review and send (they are already logged in, so they just glance and hit Send). Use this to send outreach. After composing, mark the lead 'contacted' with lead_update.",
+          serde_json::json!({"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]})),
         f("recall_activity", "Look up what the user has been doing (their tracked app/window/clipboard activity = their 'second brain'). Use for 'what was I doing', 'what apps did I use', 'how long in X'. Optional query filters by app/keyword.",
           serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"optional app/keyword filter; empty = most recent activity"}},"required":[]})),
 
@@ -97,6 +108,11 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
         "web_search" => web_search(args_json).await,
+        "extract_contacts" => extract_contacts(args_json).await,
+        "lead_add" => lead_add_tool(args_json, mem).await,
+        "lead_list" => lead_list_tool(mem).await,
+        "lead_update" => lead_update_tool(args_json, mem).await,
+        "email_compose" => email_compose(args_json),
         "code_new_project" => code_new_project(args_json),
         "code_write_file" => code_write_file(args_json),
         "code_read_file" => code_read_file(args_json),
@@ -1016,6 +1032,168 @@ fn strip_tags(s: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&nbsp;", " ")
+}
+
+// ── research + outreach engine ──────────────────────────────────────────────
+#[derive(Deserialize)]
+struct LeadArgs {
+    name: String,
+    #[serde(default)] org: String,
+    #[serde(default)] email: String,
+    #[serde(default)] phone: String,
+    #[serde(default)] url: String,
+    #[serde(default)] note: String,
+}
+#[derive(Deserialize)]
+struct LeadUpdateArgs { id: i64, status: String }
+#[derive(Deserialize)]
+struct EmailArgs { to: String, subject: String, body: String }
+
+// Fetch a page and pull out emails + phone numbers.
+async fn extract_contacts(args: &str) -> String {
+    let a: UrlArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        .build()
+    { Ok(c) => c, Err(e) => return format!("ERROR: http client: {e}") };
+    let html = match client.get(&a.url).send().await {
+        Ok(r) => r.text().await.unwrap_or_default(),
+        Err(e) => return format!("ERROR fetching {}: {e}", a.url),
+    };
+    let emails = find_emails(&html);
+    let phones = find_phones(&html);
+    if emails.is_empty() && phones.is_empty() {
+        return format!("No emails or phone numbers found on {}", a.url);
+    }
+    let mut out = format!("Contacts on {}:\n", a.url);
+    if !emails.is_empty() { out.push_str(&format!("emails: {}\n", emails.join(", "))); }
+    if !phones.is_empty() { out.push_str(&format!("phones: {}\n", phones.join(", "))); }
+    out
+}
+
+// Find email addresses by expanding around each '@' over allowed ASCII chars.
+fn find_emails(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let local_ok = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'%' | b'+' | b'-');
+    let dom_ok = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-');
+    let mut set = std::collections::BTreeSet::new();
+    for (i, &c) in bytes.iter().enumerate() {
+        if c != b'@' { continue; }
+        let mut l = i;
+        while l > 0 && local_ok(bytes[l - 1]) { l -= 1; }
+        let mut r = i + 1;
+        while r < bytes.len() && dom_ok(bytes[r]) { r += 1; }
+        if l < i && r > i + 1 {
+            let cand = text[l..r].trim_end_matches('.').to_lowercase();
+            if let Some(at) = cand.find('@') {
+                let dom = &cand[at + 1..];
+                if dom.contains('.') && !dom.starts_with('.') && !dom.ends_with('.') {
+                    set.insert(cand);
+                }
+            }
+        }
+    }
+    set.into_iter().take(25).collect()
+}
+
+// Find phone-like runs: 10-15 digits with the usual separators.
+fn find_phones(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let is_phone_char = |c: char| c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '.');
+    let mut set = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() || chars[i] == '+' {
+            let start = i;
+            while i < chars.len() && is_phone_char(chars[i]) { i += 1; }
+            let run: String = chars[start..i].iter().collect();
+            let digits = run.chars().filter(|c| c.is_ascii_digit()).count();
+            if (10..=15).contains(&digits) {
+                set.insert(run.trim().to_string());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    set.into_iter().take(15).collect()
+}
+
+async fn lead_add_tool(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let a: LeadArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let lead = crate::memory::Lead {
+        name: a.name.clone(), org: a.org, email: a.email.clone(), phone: a.phone.clone(),
+        url: a.url, note: a.note, status: String::new(),
+    };
+    let id = mem.lead_add(lead).await;
+    if id < 0 { return "ERROR: could not save lead".to_string(); }
+    let mut tail = String::new();
+    if !a.email.is_empty() { tail.push_str(&format!(" {}", a.email)); }
+    if !a.phone.is_empty() { tail.push_str(&format!(" {}", a.phone)); }
+    format!("saved lead #{id}: {}{tail}", a.name)
+}
+
+async fn lead_list_tool(mem: &crate::memory::MemoryHandle) -> String {
+    let rows = mem.lead_list().await;
+    if rows.is_empty() { return "No leads yet.".to_string(); }
+    let mut out = format!("Leads ({}):\n", rows.len());
+    for (id, l) in rows {
+        let mut parts = vec![format!("#{id} [{}] {}", l.status, l.name)];
+        if !l.org.is_empty() { parts.push(l.org); }
+        if !l.email.is_empty() { parts.push(l.email); }
+        if !l.phone.is_empty() { parts.push(l.phone); }
+        if !l.url.is_empty() { parts.push(l.url); }
+        out.push_str(&format!("  {}\n", parts.join(" | ")));
+    }
+    out
+}
+
+async fn lead_update_tool(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let a: LeadUpdateArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.lead_set_status(a.id, &a.status).await {
+        format!("lead #{} marked {}", a.id, a.status)
+    } else {
+        format!("ERROR: no lead #{}", a.id)
+    }
+}
+
+// Open a prefilled Gmail compose window in the user's default browser. They are
+// already logged in, so they review and click Send - no credentials, and a human
+// check before any outbound email (it is not auto-sent).
+fn email_compose(args: &str) -> String {
+    let a: EmailArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let url = format!(
+        "https://mail.google.com/mail/?view=cm&fs=1&to={}&su={}&body={}",
+        percent_encode(&a.to), percent_encode(&a.subject), percent_encode(&a.body)
+    );
+    match open_url_default(&url) {
+        Ok(()) => format!("opened a Gmail draft to {} (review it and hit Send).", a.to),
+        Err(e) => e,
+    }
+}
+
+// Percent-encode a string for use in a URL query value.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// Open a URL in the OS default browser.
+fn open_url_default(url: &str) -> Result<(), String> {
+    let r = if cfg!(windows) {
+        let ps = format!("Start-Process '{}'", url.replace('\'', "''"));
+        std::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    r.map(|_| ()).map_err(|e| format!("ERROR opening browser: {e}"))
 }
 
 async fn fetch_url(args: &str) -> String {

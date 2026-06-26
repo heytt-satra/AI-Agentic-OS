@@ -150,7 +150,7 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                     };
                     let ok = tools::result_ok(&result);
                     st.mem.log_audit(&name, &args, &decision, ok).await;
-                    if matches!(name.as_str(), "fetch_url" | "news_search" | "browse_url" | "browse_js") {
+                    if matches!(name.as_str(), "fetch_url" | "news_search" | "web_search" | "extract_contacts" | "browse_url" | "browse_js") {
                         tainted = true;
                     }
                     st.mem.log("tool", &result).await;

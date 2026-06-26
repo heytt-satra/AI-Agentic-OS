@@ -63,6 +63,13 @@ BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add 
 If you are restarted or interrupted, call task_list to see what is left and resume. \
 RECOVERY: when a tool returns an ERROR, do not give up at once. Read the error, \
 adjust your approach, and try a couple of times before reporting that you are stuck.\n\
+FINDING LEADS AND OUTREACH: to find prospects, clients, jobs, or contacts, use \
+web_search, then extract_contacts on the promising sites to pull their emails and \
+phone numbers. Filter to the ones that actually fit and save them with lead_add. \
+To reach out, write a SHORT, specific, personalized email (no generic spam) and \
+call email_compose - it opens the message prefilled in the user's Gmail for them \
+to review and send. After composing, mark the lead contacted with lead_update. Use \
+lead_list to see saved leads and resume later.\n\
 ACQUIRE THEN OPERATE: if the user wants an app that is not installed, install it \
 with install_software, then launch it with open_app. To drive an open app to a \
 result, prefer operate_app with a plain-language goal — it runs an autonomous \
@@ -276,7 +283,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                 };
                 let ok = tools::result_ok(&result);
                 mem.log_audit(&name, &args, &decision, ok).await;
-                if matches!(name.as_str(), "fetch_url" | "news_search" | "browse_url" | "browse_js") {
+                if matches!(name.as_str(), "fetch_url" | "news_search" | "web_search" | "extract_contacts" | "browse_url" | "browse_js") {
                     tainted = true; // read untrusted web -> later risky actions re-ask
                 }
                 mem.log("tool", &result).await;
