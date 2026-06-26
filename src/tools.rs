@@ -44,6 +44,7 @@ pub fn definitions() -> Vec<Tool> {
         f("browse_js", "Open a URL in a headless browser and run a JavaScript snippet on the page (click, fill forms, extract data). Requires approval. Return value is sent back.",
           serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
+        f("web_search", "Search the web for ANYTHING - leads, companies, people, jobs, suppliers, research, current facts - and get back the top results as title, url, and snippet. This is how you FIND things online before fetching or browsing them. Use it whenever the user wants you to find or look something up.", str_prop("query", "what to search for")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
         f("recall_activity", "Look up what the user has been doing (their tracked app/window/clipboard activity = their 'second brain'). Use for 'what was I doing', 'what apps did I use', 'how long in X'. Optional query filters by app/keyword.",
           serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"optional app/keyword filter; empty = most recent activity"}},"required":[]})),
@@ -95,6 +96,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
+        "web_search" => web_search(args_json).await,
         "code_new_project" => code_new_project(args_json),
         "code_write_file" => code_write_file(args_json),
         "code_read_file" => code_read_file(args_json),
@@ -935,6 +937,85 @@ async fn browse_js(args: &str) -> String {
         Ok(Err(e)) => e,
         Err(e) => format!("ERROR: browser task: {e}"),
     }
+}
+
+// ── general web search (DuckDuckGo HTML, no API key) ────────────────────────
+// The foundation capability for "go find X": leads, jobs, companies, facts.
+async fn web_search(args: &str) -> String {
+    let a: SearchArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return format!("ERROR: http client: {e}"),
+    };
+    let resp = client
+        .get("https://html.duckduckgo.com/html/")
+        .query(&[("q", a.query.as_str())])
+        .send()
+        .await;
+    let html = match resp {
+        Ok(r) => r.text().await.unwrap_or_default(),
+        Err(e) => return format!("ERROR searching for '{}': {e}", a.query),
+    };
+    let titles = extract_blocks(&html, "result__a", "</a>");
+    let urls = extract_blocks(&html, "result__url", "</a>");
+    let snips = extract_blocks(&html, "result__snippet", "</a>");
+    if titles.is_empty() || urls.is_empty() {
+        return format!("No web results for '{}' (the search may have been rate-limited).", a.query);
+    }
+    let n = titles.len().min(urls.len());
+    let mut out = format!("Top web results for \"{}\":\n", a.query);
+    for i in 0..n.min(8) {
+        let url = urls[i].trim();
+        let url = if url.starts_with("http") { url.to_string() } else { format!("https://{url}") };
+        let snip = snips.get(i).map(|s| s.as_str()).unwrap_or("");
+        out.push_str(&format!("{}. {}\n   {}\n   {}\n", i + 1, titles[i], url, snip));
+    }
+    out
+}
+
+// Pull the inner text of every element with the given class, up to `end`.
+fn extract_blocks(html: &str, class: &str, end: &str) -> Vec<String> {
+    let needle = format!("class=\"{class}\"");
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(i) = html[pos..].find(&needle) {
+        let start = pos + i;
+        if let Some(gt) = html[start..].find('>') {
+            let content_start = start + gt + 1;
+            if let Some(e) = html[content_start..].find(end) {
+                out.push(strip_tags(&html[content_start..content_start + e]));
+                pos = content_start + e;
+                continue;
+            }
+        }
+        pos = start + needle.len();
+    }
+    out
+}
+
+// Strip HTML tags and decode the few entities DuckDuckGo emits.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim()
+        .replace("&amp;", "&")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
 }
 
 async fn fetch_url(args: &str) -> String {
