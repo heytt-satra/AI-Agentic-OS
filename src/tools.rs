@@ -481,12 +481,22 @@ fn open_app(args: &str) -> String {
 #[cfg(windows)]
 fn open_app_os(name: &str) -> String {
     let name_lit = format!("'{}'", name.replace('\'', "''"));
+    // 1) Start Menu shortcut -> launch it (GUI).
+    // 2) else a command on PATH: if it's a real .exe, Start-Process it directly
+    //    (notepad/calc/chrome/code are GUI apps and must NOT be wrapped in a
+    //    terminal). Only actual scripts/shims (.ps1/.cmd/.bat, e.g. codex) open
+    //    in a visible terminal so their output is seen.
+    // 3) else hand the bare name to the OS.
     let script = r#"$n=__NAME__;
 $sm=@("$env:ProgramData\Microsoft\Windows\Start Menu\Programs","$env:APPDATA\Microsoft\Windows\Start Menu\Programs");
 $lnk=Get-ChildItem -Path $sm -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "*$n*" } | Select-Object -First 1 -ExpandProperty FullName;
 if($lnk){ Start-Process $lnk; "opened app: $lnk" }
-elseif(Get-Command $n -ErrorAction SilentlyContinue){ Start-Process powershell -ArgumentList '-NoExit','-Command',$n; "opened $n in a terminal" }
-else { Start-Process $n; "started $n" }"#
+else {
+  $c = Get-Command $n -ErrorAction SilentlyContinue;
+  if($c -and $c.Source -and ($c.Source -match '\.exe$')){ Start-Process $c.Source; "opened $($c.Source)" }
+  elseif($c){ Start-Process powershell -ArgumentList '-NoExit','-Command',$n; "opened $n in a terminal" }
+  else { Start-Process $n; "started $n" }
+}"#
         .replace("__NAME__", &name_lit);
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
