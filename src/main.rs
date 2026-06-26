@@ -63,6 +63,11 @@ BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add 
 If you are restarted or interrupted, call task_list to see what is left and resume. \
 RECOVERY: when a tool returns an ERROR, do not give up at once. Read the error, \
 adjust your approach, and try a couple of times before reporting that you are stuck.\n\
+SEARCHING THE WEB: ALWAYS use the web_search tool to find anything online. NEVER \
+open google.com, bing.com, or duckduckgo.com with browse_url or fetch_url to run a \
+search - those block automated traffic and waste your steps. web_search already \
+finds results reliably across several engines. Use browse_url or fetch_url ONLY to \
+read a specific result page whose URL web_search already returned.\n\
 FINDING LEADS AND OUTREACH: to find prospects, clients, jobs, or contacts, use \
 web_search, then extract_contacts on the promising sites to pull their emails and \
 phone numbers. Filter to the ones that actually fit and save them with lead_add. \

@@ -94,7 +94,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "open_path" => open_path(args_json),
         "run_shell" => run_shell(args_json),
         "open_app" => open_app(args_json),
-        "install_software" => install_software(args_json),
+        "install_software" => install_software(args_json).await,
         "wait" => wait_tool(args_json).await,
         "paste_text" => paste_text(args_json),
         "type_text" => type_text(args_json),
@@ -565,9 +565,20 @@ fn open_app_os(name: &str) -> String {
 
 // Acquire software via the OS package manager (Power: download + install).
 // Part of the autonomous "acquire -> open -> operate" loop.
-fn install_software(args: &str) -> String {
+async fn install_software(args: &str) -> String {
     let a: NameArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    install_software_os(&a.name)
+    let name = a.name.clone();
+    // Run on a blocking thread with a hard timeout so a stuck installer (e.g. an
+    // ambiguous package waiting on input) can never hang Jarvis forever.
+    let job = tokio::task::spawn_blocking(move || install_software_os(&name));
+    match tokio::time::timeout(std::time::Duration::from_secs(240), job).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => "ERROR: install task failed".to_string(),
+        Err(_) => format!(
+            "ERROR: installing '{}' timed out after 4 minutes. The package name may be ambiguous or the installer wanted input. Try a more specific name, or install it yourself.",
+            a.name
+        ),
+    }
 }
 
 #[cfg(windows)]
@@ -575,7 +586,7 @@ fn install_software_os(name: &str) -> String {
     let out = std::process::Command::new("winget")
         .args([
             "install", "--accept-package-agreements", "--accept-source-agreements",
-            "--silent", "--disable-interactivity", name,
+            "--silent", "--disable-interactivity", "--source", "winget", name,
         ])
         .output();
     finish_install(name, out, "winget")
@@ -959,15 +970,35 @@ async fn browse_js(args: &str) -> String {
 // The foundation capability for "go find X": leads, jobs, companies, facts.
 async fn web_search(args: &str) -> String {
     let a: SearchArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    // Prefer the Brave Search API when a key is set - it's a real API that does
-    // not block or rate-limit like scraping does. Falls back to the DuckDuckGo
-    // scrape when no key is configured.
+    // Brave API first if a key is set (most reliable). Otherwise fall through a
+    // chain of free engines on DIFFERENT infrastructures, so one being blocked
+    // doesn't kill the search. First one with results wins.
     if let Ok(key) = std::env::var("BRAVE_API_KEY") {
         if !key.trim().is_empty() {
             return brave_search(&a.query, key.trim()).await;
         }
     }
-    ddg_search(&a.query).await
+    let client = match search_client() { Ok(c) => c, Err(e) => return format!("ERROR: http client: {e}") };
+    // Order by what survives bot traffic best in practice: DDG, then Mojeek (an
+    // independent crawler that rarely blocks), then Bing as a last resort.
+    if let Some(rs) = ddg_html(&client, &a.query).await { return format_results(&a.query, &rs); }
+    if let Some(rs) = mojeek_html(&client, &a.query).await { return format_results(&a.query, &rs); }
+    if let Some(rs) = bing_html(&client, &a.query).await { return format_results(&a.query, &rs); }
+    format!("No web results for '{}' - every free engine blocked the request right now. Wait a minute and retry, or set BRAVE_API_KEY in .env for a search API that never blocks.", a.query)
+}
+
+fn search_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .build()
+}
+
+fn format_results(query: &str, rs: &[(String, String, String)]) -> String {
+    let mut out = format!("Top web results for \"{query}\":\n");
+    for (i, (t, u, s)) in rs.iter().take(8).enumerate() {
+        out.push_str(&format!("{}. {}\n   {}\n   {}\n", i + 1, t, u, s));
+    }
+    out
 }
 
 // Brave Search API (https://brave.com/search/api/) - reliable JSON, no blocking.
@@ -1002,52 +1033,131 @@ async fn brave_search(query: &str, key: &str) -> String {
     out
 }
 
-// DuckDuckGo HTML scrape - the no-key fallback. Can rate-limit under heavy use.
-async fn ddg_search(query: &str) -> String {
-    let client = match reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return format!("ERROR: http client: {e}"),
-    };
-    // Retry with backoff: DuckDuckGo rate-limits bursts, so a single 202/empty
-    // response shouldn't fail the whole task.
+type SearchHits = Vec<(String, String, String)>;
+
+// DuckDuckGo HTML scrape, with one retry. Returns None if blocked/empty.
+async fn ddg_html(client: &reqwest::Client, query: &str) -> Option<SearchHits> {
     let mut html = String::new();
-    for attempt in 0..3 {
+    for attempt in 0..2 {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(700 * (1 << (attempt - 1)))).await;
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
-        match client.get("https://html.duckduckgo.com/html/").query(&[("q", query)]).send().await {
-            Ok(r) => {
-                let body = r.text().await.unwrap_or_default();
-                if body.contains("result__a") {
-                    html = body;
-                    break;
-                }
-                html = body; // keep last body for the empty-result message
+        if let Ok(r) = client
+            .get("https://html.duckduckgo.com/html/")
+            .query(&[("q", query)])
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+        {
+            if let Ok(body) = r.text().await {
+                if body.contains("result__a") { html = body; break; }
             }
-            Err(e) => html = format!("__err__{e}"),
         }
     }
-    if html.starts_with("__err__") {
-        return format!("ERROR searching for '{query}': {}", &html[7..]);
-    }
+    if html.is_empty() { return None; }
     let titles = extract_blocks(&html, "result__a", "</a>");
     let urls = extract_blocks(&html, "result__url", "</a>");
     let snips = extract_blocks(&html, "result__snippet", "</a>");
-    if titles.is_empty() || urls.is_empty() {
-        return format!("No web results for '{query}' (the no-key DuckDuckGo search was rate-limited; set BRAVE_API_KEY in .env for reliable search).");
-    }
+    if titles.is_empty() || urls.is_empty() { return None; }
     let n = titles.len().min(urls.len());
-    let mut out = format!("Top web results for \"{query}\":\n");
-    for i in 0..n.min(8) {
-        let url = urls[i].trim();
-        let url = if url.starts_with("http") { url.to_string() } else { format!("https://{url}") };
-        let snip = snips.get(i).map(|s| s.as_str()).unwrap_or("");
-        out.push_str(&format!("{}. {}\n   {}\n   {}\n", i + 1, titles[i], url, snip));
+    let mut out = Vec::new();
+    for i in 0..n {
+        let u = urls[i].trim();
+        let u = if u.starts_with("http") { u.to_string() } else { format!("https://{u}") };
+        out.push((titles[i].clone(), u, snips.get(i).cloned().unwrap_or_default()));
+    }
+    Some(out)
+}
+
+// Bing HTML scrape (different infra than DuckDuckGo).
+async fn bing_html(client: &reqwest::Client, query: &str) -> Option<SearchHits> {
+    let body = client
+        .get("https://www.bing.com/search")
+        .query(&[("q", query), ("setlang", "en")])
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send().await.ok()?
+        .text().await.ok()?;
+    let mut out = Vec::new();
+    for block in split_by_class(&body, "b_algo") {
+        if let Some((url, title)) = first_link(&block) {
+            if title.trim().is_empty() { continue; }
+            out.push((title, url, first_p_text(&block)));
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+// Mojeek HTML scrape (an independent crawler, scraper-tolerant). Each organic
+// result is an <a class="title" href=...> followed by a <p> snippet.
+async fn mojeek_html(client: &reqwest::Client, query: &str) -> Option<SearchHits> {
+    let body = client
+        .get("https://www.mojeek.com/search")
+        .query(&[("q", query)])
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send().await.ok()?
+        .text().await.ok()?;
+    let mut out = Vec::new();
+    for block in split_by_class(&body, "title") {
+        if let Some((url, title)) = first_link(&block) {
+            if !title.trim().is_empty() && url.starts_with("http") {
+                out.push((title, url, first_p_text(&block)));
+            }
+        }
+        if out.len() >= 10 { break; }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+// Split HTML into chunks, each beginning at an element with the given class.
+fn split_by_class(html: &str, class: &str) -> Vec<String> {
+    let needle = format!("class=\"{class}");
+    let mut starts = Vec::new();
+    let mut pos = 0;
+    while let Some(i) = html[pos..].find(&needle) {
+        starts.push(pos + i);
+        pos = pos + i + needle.len();
+    }
+    let mut out = Vec::new();
+    for (k, &s) in starts.iter().enumerate() {
+        let e = starts.get(k + 1).copied().unwrap_or(html.len());
+        out.push(html[s..e].to_string());
     }
     out
+}
+
+// First real http(s) link in a chunk: returns (url, link_text). Skips engine-
+// internal links so we get the actual result, not navigation chrome.
+fn first_link(chunk: &str) -> Option<(String, String)> {
+    let mut pos = 0;
+    loop {
+        let h = chunk[pos..].find("href=\"")? + pos + 6;
+        let end = chunk[h..].find('"')? + h;
+        let url = &chunk[h..end];
+        let bad = url.contains("bing.com") || url.contains("microsoft.com")
+            || url.contains("mojeek.com") || url.contains("go.microsoft")
+            || url.starts_with("http") == false;
+        if !bad {
+            let text = chunk[end..].find('>').and_then(|g| {
+                let ts = end + g + 1;
+                chunk[ts..].find("</a>").map(|te| strip_tags(&chunk[ts..ts + te]))
+            }).unwrap_or_default();
+            return Some((url.to_string(), text));
+        }
+        pos = end + 1;
+    }
+}
+
+// Text of the first <p>...</p> in a chunk (the result snippet).
+fn first_p_text(chunk: &str) -> String {
+    if let Some(p) = chunk.find("<p") {
+        if let Some(gt) = chunk[p..].find('>') {
+            let s = p + gt + 1;
+            if let Some(e) = chunk[s..].find("</p>") {
+                return strip_tags(&chunk[s..s + e]);
+            }
+        }
+    }
+    String::new()
 }
 
 // Pull the inner text of every element with the given class, up to `end`.
