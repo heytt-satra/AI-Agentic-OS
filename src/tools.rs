@@ -959,6 +959,51 @@ async fn browse_js(args: &str) -> String {
 // The foundation capability for "go find X": leads, jobs, companies, facts.
 async fn web_search(args: &str) -> String {
     let a: SearchArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    // Prefer the Brave Search API when a key is set - it's a real API that does
+    // not block or rate-limit like scraping does. Falls back to the DuckDuckGo
+    // scrape when no key is configured.
+    if let Ok(key) = std::env::var("BRAVE_API_KEY") {
+        if !key.trim().is_empty() {
+            return brave_search(&a.query, key.trim()).await;
+        }
+    }
+    ddg_search(&a.query).await
+}
+
+// Brave Search API (https://brave.com/search/api/) - reliable JSON, no blocking.
+async fn brave_search(query: &str, key: &str) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .query(&[("q", query), ("count", "10")])
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", key)
+        .send()
+        .await;
+    let (status, text) = match resp {
+        Ok(r) => (r.status(), r.text().await.unwrap_or_default()),
+        Err(e) => return format!("ERROR Brave search: {e}"),
+    };
+    if !status.is_success() {
+        return format!("ERROR Brave search {status}: {}", text.chars().take(200).collect::<String>());
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let results = match v["web"]["results"].as_array() {
+        Some(r) if !r.is_empty() => r,
+        _ => return format!("No web results for '{query}'."),
+    };
+    let mut out = format!("Top web results for \"{query}\":\n");
+    for (i, r) in results.iter().take(8).enumerate() {
+        let title = r["title"].as_str().unwrap_or("");
+        let url = r["url"].as_str().unwrap_or("");
+        let desc = r["description"].as_str().unwrap_or("");
+        out.push_str(&format!("{}. {}\n   {}\n   {}\n", i + 1, strip_tags(title), url, strip_tags(desc)));
+    }
+    out
+}
+
+// DuckDuckGo HTML scrape - the no-key fallback. Can rate-limit under heavy use.
+async fn ddg_search(query: &str) -> String {
     let client = match reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
         .build()
@@ -966,23 +1011,36 @@ async fn web_search(args: &str) -> String {
         Ok(c) => c,
         Err(e) => return format!("ERROR: http client: {e}"),
     };
-    let resp = client
-        .get("https://html.duckduckgo.com/html/")
-        .query(&[("q", a.query.as_str())])
-        .send()
-        .await;
-    let html = match resp {
-        Ok(r) => r.text().await.unwrap_or_default(),
-        Err(e) => return format!("ERROR searching for '{}': {e}", a.query),
-    };
+    // Retry with backoff: DuckDuckGo rate-limits bursts, so a single 202/empty
+    // response shouldn't fail the whole task.
+    let mut html = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(700 * (1 << (attempt - 1)))).await;
+        }
+        match client.get("https://html.duckduckgo.com/html/").query(&[("q", query)]).send().await {
+            Ok(r) => {
+                let body = r.text().await.unwrap_or_default();
+                if body.contains("result__a") {
+                    html = body;
+                    break;
+                }
+                html = body; // keep last body for the empty-result message
+            }
+            Err(e) => html = format!("__err__{e}"),
+        }
+    }
+    if html.starts_with("__err__") {
+        return format!("ERROR searching for '{query}': {}", &html[7..]);
+    }
     let titles = extract_blocks(&html, "result__a", "</a>");
     let urls = extract_blocks(&html, "result__url", "</a>");
     let snips = extract_blocks(&html, "result__snippet", "</a>");
     if titles.is_empty() || urls.is_empty() {
-        return format!("No web results for '{}' (the search may have been rate-limited).", a.query);
+        return format!("No web results for '{query}' (the no-key DuckDuckGo search was rate-limited; set BRAVE_API_KEY in .env for reliable search).");
     }
     let n = titles.len().min(urls.len());
-    let mut out = format!("Top web results for \"{}\":\n", a.query);
+    let mut out = format!("Top web results for \"{query}\":\n");
     for i in 0..n.min(8) {
         let url = urls[i].trim();
         let url = if url.starts_with("http") { url.to_string() } else { format!("https://{url}") };
@@ -1161,9 +1219,13 @@ async fn lead_update_tool(args: &str, mem: &crate::memory::MemoryHandle) -> Stri
 // check before any outbound email (it is not auto-sent).
 fn email_compose(args: &str) -> String {
     let a: EmailArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    // Deterministically enforce the Outreach Writer style the model keeps ignoring:
+    // strip em/en dashes and markdown so the SENT email is clean, not just the chat.
+    let subject = crate::plainify(&a.subject);
+    let body = crate::plainify(&a.body);
     let url = format!(
         "https://mail.google.com/mail/?view=cm&fs=1&to={}&su={}&body={}",
-        percent_encode(&a.to), percent_encode(&a.subject), percent_encode(&a.body)
+        percent_encode(&a.to), percent_encode(&subject), percent_encode(&body)
     );
     match open_url_default(&url) {
         Ok(()) => format!("opened a Gmail draft to {} (review it and hit Send).", a.to),
