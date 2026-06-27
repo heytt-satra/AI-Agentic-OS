@@ -190,5 +190,13 @@ Farah"), ingested it, asked "what is the codename and who is the lead engineer?"
 Jarvis embedded the query, retrieved the right chunk, and answered correctly.
 Passed.
 
-**Still to do:** PDF ingestion (next commit), and chunk overlap for better recall
-across chunk boundaries.
+### 2026-06-27 - Item 3 COMPLETE: PDF ingestion
+Added the `pdf-extract` crate and a `read_doc_text` helper that extracts text
+from PDFs (and plain-reads text/code). ingest_path now accepts .pdf and folders
+of PDFs. Test: ingested a real 5.8MB book PDF ("Zero to One") and asked what the
+author says about monopoly and competition - Jarvis extracted, embedded, and
+returned an accurate multi-point summary of the actual arguments. Gap 3 done:
+the user's files (text, code, PDF) are now a locally-searchable knowledge base.
+
+**Still to do later:** chunk overlap for recall across chunk boundaries, and
+lifting the per-file chunk cap for very large documents.

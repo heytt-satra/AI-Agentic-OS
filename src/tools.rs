@@ -59,7 +59,7 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"}},"required":["id","status"]})),
         f("email_compose", "Open a prefilled email in the user's Gmail in their browser, ready to review and send (they are already logged in, so they just glance and hit Send). Use this to send outreach. After composing, mark the lead 'contacted' with lead_update.",
           serde_json::json!({"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]})),
-        f("ingest_path", "Read a file or all the text/code files in a folder, split them into chunks, embed them locally, and store them so you can semantically search them later. Use to load the user's documents, notes, or a codebase into Jarvis's knowledge.", str_prop("path", "file or folder path")),
+        f("ingest_path", "Read a file or all the text/code/PDF files in a folder, split them into chunks, embed them locally, and store them so you can semantically search them later. Use to load the user's documents, notes, PDFs, or a codebase into Jarvis's knowledge.", str_prop("path", "file or folder path")),
         f("search_docs", "Semantically search the files you have ingested with ingest_path and return the most relevant chunks with their source. Use to answer questions from the user's own documents/code.", str_prop("query", "what to look for")),
         f("recall_activity", "The user's SECOND BRAIN: a detailed timeline of EVERYTHING they did on the computer (every app they focused, every window title, things they copied), with clock times and per-app time totals. ALWAYS use this for 'what did I do', 'what was I working on', 'what apps did I use', 'how long in X', or any question about a past time window. Set 'minutes' to the look-back window (e.g. 60 for the last hour, 480 for the workday). Optional 'query' filters by app or keyword. Report what it returns in detail; do NOT summarize from the chat.",
           serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"how far back to look, in minutes (default 180)"},"query":{"type":"string","description":"optional app/keyword filter"}},"required":[]})),
@@ -1568,8 +1568,18 @@ fn is_text_file(p: &std::path::Path) -> bool {
         p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).as_deref(),
         Some("txt" | "md" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "json" | "csv"
             | "html" | "htm" | "css" | "toml" | "yaml" | "yml" | "log" | "c" | "cpp"
-            | "h" | "hpp" | "java" | "go" | "sh" | "sql" | "xml" | "ini" | "cfg" | "tex")
+            | "h" | "hpp" | "java" | "go" | "sh" | "sql" | "xml" | "ini" | "cfg" | "tex"
+            | "pdf")
     )
+}
+
+// Read a document's text: plain read for text/code, extraction for PDFs.
+fn read_doc_text(p: &std::path::Path) -> Option<String> {
+    if p.extension().and_then(|e| e.to_str()).map(|s| s.eq_ignore_ascii_case("pdf")).unwrap_or(false) {
+        pdf_extract::extract_text(p).ok().filter(|t| !t.trim().is_empty())
+    } else {
+        std::fs::read_to_string(p).ok()
+    }
 }
 
 fn collect_text_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, cap: usize) {
@@ -1614,12 +1624,12 @@ async fn ingest_path(args: &str, mem: &crate::memory::MemoryHandle) -> String {
         return format!("ERROR: no such file or folder: {path}");
     }
     if files.is_empty() {
-        return format!("No text/code files found at {path} (binary files are skipped; PDF support is coming).");
+        return format!("No ingestible files found at {path} (text, code, and PDF are supported; other binaries are skipped).");
     }
     let mut total = 0usize;
     let mut done = 0usize;
     for f in &files {
-        if let Ok(text) = std::fs::read_to_string(f) {
+        if let Some(text) = read_doc_text(f) {
             let chunks: Vec<String> = chunk_text(&text, 800).into_iter().take(60).collect();
             if chunks.is_empty() { continue; }
             total += mem.doc_ingest(&f.to_string_lossy(), chunks).await;
