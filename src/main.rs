@@ -129,6 +129,12 @@ async fn main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("setup") {
         return run_setup();
     }
+    // `jarvis autostart [off]` registers (or removes) a login task so `serve`
+    // runs from boot - the always-on second brain.
+    if std::env::args().nth(1).as_deref() == Some("autostart") {
+        let off = std::env::args().nth(2).as_deref() == Some("off");
+        return run_autostart(!off);
+    }
 
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
@@ -254,6 +260,31 @@ async fn main() -> Result<()> {
     }
 
     println!("\nGoodbye, sir.");
+    Ok(())
+}
+
+// Register (or remove) a login auto-start so `jarvis serve` runs from boot and
+// the second brain captures the whole day without the user thinking about it.
+fn run_autostart(enable: bool) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    if cfg!(windows) {
+        // Use the per-user Startup folder (no admin needed, unlike schtasks).
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let cmd_path = format!("{appdata}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\JarvisOS.cmd");
+        if enable {
+            let body = format!("@echo off\r\nstart \"\" /min \"{}\" serve\r\n", exe.display());
+            std::fs::write(&cmd_path, body)?;
+            println!("Auto-start ON. Jarvis will run `serve` (HUD + second-brain tracking) every time you log in.");
+            println!("Turn it off with:  jarvis autostart off");
+        } else {
+            let _ = std::fs::remove_file(&cmd_path);
+            println!("Auto-start OFF. Jarvis will no longer launch at login.");
+        }
+    } else if cfg!(target_os = "macos") {
+        println!("On macOS, add a Login Item or a launchd agent that runs:\n  {} serve", exe.display());
+    } else {
+        println!("On Linux, add a systemd user service or ~/.config/autostart entry that runs:\n  {} serve", exe.display());
+    }
     Ok(())
 }
 
