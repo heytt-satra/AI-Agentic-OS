@@ -200,3 +200,26 @@ the user's files (text, code, PDF) are now a locally-searchable knowledge base.
 
 **Still to do later:** chunk overlap for recall across chunk boundaries, and
 lifting the per-file chunk cap for very large documents.
+
+### 2026-06-27 - Item 4 SHIPPED: user-definable agents
+**Goal:** the democratization piece - let a user build their own automations in
+plain language, not code. "Make an agent that finds leads and drafts intros",
+then run it by name forever.
+
+**Thinking / design:** an "agent" is just saved instructions plus a name. Running
+one is exactly the sub-agent we already built for orchestration - so agent_run
+feeds the saved instructions into run_subagent. Almost no new machinery; we reuse
+gap 1. Storage is a simple `agents(name UNIQUE, instructions)` table.
+
+**How it works:** agent_create(name, instructions) upserts the agent;
+agent_list shows them; agent_run(name) looks up the instructions and executes
+them via run_subagent (Box::pin to break the async cycle); agent_delete removes
+one. Four memory commands keep it on the actor thread. Persona teaches the model
+to save automations when the user asks.
+
+**Test:** created a "greeter" agent in one process; a FRESH process listed it
+(proving persistence) and ran it (the sub-agent executed the saved instructions
+and produced the greeting). Passed.
+
+**Still to do later:** scheduling ("every morning") - run saved agents on a timer
+via the autostart/heartbeat plumbing or Task Scheduler. That is its own step.

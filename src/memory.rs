@@ -38,6 +38,11 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // User-defined agents (gap 4).
+    AgentCreate { name: String, instructions: String, reply: oneshot::Sender<bool> },
+    AgentList { reply: oneshot::Sender<Vec<(String, String)>> },
+    AgentGet { name: String, reply: oneshot::Sender<Option<String>> },
+    AgentDelete { name: String, reply: oneshot::Sender<bool> },
     // Document RAG (gap 3).
     DocIngest { source: String, chunks: Vec<String>, reply: oneshot::Sender<usize> },
     DocSearch { query: String, k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> },
@@ -271,6 +276,39 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── user-defined agents (gap 4) ─────────────────────────────────────────
+    pub async fn agent_create(&self, name: &str, instructions: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::AgentCreate { name: name.to_string(), instructions: instructions.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn agent_list(&self) -> Vec<(String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::AgentList { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn agent_get(&self, name: &str) -> Option<String> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::AgentGet { name: name.to_string(), reply }).await.is_err() {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn agent_delete(&self, name: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::AgentDelete { name: name.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     // ── document RAG (gap 3) ────────────────────────────────────────────────
     pub async fn doc_ingest(&self, source: &str, chunks: Vec<String>) -> usize {
         let (reply, rx) = oneshot::channel();
@@ -348,6 +386,12 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
+         );
+         -- User-defined agents (gap 4): named, reusable instructions the user
+         -- creates in plain language and runs on demand.
+         CREATE TABLE IF NOT EXISTS agents (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL
          );
          -- Document RAG: chunks of the user's ingested files + their embeddings.
          CREATE TABLE IF NOT EXISTS documents (
@@ -508,6 +552,29 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let n = conn
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
+        MemCmd::AgentCreate { name, instructions, reply } => {
+            let ok = conn.execute(
+                "INSERT OR REPLACE INTO agents (ts, name, instructions) VALUES (?1, ?2, ?3)",
+                params![now_secs(), name, instructions],
+            ).is_ok();
+            let _ = reply.send(ok);
+        }
+        MemCmd::AgentList { reply } => {
+            let rows = (|| -> Result<Vec<(String, String)>> {
+                let mut stmt = conn.prepare("SELECT name, instructions FROM agents ORDER BY name ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::AgentGet { name, reply } => {
+            let v = conn.query_row("SELECT instructions FROM agents WHERE name=?1", params![name], |r| r.get::<_, String>(0)).ok();
+            let _ = reply.send(v);
+        }
+        MemCmd::AgentDelete { name, reply } => {
+            let n = conn.execute("DELETE FROM agents WHERE name=?1", params![name]).unwrap_or(0);
             let _ = reply.send(n > 0);
         }
         MemCmd::DocIngest { source, chunks, reply } => {

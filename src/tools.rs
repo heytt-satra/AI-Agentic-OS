@@ -88,6 +88,14 @@ pub fn definitions() -> Vec<Tool> {
         // ── multi-agent orchestration: delegate a focused sub-task to a specialist
         f("spawn_agent", "Delegate a focused sub-task to a specialist sub-agent that works autonomously with its own tools and returns just the result. Use this to split a big goal into parts, e.g. role='researcher' task='find 5 wedding photographers in Pune with emails', or role='coder' task='build and test a CLI that does X'. The sub-agent cannot run actions that need approval (deletes, system changes). Call it multiple times for multiple parts, then synthesize the results yourself.",
           serde_json::json!({"type":"object","properties":{"role":{"type":"string","description":"the specialist role, e.g. researcher, coder, writer"},"task":{"type":"string","description":"the self-contained sub-task to complete"}},"required":["role","task"]})),
+
+        // ── user-definable agents: the user builds their own automations in words
+        f("agent_create", "Save a reusable named agent the user defines in plain language. Store a short name and clear instructions of what it should do, so it can be run again later by name. Use when the user says 'make/create/save an agent (or workflow) that ...'.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"instructions":{"type":"string","description":"what the agent should do, in clear plain language"}},"required":["name","instructions"]})),
+        f("agent_list", "List the user's saved agents and what each one does.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("agent_run", "Run a saved agent by name: it executes that agent's stored instructions autonomously and returns the result.", str_prop("name", "the saved agent's name")),
+        f("agent_delete", "Delete a saved agent by name.", str_prop("name", "the saved agent's name")),
     ]
 }
 
@@ -148,6 +156,58 @@ pub async fn execute(
             match serde_json::from_str::<SpawnArgs>(args_json) {
                 // Box::pin breaks the execute -> run_subagent -> execute async cycle.
                 Ok(a) => Box::pin(crate::run_subagent(provider, mem, &a.role, &a.task, depth)).await,
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "agent_create" => {
+            #[derive(Deserialize)]
+            struct A { name: String, instructions: String }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => {
+                    if mem.agent_create(&a.name, &a.instructions).await {
+                        format!("Saved agent '{}'. Run it anytime with agent_run.", a.name)
+                    } else {
+                        "ERROR: could not save the agent.".to_string()
+                    }
+                }
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "agent_list" => {
+            let rows = mem.agent_list().await;
+            if rows.is_empty() {
+                "No saved agents yet. Create one with agent_create.".to_string()
+            } else {
+                let mut out = String::from("Saved agents:\n");
+                for (name, instr) in rows {
+                    let i: String = instr.chars().take(100).collect();
+                    out.push_str(&format!("  {name}: {i}\n"));
+                }
+                out
+            }
+        }
+        "agent_run" => {
+            #[derive(Deserialize)]
+            struct A { name: String }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => match mem.agent_get(&a.name).await {
+                    Some(instr) => Box::pin(crate::run_subagent(provider, mem, &format!("saved agent '{}'", a.name), &instr, depth)).await,
+                    None => format!("No saved agent named '{}'. Create it with agent_create.", a.name),
+                },
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "agent_delete" => {
+            #[derive(Deserialize)]
+            struct A { name: String }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => {
+                    if mem.agent_delete(&a.name).await {
+                        format!("Deleted agent '{}'.", a.name)
+                    } else {
+                        format!("No agent named '{}'.", a.name)
+                    }
+                }
                 Err(e) => format!("ERROR: bad args: {e}"),
             }
         }
