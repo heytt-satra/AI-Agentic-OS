@@ -69,6 +69,7 @@ pub fn definitions() -> Vec<Tool> {
         f("code_read_file", "Read a source file from a project (path relative to the project root).",
           serde_json::json!({"type":"object","properties":{"project":{"type":"string"},"path":{"type":"string"}},"required":["project","path"]})),
         f("code_list", "Show a project's file tree (skips target/node_modules/.git).", str_prop("project", "project name")),
+        f("code_open", "Open a project in VS Code (the editor) so the user can see and edit the files. This only OPENS the editor. Running and building still happen via code_exec in a separate process, NOT inside VS Code's integrated terminal - be honest about that.", str_prop("project", "project name")),
         f("code_exec", "Run a command with the project as the working directory. This is how you build, test, run, and use git: e.g. 'cargo build', 'cargo test', 'npm install', 'pytest', 'git init', 'git commit -m ...'. Returns exit code, stdout, and stderr so you can read failures and fix them.",
           serde_json::json!({"type":"object","properties":{"project":{"type":"string"},"command":{"type":"string","description":"the shell command to run inside the project"}},"required":["project","command"]})),
 
@@ -119,6 +120,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "code_write_file" => code_write_file(args_json),
         "code_read_file" => code_read_file(args_json),
         "code_list" => code_list(args_json),
+        "code_open" => code_open(args_json),
         "code_exec" => code_exec(args_json),
         "task_add" => task_add_tool(args_json, mem).await,
         "task_list" => task_list_tool(mem).await,
@@ -447,6 +449,19 @@ fn code_exec(args: &str) -> String {
         return format!("ERROR: project '{}' does not exist — call code_new_project first", a.project);
     }
     run_in(&dir, &a.command)
+}
+
+fn code_open(args: &str) -> String {
+    let a: ProjArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let dir = crate::coder::project_dir(&a.project);
+    if !dir.exists() {
+        return format!("ERROR: project '{}' does not exist", a.project);
+    }
+    let out = run_in(&dir, "code .");
+    if out.contains("not recognized") || out.contains("is not recognized") {
+        return format!("ERROR: could not open VS Code - the 'code' command is not on PATH. Install VS Code or enable its CLI.");
+    }
+    format!("Opened '{}' in VS Code. Note: running and building still happen via code_exec in a separate process, not inside VS Code's terminal.", a.project)
 }
 
 // ── durable task list (Power 4) ─────────────────────────────────────────────

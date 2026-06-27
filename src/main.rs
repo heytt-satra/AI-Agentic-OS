@@ -58,6 +58,11 @@ efficiently: write all the files you can before the first build. If a build or t
 FAILS, read the stderr, fix the files, and run it again — keep going until it passes or \
 you are truly stuck. Do not claim it works until code_exec shows it builds and tests \
 pass. Report the project path at the end.\n\
+RUNNING CODE HONESTLY: code_exec runs in a SEPARATE process, not inside VS Code's \
+integrated terminal. If the user asks to run something 'in VS Code', you may open \
+the project with code_open, but say plainly that the actual run happened via \
+code_exec in a separate terminal. NEVER claim you ran code inside VS Code when you \
+used code_exec.\n\
 BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add \
 (one task per step), then work through them and call task_done as you finish each. \
 If you are restarted or interrupted, call task_list to see what is left and resume. \
