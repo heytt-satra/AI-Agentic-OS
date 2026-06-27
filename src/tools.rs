@@ -99,6 +99,16 @@ pub fn definitions() -> Vec<Tool> {
     ]
 }
 
+// The full tool list sent to the model each turn: built-ins plus any tools
+// discovered from connected MCP servers (gap 5).
+pub async fn all_definitions() -> Vec<Tool> {
+    let mut defs = definitions();
+    if let Some(h) = crate::mcp::handle() {
+        defs.extend(h.tools().await);
+    }
+    defs
+}
+
 // Dispatch. async because some tools await the network. `mem` is passed so
 // memory-backed tools (recall_activity) can query the second brain.
 pub async fn execute(
@@ -211,6 +221,11 @@ pub async fn execute(
                 Err(e) => format!("ERROR: bad args: {e}"),
             }
         }
+        // Tools discovered from MCP servers are routed to the MCP hub.
+        n if n.starts_with("mcp__") => match crate::mcp::handle() {
+            Some(h) => h.call(n, args_json).await,
+            None => "ERROR: no MCP servers are configured (add mcp.json)".to_string(),
+        },
         other => format!("ERROR: unknown tool '{other}'"),
     }
 }

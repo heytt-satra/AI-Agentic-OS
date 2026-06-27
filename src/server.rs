@@ -106,7 +106,7 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             // Streamed model call: content tokens go to the browser live.
             let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let reply = {
-                let fut = st.provider.chat_stream(&messages, Some(tools::definitions()), dtx);
+                let fut = st.provider.chat_stream(&messages, Some(tools::all_definitions().await), dtx);
                 tokio::pin!(fut);
                 loop {
                     tokio::select! {

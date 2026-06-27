@@ -223,3 +223,32 @@ and produced the greeting). Passed.
 
 **Still to do later:** scheduling ("every morning") - run saved agents on a timer
 via the autostart/heartbeat plumbing or Task Scheduler. That is its own step.
+
+### 2026-06-27 - Item 5 SHIPPED: MCP client (open-standard tools)
+**Goal:** speak the Model Context Protocol so Jarvis can use the whole ecosystem
+of standard tool servers, not just its built-in tools.
+
+**Thinking / design:** MCP stdio transport is newline-delimited JSON-RPC 2.0 over
+a spawned server's stdin/stdout: initialize handshake, then tools/list, then
+tools/call. We expose each discovered tool to the model as mcp__<server>__<tool>
+and route those calls back to the right server. Connections live on a dedicated
+thread (blocking child I/O), reached from the async loop via a channel + a global
+handle - the same actor pattern as memory.
+
+**Problems we reasoned through:**
+- Windows: npx/npm are .cmd/.ps1 shims, not .exe, so spawn through `cmd /c`.
+- Dynamic tools: the tool list is normally static (tools::definitions). Added
+  all_definitions() which appends MCP tools each turn, used by the REPL, HUD, and
+  sub-agents. execute() routes any mcp__ name to the hub.
+- Noise on the pipe: npx/servers emit log lines; the JSON-RPC reader skips any
+  line that isn't the response with our request id (also skips notifications).
+- Config + safety: read mcp.json (Claude Desktop's shape); gitignored because it
+  may hold tokens; mcp.json.example documents it.
+
+**Test:** configured the reference `@modelcontextprotocol/server-everything` via
+npx. On startup: "[mcp] connected 'everything' (13 tools)". Asked Jarvis to use
+the add tool on 17 and 25 - it called mcp__everything__add and returned 42.
+Passed: real handshake, discovery, and tool-call against a live MCP server.
+
+**Still to do later:** SSE/HTTP transport (we do stdio), per-server env/secrets,
+and a read timeout so an unresponsive server can't block the hub.

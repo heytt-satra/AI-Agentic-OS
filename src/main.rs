@@ -8,6 +8,7 @@ mod activity;
 mod coder;
 mod dataset;
 mod embeddings;
+mod mcp;
 mod memory;
 mod policy;
 mod provider;
@@ -162,6 +163,8 @@ async fn main() -> Result<()> {
 
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
+    // Connect any MCP servers configured in mcp.json (gap 5). No-op if absent.
+    mcp::init();
 
     // Sub-commands that run once and exit (cron-friendly):
     //   jarvis once    -> a single heartbeat tick
@@ -313,7 +316,7 @@ pub async fn run_subagent(
     ];
     let steps = max_steps();
     for _ in 0..steps {
-        let reply = match provider.chat(&messages, Some(tools::definitions())).await {
+        let reply = match provider.chat(&messages, Some(tools::all_definitions().await)).await {
             Ok(r) => r,
             Err(e) => return format!("ERROR: sub-agent ({role}) failed: {e}"),
         };
@@ -473,7 +476,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     let mut tainted = false; // becomes true once we read untrusted web content
     let steps = max_steps();
     for _step in 1..=steps {
-        let reply = provider.chat(messages, Some(tools::definitions())).await?;
+        let reply = provider.chat(messages, Some(tools::all_definitions().await)).await?;
         messages.push(reply.message.clone());
 
         if reply.finish_reason == "tool_calls" {

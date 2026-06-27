@@ -14,3 +14,6 @@
 # exported training data - private conversation history, never commit
 /jarvis-dataset.jsonl
 *.jsonl
+
+# MCP server config - user-specific (may hold tokens), never commit
+/mcp.json

@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to mcp.json to connect MCP servers. Same shape as Claude Desktop. Jarvis spawns each on startup, discovers its tools, and exposes them as mcp__<server>__<tool>.",
+  "mcpServers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\you\\Documents"]
+    }
+  }
+}
