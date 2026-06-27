@@ -105,4 +105,36 @@ Set up this journal and committed the assessment that we are ~65% to the AIOS
 architecture, strongest on real device control + tools + local-first, weakest on
 multi-agent orchestration and reliable computer-use. Decision: build all seven
 gaps in order, smallest changes committed individually, journal updated each
-commit. Next entry will cover designing and building orchestration.
+commit.
+
+### 2026-06-27 - Item 1 SHIPPED: multi-agent orchestration
+**Goal:** turn the single agent into an orchestrator that delegates focused
+sub-tasks to specialist sub-agents - the "digital workforce" in the AIOS essay.
+
+**Thinking / design:** a sub-agent is just another agent loop with a focused
+system prompt and its own step budget, that returns only its result. The
+orchestrator (main agent) calls it through a new `spawn_agent(role, task)` tool.
+
+**Problems we reasoned through:**
+- The tool dispatcher `tools::execute` didn't have the `Provider` (needed to run
+  a sub-agent's model calls). Decision: thread `provider` and a `depth` counter
+  into `execute`, rather than special-casing the agent loop in two places (REPL +
+  HUD). Cleaner and reusable.
+- Async recursion: `execute -> run_subagent -> execute` is a self-referential
+  async cycle that won't compile (infinite future size). Fix: `Box::pin` the
+  `run_subagent` call inside the spawn_agent arm to break the cycle.
+- Safety + termination: a sub-agent has no human to approve risky actions, and
+  could recurse forever. Decisions: sub-agents auto-run only non-approval tools
+  and refuse anything gated; nesting is capped at depth 2.
+
+**How it works:** `run_subagent(provider, mem, role, task, depth)` in main.rs
+runs the focused loop; `spawn_agent` in tools.rs invokes it; persona teaches the
+orchestrator to delegate independent parts and synthesize.
+
+**Test:** "delegate a researcher (find a physicist + a fact) and a coder (write
+and run a squares script), then combine." Result: both sub-agents ran - the coder
+actually scaffolded and executed `squares.py` (output 1,4,9,16,25), the
+researcher returned a Feynman fact - and the orchestrator merged them. Passed.
+
+**Still to do later:** true PARALLEL sub-agents (our tool loop runs calls
+sequentially), and richer role-specific tool subsets.

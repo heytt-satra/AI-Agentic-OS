@@ -63,6 +63,11 @@ integrated terminal. If the user asks to run something 'in VS Code', you may ope
 the project with code_open, but say plainly that the actual run happened via \
 code_exec in a separate terminal. NEVER claim you ran code inside VS Code when you \
 used code_exec.\n\
+ORCHESTRATION: for a big goal with independent parts, act as an orchestrator: \
+delegate each part to a sub-agent with spawn_agent (give it a role and a clear, \
+self-contained task), then combine their results into the final answer. Good for \
+'research these 5 companies', 'build these 3 components'. Do small or tightly \
+coupled work yourself; delegate parts that stand alone.\n\
 BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add \
 (one task per step), then work through them and call task_done as you finish each. \
 If you are restarted or interrupted, call task_list to see what is left and resume. \
@@ -273,6 +278,59 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Multi-agent orchestration (gap 1): run a focused sub-agent on one task with
+// its own tool loop, and return just its result. The orchestrator (the main
+// agent) calls this via the spawn_agent tool to split a big goal into parts.
+// Sub-agents run autonomously but cannot run approval-gated actions (no human to
+// prompt), and nesting is depth-capped so they can't recurse forever.
+pub async fn run_subagent(
+    provider: &Provider,
+    mem: &MemoryHandle,
+    role: &str,
+    task: &str,
+    depth: u8,
+) -> String {
+    if depth >= 2 {
+        return "ERROR: sub-agent nesting too deep; do this part yourself.".to_string();
+    }
+    let brief = format!(
+        "You are a {role} sub-agent inside Jarvis. Complete ONLY this task autonomously \
+         with your tools, then reply with just the result, concisely. If you cannot, say \
+         what is missing. Task: {task}"
+    );
+    let mut messages = vec![
+        Message::system(format!("{}\n\n{brief}", system_prompt())),
+        Message::user(task.to_string()),
+    ];
+    let steps = max_steps();
+    for _ in 0..steps {
+        let reply = match provider.chat(&messages, Some(tools::definitions())).await {
+            Ok(r) => r,
+            Err(e) => return format!("ERROR: sub-agent ({role}) failed: {e}"),
+        };
+        messages.push(reply.message.clone());
+        if reply.finish_reason == "tool_calls" {
+            for call in reply.message.tool_calls.clone().unwrap_or_default() {
+                let name = call.function.name.clone();
+                let args = call.function.arguments.clone();
+                let risk = policy::assess(&name, &args);
+                // No interactive user inside a sub-agent: auto-run safe tools,
+                // refuse anything that would need approval.
+                let result = if risk.needs_approval {
+                    format!("DENIED: a sub-agent cannot run '{name}' (needs approval). Ask the main agent to do it.")
+                } else {
+                    tools::execute(&name, &args, mem, provider, depth + 1).await
+                };
+                mem.log_audit(&name, &args, "subagent", tools::result_ok(&result)).await;
+                messages.push(Message::tool_result(call.id, result));
+            }
+            continue;
+        }
+        return reply.message.content.unwrap_or_else(|| "(sub-agent returned nothing)".to_string());
+    }
+    format!("Sub-agent ({role}) hit its step limit before finishing.")
+}
+
 // Register (or remove) a login auto-start so `jarvis serve` runs from boot and
 // the second brain captures the whole day without the user thinking about it.
 fn run_autostart(enable: bool) -> Result<()> {
@@ -418,7 +476,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                 let (decision, run) = decide_console(mem, &name, &risk, tainted).await;
                 let result = if run {
                     println!("  · {}", risk.label);
-                    tools::execute(&name, &args, mem).await
+                    tools::execute(&name, &args, mem, provider, 0).await
                 } else {
                     println!("  · denied: {}", risk.label);
                     "DENIED by user".to_string()

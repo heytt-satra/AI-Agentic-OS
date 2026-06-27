@@ -81,12 +81,22 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
         f("task_cancel", "Drop a task by its id (no longer needed).",
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
+
+        // ── multi-agent orchestration: delegate a focused sub-task to a specialist
+        f("spawn_agent", "Delegate a focused sub-task to a specialist sub-agent that works autonomously with its own tools and returns just the result. Use this to split a big goal into parts, e.g. role='researcher' task='find 5 wedding photographers in Pune with emails', or role='coder' task='build and test a CLI that does X'. The sub-agent cannot run actions that need approval (deletes, system changes). Call it multiple times for multiple parts, then synthesize the results yourself.",
+          serde_json::json!({"type":"object","properties":{"role":{"type":"string","description":"the specialist role, e.g. researcher, coder, writer"},"task":{"type":"string","description":"the self-contained sub-task to complete"}},"required":["role","task"]})),
     ]
 }
 
 // Dispatch. async because some tools await the network. `mem` is passed so
 // memory-backed tools (recall_activity) can query the second brain.
-pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHandle) -> String {
+pub async fn execute(
+    name: &str,
+    args_json: &str,
+    mem: &crate::memory::MemoryHandle,
+    provider: &crate::provider::Provider,
+    depth: u8,
+) -> String {
     match name {
         "recall_activity" => recall_activity(args_json, mem).await,
         "read_file" => read_file(args_json),
@@ -126,6 +136,15 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "task_list" => task_list_tool(mem).await,
         "task_done" => task_status_tool(args_json, mem, "done").await,
         "task_cancel" => task_status_tool(args_json, mem, "cancelled").await,
+        "spawn_agent" => {
+            #[derive(Deserialize)]
+            struct SpawnArgs { role: String, task: String }
+            match serde_json::from_str::<SpawnArgs>(args_json) {
+                // Box::pin breaks the execute -> run_subagent -> execute async cycle.
+                Ok(a) => Box::pin(crate::run_subagent(provider, mem, &a.role, &a.task, depth)).await,
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
         other => format!("ERROR: unknown tool '{other}'"),
     }
 }
