@@ -167,6 +167,12 @@ async fn main() -> Result<()> {
         let off = std::env::args().nth(2).as_deref() == Some("off");
         return run_autostart(!off);
     }
+    // `jarvis privacy` prints exactly what is stored and what (if anything) leaves
+    // the device - the auditable core of the "provably private" positioning.
+    if std::env::args().nth(1).as_deref() == Some("privacy") {
+        run_privacy();
+        return Ok(());
+    }
 
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
@@ -380,6 +386,38 @@ fn run_autostart(enable: bool) -> Result<()> {
         println!("On Linux, add a systemd user service or ~/.config/autostart entry that runs:\n  {} serve", exe.display());
     }
     Ok(())
+}
+
+// Transparency report: what Jarvis stores locally and what (if anything) leaves
+// the device. The auditable backbone of the "provably private" positioning.
+fn run_privacy() {
+    let base = std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+    let local_brain = base.contains("localhost") || base.contains("127.0.0.1");
+    let offline = tools::offline_mode();
+    let tracking = std::env::var("JARVIS_TRACKING").unwrap_or_default().to_lowercase() != "off";
+    let db = std::path::Path::new("jarvis.db").canonicalize().map(|p| p.display().to_string()).unwrap_or_else(|_| "jarvis.db".to_string());
+
+    println!("\nJARVIS-OS privacy report\n========================");
+    println!("Stored locally (this machine only): {db}");
+    println!("  - conversations, tool-call audit, durable tasks, leads, saved agents,");
+    println!("    document embeddings, and the activity log (windows + clipboard).");
+    println!("  - NOTE: currently stored UNENCRYPTED (at-rest encryption is the next fix).");
+    println!("\nSecond-brain tracking: {}", if tracking { "ON (foreground window + clipboard)" } else { "OFF" });
+    println!("  toggle with JARVIS_TRACKING=off");
+    println!("\nWhat leaves this device:");
+    if offline {
+        println!("  - NOTHING. Offline mode is ON: all network tools are blocked.");
+    } else if local_brain {
+        println!("  - The brain is LOCAL ({base}); model prompts stay on this machine.");
+        println!("  - Only when you use network tools (web_search, fetch_url, browse, email,");
+        println!("    install, MCP) does a request go out, and only for that action.");
+    } else {
+        println!("  - Brain is a CLOUD endpoint ({base}); your prompts are sent there to think.");
+        println!("  - Network tools (web_search, fetch_url, browse, email, install, MCP) send");
+        println!("    requests when used. Run `jarvis setup` -> Local + set JARVIS_OFFLINE=1");
+        println!("    for a total no-telemetry, nothing-leaves-the-device guarantee.");
+    }
+    println!("\nGuarantee mode: set JARVIS_OFFLINE=1 with a local model = provably air-gapped.\n");
 }
 
 // First-run setup: let the user pick how to power Jarvis's brain and write the

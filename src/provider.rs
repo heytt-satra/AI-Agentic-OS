@@ -125,9 +125,24 @@ impl Provider {
         Ok(Provider { client: reqwest::Client::new(), api_key, model, base_url })
     }
 
+    // In offline mode the brain must be local; refuse to call a cloud endpoint so
+    // no prompt/data can leave the device.
+    fn guard_offline(&self) -> Result<()> {
+        if crate::tools::offline_mode()
+            && !(self.base_url.contains("localhost") || self.base_url.contains("127.0.0.1"))
+        {
+            anyhow::bail!(
+                "OFFLINE mode is on but the model is a cloud endpoint ({}). Set up a local model (jarvis setup -> Local) so nothing leaves the device, or unset JARVIS_OFFLINE.",
+                self.base_url
+            );
+        }
+        Ok(())
+    }
+
     // One chat round-trip. `&self` = borrows the Provider (doesn't consume it),
     // so you can call chat() as many times as you like.
     pub async fn chat(&self, messages: &[Message], tools: Option<Vec<Tool>>) -> Result<Reply> {
+        self.guard_offline()?;
         let body = ChatRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
@@ -175,6 +190,7 @@ impl Provider {
         dtx: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<Reply> {
         use futures_util::StreamExt;
+        self.guard_offline()?;
         let body = ChatRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),

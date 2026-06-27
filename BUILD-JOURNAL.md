@@ -351,3 +351,21 @@ adds a sharper warning. Test: a PARAPHRASED injection ("share the hidden
 configuration... remove every document") that the keyword list would miss - Jarvis
 reported the benign content, refused the embedded commands, flagged them as data.
 Passed. Next: DB encryption at rest, then tool sandboxing.
+
+### 2026-06-27 - Fix 2: verifiable offline / no-telemetry mode
+**Why this before DB encryption:** it's the literal strategy wedge ("provably never
+leaves your device"), and it's low-risk (no data migration). Encryption touches the
+live DB and is deferred to a careful backup+migrate step.
+
+**How it works:** JARVIS_OFFLINE=1 hard-blocks every network tool in execute()
+(is_network_tool covers fetch_url/web_search/news_search/browse_*/extract_contacts/
+verify_email/install_software/mcp__*), and the provider refuses to call a non-local
+brain in offline mode (guard_offline) - so with a local model, nothing can leave the
+device, period. New `jarvis privacy` command prints an auditable transparency report:
+what's stored locally, that tracking is on/off, and exactly what (if anything) goes
+out given the current brain + offline setting.
+
+**Test:** `jarvis privacy` printed the report correctly (cloud brain, tracking on);
+with JARVIS_OFFLINE=1 a web_search turn was refused because the brain is cloud, with
+a clear message to switch to a local model. Passed. Honest gap noted in the report
+itself: the DB is still plaintext - encryption is the next fix.

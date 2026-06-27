@@ -118,6 +118,12 @@ pub async fn execute(
     provider: &crate::provider::Provider,
     depth: u8,
 ) -> String {
+    // Verifiable privacy (strategy: "provably never leaves your device"). In
+    // offline mode every network-using tool is hard-blocked, so nothing can be
+    // sent off-device. Pair with a local model for a total no-telemetry guarantee.
+    if offline_mode() && is_network_tool(name) {
+        return format!("BLOCKED: '{name}' needs the network, but Jarvis is in OFFLINE mode - nothing is allowed to leave this device. Unset JARVIS_OFFLINE to allow network tools.");
+    }
     let out = match name {
         "recall_activity" => recall_activity(args_json, mem).await,
         "ingest_path" => ingest_path(args_json, mem).await,
@@ -266,6 +272,22 @@ fn looks_like_injection(text: &str) -> bool {
         "run the following command", "execute the following", "override your",
     ];
     CUES.iter().any(|c| t.contains(c))
+}
+
+// Offline mode: set JARVIS_OFFLINE=1 to hard-block every network tool, so the
+// machine is provably air-gapped from Jarvis's side. Pair with a local model.
+pub fn offline_mode() -> bool {
+    matches!(
+        std::env::var("JARVIS_OFFLINE").unwrap_or_default().to_lowercase().as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
+
+// Tools that send anything off the device.
+fn is_network_tool(name: &str) -> bool {
+    name.starts_with("mcp__")
+        || matches!(name, "fetch_url" | "web_search" | "news_search" | "browse_url"
+            | "browse_js" | "extract_contacts" | "verify_email" | "install_software")
 }
 
 // A result is "ok" unless it begins with our error/denied markers.
