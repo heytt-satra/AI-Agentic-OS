@@ -730,14 +730,47 @@ async fn install_software(args: &str) -> String {
 }
 
 #[cfg(windows)]
+fn winget_install(name: &str, user_scope: bool) -> std::io::Result<std::process::Output> {
+    let mut args = vec![
+        "install", "--accept-package-agreements", "--accept-source-agreements",
+        "--silent", "--disable-interactivity", "--source", "winget",
+    ];
+    if user_scope {
+        args.push("--scope");
+        args.push("user");
+    }
+    args.push(name);
+    std::process::Command::new("winget").args(&args).output()
+}
+
+#[cfg(windows)]
+fn install_ok_msg(name: &str, o: &std::process::Output, how: &str) -> String {
+    format!("installed '{name}' via {how}.\n{}", String::from_utf8_lossy(&o.stdout).chars().take(1000).collect::<String>())
+}
+
+#[cfg(windows)]
 fn install_software_os(name: &str) -> String {
-    let out = std::process::Command::new("winget")
-        .args([
-            "install", "--accept-package-agreements", "--accept-source-agreements",
-            "--silent", "--disable-interactivity", "--source", "winget", name,
-        ])
-        .output();
-    finish_install(name, out, "winget")
+    // 1) USER scope first: installs into the user profile with NO admin/UAC
+    //    prompt for any package that ships a user installer (most dev tools).
+    if let Ok(o) = winget_install(name, true) {
+        if o.status.success() {
+            return install_ok_msg(name, &o, "winget (user scope, no admin needed)");
+        }
+    }
+    // 2) Fall back to machine scope. This may require a one-time UAC approval,
+    //    which Windows will not let an automated agent click (a security gate).
+    match winget_install(name, false) {
+        Ok(o) if o.status.success() => install_ok_msg(name, &o, "winget (machine scope)"),
+        Ok(o) => {
+            let blob = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).to_lowercase();
+            if blob.contains("elevat") || blob.contains("administrator") || blob.contains("requires admin") || blob.contains("0x80073d") {
+                format!("'{name}' has no user-scope installer, so it needs administrator rights, and Windows blocks me from clicking the UAC prompt (a security gate). Two options, sir: approve the UAC dialog yourself when it appears, or relaunch Jarvis as administrator and ask again - then it installs silently.")
+            } else {
+                format!("ERROR installing '{name}' (exit {}): {}", o.status, String::from_utf8_lossy(&o.stdout).chars().take(600).collect::<String>())
+            }
+        }
+        Err(e) => format!("ERROR: could not run winget for '{name}': {e}"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -754,6 +787,7 @@ fn install_software_os(name: &str) -> String {
     finish_install(name, out, "apt-get")
 }
 
+#[cfg(not(windows))]
 fn finish_install(name: &str, out: std::io::Result<std::process::Output>, mgr: &str) -> String {
     match out {
         Ok(o) => {

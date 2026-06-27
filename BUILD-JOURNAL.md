@@ -317,3 +317,19 @@ action category in policy, and a read timeout on MCP servers.
 The hard 30% is built and verified, each committed individually with this journal
 updated. Remaining work is depth on each (parallel sub-agents, full computer-use
 reliability, DPO, scheduling, VM isolation), not the foundations - those exist.
+
+### 2026-06-27 - Install UAC fix + full self-review
+**Install:** machine-scope winget installs trigger a UAC dialog the agent can't
+click (a Windows security gate), so installs stalled. Fix: install_software now
+tries USER scope first (no admin/UAC for packages that support it - most dev
+tools), falls back to machine scope, and on elevation-required returns a clear
+handoff ("approve the UAC dialog, or relaunch Jarvis as admin") instead of
+hanging. Verified the path on an already-installed app.
+
+**REVIEW.md:** wrote an honest reverse-engineering teardown - top flaws (no test/
+eval harness, thin security for the power it has, shallow single-threaded loop,
+crude reliability guards, RAG scaling cliffs, no cost/observability, single
+model, silent error-swallowing), what to strengthen, and what to add. Top five to
+make it extremely strong: (1) automated eval/test harness, (2) security
+(sandbox + DB encryption + structured injection defense), (3) planner/critic +
+parallelism, (4) model routing + cost accounting, (5) scheduling.
