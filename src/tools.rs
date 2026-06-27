@@ -57,8 +57,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"}},"required":["id","status"]})),
         f("email_compose", "Open a prefilled email in the user's Gmail in their browser, ready to review and send (they are already logged in, so they just glance and hit Send). Use this to send outreach. After composing, mark the lead 'contacted' with lead_update.",
           serde_json::json!({"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]})),
-        f("recall_activity", "Look up what the user has been doing (their tracked app/window/clipboard activity = their 'second brain'). Use for 'what was I doing', 'what apps did I use', 'how long in X'. Optional query filters by app/keyword.",
-          serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"optional app/keyword filter; empty = most recent activity"}},"required":[]})),
+        f("recall_activity", "The user's SECOND BRAIN: a detailed timeline of EVERYTHING they did on the computer (every app they focused, every window title, things they copied), with clock times and per-app time totals. ALWAYS use this for 'what did I do', 'what was I working on', 'what apps did I use', 'how long in X', or any question about a past time window. Set 'minutes' to the look-back window (e.g. 60 for the last hour, 480 for the workday). Optional 'query' filters by app or keyword. Report what it returns in detail; do NOT summarize from the chat.",
+          serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"how far back to look, in minutes (default 180)"},"query":{"type":"string","description":"optional app/keyword filter"}},"required":[]})),
 
         // ── code-builder mode: write/build/test real software in an isolated workspace
         f("code_new_project", "Start a new software project in an isolated workspace (under ~/jarvis-projects/<name>). Optionally scaffolds a toolchain. Use this FIRST whenever asked to build code or software. Returns the project path and suggested build/test commands.",
@@ -1400,25 +1400,61 @@ struct HnHit {
     created_at_i: Option<i64>,
 }
 
-async fn recall_activity(args: &str, mem: &crate::memory::MemoryHandle) -> String {
-    let q = serde_json::from_str::<serde_json::Value>(args)
-        .ok()
-        .and_then(|v| v.get("query").and_then(|x| x.as_str()).map(|s| s.to_string()))
-        .unwrap_or_default();
-    let rows = if q.trim().is_empty() {
-        mem.activity_recent(40).await
-    } else {
-        mem.activity_search(&q, 40).await
-    };
-    if rows.is_empty() {
-        return "No tracked activity yet (the second-brain tracker may be off or just started).".into();
+// Local clock time "HH:MM" for a unix timestamp.
+fn fmt_clock(ts: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(ts, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%H:%M").to_string(),
+        _ => "??:??".to_string(),
     }
+}
+
+// The second brain: a detailed timeline of EVERYTHING the user did (every app
+// they focused, things they copied), over a time window, plus per-app totals.
+async fn recall_activity(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let v = serde_json::from_str::<serde_json::Value>(args).unwrap_or(serde_json::Value::Null);
+    let query = v.get("query").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let minutes = v.get("minutes").and_then(|x| x.as_i64()).filter(|m| *m > 0).unwrap_or(180);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let mut out = String::from("Your recent activity (most recent last):\n");
-    for (ts, kind, app, detail) in rows {
-        let mins = ((now - ts).max(0)) / 60;
-        let d: String = detail.chars().take(90).collect();
-        out.push_str(&format!("- {mins}m ago [{kind}] {app} {d}\n"));
+    let since = now - minutes * 60;
+    let q = if query.is_empty() { None } else { Some(query.as_str()) };
+    let rows = mem.activity_since(since, q).await;
+    if rows.is_empty() {
+        return format!("No tracked activity in the last {minutes} minutes (the tracker may be off, or this is a fresh session).");
+    }
+
+    // Per-app time, estimated from the gap to the next focus change.
+    let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for i in 0..rows.len() {
+        let (ts, kind, app, _) = &rows[i];
+        if kind == "window" && !app.is_empty() {
+            let next = rows.get(i + 1).map(|r| r.0).unwrap_or(now);
+            let dur = (next - ts).clamp(0, 30 * 60); // cap so idle gaps don't inflate
+            *totals.entry(app.clone()).or_default() += dur;
+        }
+    }
+    let mut ranked: Vec<(String, i64)> = totals.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let scope = if query.is_empty() { String::new() } else { format!(" matching \"{query}\"") };
+    let mut out = format!("What you did in the last {minutes} minutes{scope}:\n\nTime per app:\n");
+    for (app, secs) in ranked.iter().take(12) {
+        out.push_str(&format!("  {app}  {}m\n", (secs / 60).max(0)));
+    }
+
+    out.push_str("\nTimeline:\n");
+    let mut shown = 0;
+    for (ts, kind, app, detail) in &rows {
+        if shown >= 160 { out.push_str("  ...(truncated)\n"); break; }
+        let clk = fmt_clock(*ts);
+        let d: String = detail.chars().take(80).collect();
+        match kind.as_str() {
+            "window" => out.push_str(&format!("  {clk}  {app}: {d}\n")),
+            "clipboard" => out.push_str(&format!("  {clk}  copied: {d}\n")),
+            "screenshot" => out.push_str(&format!("  {clk}  screenshot\n")),
+            _ => continue,
+        }
+        shown += 1;
     }
     out
 }

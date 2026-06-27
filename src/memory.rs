@@ -29,6 +29,8 @@ enum MemCmd {
     LogActivity { kind: String, app: String, detail: String },
     ActivityRecent { n: i64, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
     ActivitySearch { query: String, n: i64, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
+    // Everything tracked since a timestamp (for timeframe recall).
+    ActivitySince { since: i64, query: Option<String>, reply: oneshot::Sender<Vec<(i64, String, String, String)>> },
     // Full-history dumps for the training-dataset exporter (Stage 1).
     AllMessages { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     AllAudit { reply: oneshot::Sender<Vec<(i64, String, String, bool)>> },
@@ -186,6 +188,17 @@ impl MemoryHandle {
     pub async fn activity_search(&self, query: &str, n: i64) -> Vec<(i64, String, String, String)> {
         let (reply, rx) = oneshot::channel();
         let cmd = MemCmd::ActivitySearch { query: query.to_string(), n, reply };
+        if self.tx.send(cmd).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    // All activity since a unix timestamp (optionally keyword-filtered),
+    // chronological - the basis for "what did I do between X and Y".
+    pub async fn activity_since(&self, since: i64, query: Option<&str>) -> Vec<(i64, String, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        let cmd = MemCmd::ActivitySince { since, query: query.map(|s| s.to_string()), reply };
         if self.tx.send(cmd).await.is_err() {
             return Vec::new();
         }
@@ -443,6 +456,10 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let rows = query_activity(conn, Some(&query), n).unwrap_or_default();
             let _ = reply.send(rows);
         }
+        MemCmd::ActivitySince { since, query, reply } => {
+            let rows = query_activity_since(conn, since, query.as_deref()).unwrap_or_default();
+            let _ = reply.send(rows);
+        }
         MemCmd::AllMessages { reply } => {
             let rows = query_all_messages(conn).unwrap_or_default();
             let _ = reply.send(rows);
@@ -542,6 +559,32 @@ fn query_all_audit(conn: &Connection) -> Result<Vec<(i64, String, String, bool)>
         })?
         .filter_map(|r| r.ok())
         .collect();
+    Ok(rows)
+}
+
+// All activity at or after `since` (unix secs), oldest first, optional keyword.
+fn query_activity_since(conn: &Connection, since: i64, query: Option<&str>) -> Result<Vec<(i64, String, String, String)>> {
+    let mut rows = Vec::new();
+    if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+        let like = format!("%{q}%");
+        let mut stmt = conn.prepare(
+            "SELECT ts, kind, app, detail FROM activity
+             WHERE ts >= ?1 AND (app LIKE ?2 OR detail LIKE ?2)
+             ORDER BY id ASC LIMIT 2000",
+        )?;
+        let mapped = stmt.query_map(params![since, like], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?;
+        for r in mapped { rows.push(r?); }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT ts, kind, app, detail FROM activity WHERE ts >= ?1 ORDER BY id ASC LIMIT 2000",
+        )?;
+        let mapped = stmt.query_map(params![since], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?;
+        for r in mapped { rows.push(r?); }
+    }
     Ok(rows)
 }
 
