@@ -49,6 +49,7 @@ pub fn definitions() -> Vec<Tool> {
 
         // ── research + outreach engine: find -> collect -> reach out
         f("extract_contacts", "Fetch a web page and pull out the email addresses and phone numbers on it. Use on a lead's website (often the home or contact page) to find how to reach them.", str_prop("url", "the page URL to scan")),
+        f("verify_email", "Check whether an email is plausibly real: validates the format and confirms its domain is a live website. It cannot confirm the exact mailbox without sending, but it filters out fake or dead domains. Use to enrich/verify a lead before outreach.", str_prop("email", "the email address to verify")),
         f("lead_add", "Save a lead/contact to the outreach list (survives restarts). Use after web_search/extract_contacts to keep the good ones. Only name is required; include email, phone, org, url, note when known.",
           serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"org":{"type":"string"},"email":{"type":"string"},"phone":{"type":"string"},"url":{"type":"string"},"note":{"type":"string"}},"required":["name"]})),
         f("lead_list", "List saved leads with id, name, org, email, phone, url and status (new/contacted/replied/dropped).",
@@ -109,6 +110,7 @@ pub async fn execute(name: &str, args_json: &str, mem: &crate::memory::MemoryHan
         "news_search" => news_search(args_json).await,
         "web_search" => web_search(args_json).await,
         "extract_contacts" => extract_contacts(args_json).await,
+        "verify_email" => verify_email(args_json).await,
         "lead_add" => lead_add_tool(args_json, mem).await,
         "lead_list" => lead_list_tool(mem).await,
         "lead_update" => lead_update_tool(args_json, mem).await,
@@ -1237,6 +1239,33 @@ async fn extract_contacts(args: &str) -> String {
     if !emails.is_empty() { out.push_str(&format!("emails: {}\n", emails.join(", "))); }
     if !phones.is_empty() { out.push_str(&format!("phones: {}\n", phones.join(", "))); }
     out
+}
+
+#[derive(Deserialize)]
+struct EmailVerifyArg { email: String }
+
+// Enrich/verify an email: format check + confirm the domain is a live site.
+async fn verify_email(args: &str) -> String {
+    let a: EmailVerifyArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let email = a.email.trim();
+    let parts: Vec<&str> = email.split('@').collect();
+    if parts.len() != 2 || parts[0].is_empty() || !parts[1].contains('.') || parts[1].starts_with('.') || parts[1].ends_with('.') {
+        return format!("INVALID: '{email}' is not a well-formed email address.");
+    }
+    let domain = parts[1].to_lowercase();
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    { Ok(c) => c, Err(e) => return format!("ERROR: http client: {e}") };
+    for scheme in ["https", "http"] {
+        if let Ok(r) = client.get(format!("{scheme}://{domain}")).send().await {
+            if r.status().as_u16() < 500 {
+                return format!("LIKELY VALID: '{email}' is well-formed and {domain} is a live website. (The exact mailbox can't be confirmed without sending.)");
+            }
+        }
+    }
+    format!("UNVERIFIED: '{email}' is well-formed, but {domain} did not respond - it may be dead or blocking checks. Treat with caution.")
 }
 
 // Find email addresses by expanding around each '@' over allowed ASCII chars.

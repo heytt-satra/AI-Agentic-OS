@@ -486,13 +486,31 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let _ = reply.send(n > 0);
         }
         MemCmd::LeadAdd { lead, reply } => {
-            let status = if lead.status.is_empty() { "new".to_string() } else { lead.status.clone() };
-            let _ = conn.execute(
-                "INSERT INTO leads (ts, name, org, email, phone, url, note, status) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![now_secs(), lead.name, lead.org, lead.email, lead.phone, lead.url, lead.note, status],
-            );
-            let _ = reply.send(conn.last_insert_rowid());
+            // Dedupe: if a lead with the same email or phone already exists,
+            // return its id instead of inserting a duplicate.
+            let dup: Option<i64> = if !lead.email.is_empty() {
+                conn.query_row("SELECT id FROM leads WHERE lower(email)=lower(?1)", params![lead.email], |r| r.get(0)).ok()
+            } else {
+                None
+            }
+            .or_else(|| {
+                if !lead.phone.is_empty() {
+                    conn.query_row("SELECT id FROM leads WHERE phone=?1", params![lead.phone], |r| r.get(0)).ok()
+                } else {
+                    None
+                }
+            });
+            if let Some(id) = dup {
+                let _ = reply.send(id);
+            } else {
+                let status = if lead.status.is_empty() { "new".to_string() } else { lead.status.clone() };
+                let _ = conn.execute(
+                    "INSERT INTO leads (ts, name, org, email, phone, url, note, status) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![now_secs(), lead.name, lead.org, lead.email, lead.phone, lead.url, lead.note, status],
+                );
+                let _ = reply.send(conn.last_insert_rowid());
+            }
         }
         MemCmd::LeadList { reply } => {
             let rows = query_leads(conn).unwrap_or_default();
