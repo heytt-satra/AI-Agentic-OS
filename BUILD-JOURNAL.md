@@ -252,3 +252,28 @@ Passed: real handshake, discovery, and tool-call against a live MCP server.
 
 **Still to do later:** SSE/HTTP transport (we do stdio), per-server env/secrets,
 and a read timeout so an unresponsive server can't block the hub.
+
+### 2026-06-27 - Item 6: own-model training pipeline
+**Goal:** make running a model trained on the user's own usage a turnkey path, so
+they can stop paying per call.
+
+**Thinking / honest scoping:** you cannot (and should not) train a model inside
+the Rust agent - that is a GPU job. What the binary CAN own is the data pipeline:
+export the good examples in a fine-tune-ready shape, ship a real training script,
+and document the export -> train -> run-local path. So this item is "pipeline
+complete", not "model trained" - the GPU run is the user's to execute.
+
+**How it works:** `jarvis dataset sft out.jsonl` (dataset::to_sft_jsonl) writes
+ONLY the good-labeled examples as chat messages {system, user, assistant} - the
+reward/label work from Stage 1 is what lets us train on only responses worth
+imitating. scripts/train_lora.py is a real QLoRA SFT (transformers + peft + trl)
+that fits a 1.5B base on a 6GB GPU. TRAINING.md walks the whole path, and the
+result plugs into the existing local-model seam (jarvis setup -> Local).
+
+**Test:** ran `jarvis dataset sft` - wrote 104 good examples in correct
+chat-messages JSONL (verified the first line's structure). The training script
+and docs are in scripts/ and TRAINING.md. The GPU training run itself is out of
+scope for the binary and documented honestly as the user's step.
+
+**Still to do later:** DPO/preference tuning from good-vs-bad pairs, and the
+teacher loop (API model supervises the local one).

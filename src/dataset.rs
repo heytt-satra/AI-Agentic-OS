@@ -226,6 +226,32 @@ fn token_overlap(a: &str, b: &str) -> f32 {
     inter as f32 / at.len().min(bt.len()) as f32
 }
 
+// Fine-tuning export (SFT): only the GOOD examples, in the chat-messages shape
+// that trl/transformers expect. Returns (jsonl, count). The reward/label work in
+// build() is what lets us train on only the responses worth imitating.
+pub fn to_sft_jsonl(examples: &[Example], system: &str) -> (String, usize) {
+    let mut out = String::new();
+    let mut n = 0;
+    for ex in examples {
+        if ex.label != "good" || ex.response.trim().is_empty() {
+            continue;
+        }
+        let rec = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": ex.instruction},
+                {"role": "assistant", "content": ex.response}
+            ]
+        });
+        if let Ok(line) = serde_json::to_string(&rec) {
+            out.push_str(&line);
+            out.push('\n');
+            n += 1;
+        }
+    }
+    (out, n)
+}
+
 // Serialize examples to JSONL (one JSON object per line) - the standard shape
 // for fine-tuning and preference-tuning pipelines.
 pub fn to_jsonl(examples: &[Example]) -> String {

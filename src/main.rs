@@ -179,10 +179,17 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some("dataset") => {
-            // Export the training dataset (own-model Stage 1).
-            //   jarvis dataset [output.jsonl]
-            let out = std::env::args().nth(2).unwrap_or_else(|| "jarvis-dataset.jsonl".to_string());
-            run_dataset_export(&mem, &out).await;
+            // Export training data (own-model track).
+            //   jarvis dataset [output.jsonl]      -> full labeled export
+            //   jarvis dataset sft [output.jsonl]  -> fine-tune-ready SFT (good only)
+            let mode = std::env::args().nth(2).unwrap_or_default();
+            if mode == "sft" {
+                let out = std::env::args().nth(3).unwrap_or_else(|| "jarvis-sft.jsonl".to_string());
+                run_sft_export(&mem, &out).await;
+            } else {
+                let out = if mode.is_empty() { "jarvis-dataset.jsonl".to_string() } else { mode };
+                run_dataset_export(&mem, &out).await;
+            }
             return Ok(());
         }
         Some("serve") => {
@@ -432,6 +439,25 @@ fn upsert_env(content: &str, key: &str, value: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+// Own-model: export a fine-tune-ready SFT file (good examples only, chat format).
+async fn run_sft_export(mem: &MemoryHandle, out_path: &str) {
+    let messages = mem.all_messages().await;
+    let audit = mem.all_audit().await;
+    let (examples, _stats) = dataset::build(&messages, &audit);
+    let (jsonl, n) = dataset::to_sft_jsonl(&examples, PERSONA);
+    match std::fs::write(out_path, jsonl.as_bytes()) {
+        Ok(()) => {
+            println!("Wrote {n} SFT training examples (good only) to {out_path}");
+            println!("Train a local model with:  python scripts/train_lora.py --data {out_path}");
+            println!("See TRAINING.md for the full export -> train -> run-local path.");
+            if n < 50 {
+                println!("\nNote: {n} is small. Use Jarvis more to grow the dataset before training - a few hundred good examples is a sensible minimum.");
+            }
+        }
+        Err(e) => eprintln!("ERROR writing {out_path}: {e}"),
+    }
 }
 
 // Own-model Stage 1: export everything Jarvis has collected into a labeled

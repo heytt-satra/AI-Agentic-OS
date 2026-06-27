@@ -1,0 +1,10 @@
+# Install on a GPU machine to fine-tune Jarvis on your exported data.
+# Install a CUDA build of torch first (see https://pytorch.org for your CUDA version),
+# e.g.: pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch
+transformers>=4.44
+peft>=0.12
+trl>=0.11
+datasets>=2.20
+accelerate>=0.33
+bitsandbytes>=0.43
