@@ -138,3 +138,32 @@ researcher returned a Feynman fact - and the orchestrator merged them. Passed.
 
 **Still to do later:** true PARALLEL sub-agents (our tool loop runs calls
 sequentially), and richer role-specific tool subsets.
+
+### 2026-06-27 - Item 2 (partial): reliable computer-use via accessibility tree
+**Goal:** make clicking reliable. The flaky part of computer-use is vision
+guessing pixel coordinates and missing (this failed on "click the second
+profile").
+
+**Thinking / design:** the honest fix is NOT better pixel-guessing - it is
+grounding clicks in the OS accessibility tree, the same data a screen reader
+uses. On Windows that is UI Automation: every control has a name and an invoke
+pattern. So instead of "look at the screen and guess where the Edit button is",
+we say "find the control named Edit and invoke it." It cannot miss, because it
+targets the real element, not a coordinate.
+
+**How it works:** added the `uiautomation` crate (Windows-only via a
+target-specific dependency, so mac/Linux still build). New `ui_click(label)` tool
+uses `create_matcher().contains_name(label).find_first()` then the element's
+`click()` (invoke pattern) - no coordinates, no vision. Persona tells the model
+to use ui_click FIRST for any control with a text label, and fall back to
+click_on (vision) only for unlabeled icons/canvas.
+
+**Test:** opened Notepad, asked Jarvis to ui_click the Edit menu. It found and
+invoked the real menu control. Passed - this is the reliable primitive that was
+missing.
+
+**Why this is only "partial" for item 2:** named controls are now reliable
+(covers most native apps and Chrome, which exposes UI Automation). Truly
+unlabeled targets (canvas, games, custom-drawn UIs) still fall back to the vision
+loop, which remains the frontier. A future step: enumerate the a11y tree as a
+labeled element list the model can pick from, and use it inside operate_app.

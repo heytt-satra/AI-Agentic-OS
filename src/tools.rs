@@ -39,7 +39,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
         f("click_on", "See the screen and click on a described UI element (e.g. 'the Save button', 'the search box'). Screenshots, locates it with vision, then clicks. Requires approval. This is the reliable way to click things.", str_prop("target", "what to click, in plain words")),
-        f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks use click_on instead.", str_prop("goal", "what to accomplish on screen, in plain words")),
+        f("ui_click", "Click a UI element by its visible NAME using the OS accessibility tree (Windows). FAR more reliable than click_on because it targets the real control, not a guessed pixel. Use this FIRST for buttons, links, menu items, tabs, checkboxes that have a text label. Fall back to click_on only for elements with no accessible name (icons, canvas).", str_prop("label", "the visible text/name of the element")),
+        f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks prefer ui_click, then click_on.", str_prop("goal", "what to accomplish on screen, in plain words")),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
         f("browse_js", "Open a URL in a headless browser and run a JavaScript snippet on the page (click, fill forms, extract data). Requires approval. Return value is sent back.",
           serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
@@ -114,6 +115,7 @@ pub async fn execute(
         "mouse_click" => mouse_click(args_json),
         "see_screen" => see_screen(args_json).await,
         "click_on" => click_on(args_json).await,
+        "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
@@ -861,6 +863,40 @@ async fn click_on(args: &str) -> String {
             format!("clicked '{}' at {x},{y}", a.target)
         }
         _ => format!("Could not locate '{}' on screen (vision: {})", a.target, ans.chars().take(120).collect::<String>()),
+    }
+}
+
+// ── reliable clicking via the OS accessibility tree (gap 2) ─────────────────
+// Click a real UI control by name instead of a guessed pixel. On Windows this
+// uses UI Automation's invoke pattern, which is how a screen reader clicks - it
+// targets the actual element, so it doesn't miss like vision-guided clicks.
+fn ui_click(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct LabelArg { label: String }
+    let a: LabelArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    #[cfg(windows)]
+    { ui_click_native(&a.label) }
+    #[cfg(not(windows))]
+    { format!("ui_click is Windows-only for now; use click_on for '{}'.", a.label) }
+}
+
+#[cfg(windows)]
+fn ui_click_native(label: &str) -> String {
+    use uiautomation::UIAutomation;
+    let automation = match UIAutomation::new() {
+        Ok(a) => a,
+        Err(e) => return format!("ERROR: UI Automation init failed: {e}"),
+    };
+    let matcher = automation.create_matcher().contains_name(label).timeout(3000);
+    match matcher.find_first() {
+        Ok(el) => {
+            let name = el.get_name().unwrap_or_default();
+            match el.click() {
+                Ok(_) => format!("clicked '{label}' (UI element: {name})"),
+                Err(e) => format!("ERROR: found '{name}' but could not click it: {e}. Try click_on instead."),
+            }
+        }
+        Err(_) => format!("No accessible UI element named '{label}' is visible. Use click_on (vision) instead, or check the exact label."),
     }
 }
 

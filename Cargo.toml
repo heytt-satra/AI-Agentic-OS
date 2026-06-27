@@ -29,6 +29,11 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 xcap = "0.9.6"
 
+# Windows UI Automation: lets us click real UI elements by name (accessibility
+# tree) instead of guessing pixel coordinates - the key to reliable computer-use.
+[target.'cfg(windows)'.dependencies]
+uiautomation = "0.16"
+
 # Release builds: optimized + self-contained, but NOT max-LTO (that made builds
 # take ~7 min). "thin" LTO is ~as fast at runtime and links much quicker.
 [profile.release]
