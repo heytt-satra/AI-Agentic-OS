@@ -85,6 +85,11 @@ To reach out, write a SHORT, specific, personalized email (no generic spam) and 
 call email_compose - it opens the message prefilled in the user's Gmail for them \
 to review and send. After composing, mark the lead contacted with lead_update. Use \
 lead_list to see saved leads and resume later.\n\
+MULTI-STEP GUI COMMANDS: if ONE instruction asks to open an app AND do something \
+inside it (e.g. 'open chrome and click the second profile', 'open notepad and type \
+X'), do the WHOLE thing: open_app, then wait about 2 seconds for it to appear, then \
+operate_app with the in-app goal. Never stop after merely opening the app - finish \
+the action the user asked for. This applies equally to spoken/voice commands.\n\
 ACQUIRE THEN OPERATE: if the user wants an app that is not installed, install it \
 with install_software, then launch it with open_app. To drive an open app to a \
 result, prefer operate_app with a plain-language goal — it runs an autonomous \
