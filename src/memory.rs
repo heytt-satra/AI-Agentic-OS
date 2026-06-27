@@ -38,6 +38,9 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Document RAG (gap 3).
+    DocIngest { source: String, chunks: Vec<String>, reply: oneshot::Sender<usize> },
+    DocSearch { query: String, k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> },
     // Leads / outreach engine.
     LeadAdd { lead: Lead, reply: oneshot::Sender<i64> },
     LeadList { reply: oneshot::Sender<Vec<(i64, Lead)>> },
@@ -268,6 +271,23 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── document RAG (gap 3) ────────────────────────────────────────────────
+    pub async fn doc_ingest(&self, source: &str, chunks: Vec<String>) -> usize {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::DocIngest { source: source.to_string(), chunks, reply }).await.is_err() {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
+    }
+
+    pub async fn doc_search(&self, query: &str, k: i64) -> Vec<(String, String, f32)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::DocSearch { query: query.to_string(), k, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     // ── leads / outreach engine ─────────────────────────────────────────────
     pub async fn lead_add(&self, lead: Lead) -> i64 {
         let (reply, rx) = oneshot::channel();
@@ -328,6 +348,11 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
+         );
+         -- Document RAG: chunks of the user's ingested files + their embeddings.
+         CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            source TEXT NOT NULL, chunk TEXT NOT NULL, vec BLOB NOT NULL
          );
          -- Leads / contacts for the research+outreach engine.
          -- status = new | contacted | replied | dropped.
@@ -484,6 +509,44 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
             let _ = reply.send(n > 0);
+        }
+        MemCmd::DocIngest { source, chunks, reply } => {
+            let mut n = 0usize;
+            if let Some(emb) = embedder {
+                for ch in &chunks {
+                    if let Ok(v) = emb.embed(ch) {
+                        if conn.execute(
+                            "INSERT INTO documents (ts, source, chunk, vec) VALUES (?1, ?2, ?3, ?4)",
+                            params![now_secs(), source, ch, vec_to_blob(&v)],
+                        ).is_ok() {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            let _ = reply.send(n);
+        }
+        MemCmd::DocSearch { query, k, reply } => {
+            let mut hits: Vec<(String, String, f32)> = Vec::new();
+            if let Some(emb) = embedder {
+                if let Ok(qv) = emb.embed(&query) {
+                    if let Ok(mut stmt) = conn.prepare("SELECT source, chunk, vec FROM documents") {
+                        if let Ok(rows) = stmt.query_map([], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+                        }) {
+                            let mut scored: Vec<(f32, String, String)> = rows
+                                .filter_map(|x| x.ok())
+                                .map(|(s, c, b)| (cosine(&qv, &blob_to_vec(&b)), s, c))
+                                .collect();
+                            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                            for (score, s, c) in scored.into_iter().take(k.max(1) as usize) {
+                                hits.push((s, c, score));
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = reply.send(hits);
         }
         MemCmd::LeadAdd { lead, reply } => {
             // Dedupe: if a lead with the same email or phone already exists,

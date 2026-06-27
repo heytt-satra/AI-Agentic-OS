@@ -167,3 +167,28 @@ missing.
 unlabeled targets (canvas, games, custom-drawn UIs) still fall back to the vision
 loop, which remains the frontier. A future step: enumerate the a11y tree as a
 labeled element list the model can pick from, and use it inside operate_app.
+
+### 2026-06-27 - Item 3 (text/code): document RAG
+**Goal:** turn memory into a real knowledge file-system - let the user point
+Jarvis at their files and ask questions answered from those files.
+
+**Thinking / design:** we already had the hard part - a local candle embedder
+(BGE) and cosine helpers - used for conversation recall. Document RAG is the same
+machinery pointed at files: read -> chunk -> embed -> store, then embed the query
+and cosine-rank the chunks. Reusing the embedder in the memory actor thread means
+no new ML and everything stays local (no API, no data leaving the machine).
+
+**How it works:** new `documents` table (source, chunk, vec). `ingest_path(path)`
+reads a file or walks a folder (text/code extensions, skips target/node_modules/
+.git, capped), chunks at ~800 chars, and sends chunks to the actor which embeds
+and stores them. `search_docs(query)` embeds the query and returns the top chunks
+by cosine, with their source file. Two memory commands (DocIngest, DocSearch)
+keep all embedder access on the single owner thread.
+
+**Test:** wrote a note with a unique fact ("codename Bluebird, lead engineer
+Farah"), ingested it, asked "what is the codename and who is the lead engineer?"
+Jarvis embedded the query, retrieved the right chunk, and answered correctly.
+Passed.
+
+**Still to do:** PDF ingestion (next commit), and chunk overlap for better recall
+across chunk boundaries.

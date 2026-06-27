@@ -59,6 +59,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"},"status":{"type":"string"}},"required":["id","status"]})),
         f("email_compose", "Open a prefilled email in the user's Gmail in their browser, ready to review and send (they are already logged in, so they just glance and hit Send). Use this to send outreach. After composing, mark the lead 'contacted' with lead_update.",
           serde_json::json!({"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]})),
+        f("ingest_path", "Read a file or all the text/code files in a folder, split them into chunks, embed them locally, and store them so you can semantically search them later. Use to load the user's documents, notes, or a codebase into Jarvis's knowledge.", str_prop("path", "file or folder path")),
+        f("search_docs", "Semantically search the files you have ingested with ingest_path and return the most relevant chunks with their source. Use to answer questions from the user's own documents/code.", str_prop("query", "what to look for")),
         f("recall_activity", "The user's SECOND BRAIN: a detailed timeline of EVERYTHING they did on the computer (every app they focused, every window title, things they copied), with clock times and per-app time totals. ALWAYS use this for 'what did I do', 'what was I working on', 'what apps did I use', 'how long in X', or any question about a past time window. Set 'minutes' to the look-back window (e.g. 60 for the last hour, 480 for the workday). Optional 'query' filters by app or keyword. Report what it returns in detail; do NOT summarize from the chat.",
           serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"how far back to look, in minutes (default 180)"},"query":{"type":"string","description":"optional app/keyword filter"}},"required":[]})),
 
@@ -100,6 +102,8 @@ pub async fn execute(
 ) -> String {
     match name {
         "recall_activity" => recall_activity(args_json, mem).await,
+        "ingest_path" => ingest_path(args_json, mem).await,
+        "search_docs" => search_docs(args_json, mem).await,
         "read_file" => read_file(args_json),
         "write_file" => write_file(args_json),
         "list_dir" => list_dir(args_json),
@@ -1554,6 +1558,92 @@ async fn recall_activity(args: &str, mem: &crate::memory::MemoryHandle) -> Strin
             _ => continue,
         }
         shown += 1;
+    }
+    out
+}
+
+// ── document RAG (gap 3): ingest + semantically search the user's files ──────
+fn is_text_file(p: &std::path::Path) -> bool {
+    matches!(
+        p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).as_deref(),
+        Some("txt" | "md" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "json" | "csv"
+            | "html" | "htm" | "css" | "toml" | "yaml" | "yml" | "log" | "c" | "cpp"
+            | "h" | "hpp" | "java" | "go" | "sh" | "sql" | "xml" | "ini" | "cfg" | "tex")
+    )
+}
+
+fn collect_text_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, cap: usize) {
+    let skip = |n: &str| matches!(n, "target" | "node_modules" | ".git" | "dist" | "build" | ".venv" | "__pycache__");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if out.len() >= cap { break; }
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if !skip(&name) { collect_text_files(&path, out, cap); }
+        } else if is_text_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+// Split text into ~800-char chunks, dropping tiny/empty ones.
+fn chunk_text(text: &str, size: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + size).min(chars.len());
+        let chunk: String = chars[i..end].iter().collect();
+        if chunk.trim().len() > 20 { out.push(chunk.trim().to_string()); }
+        i = end;
+    }
+    out
+}
+
+async fn ingest_path(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let a: PathArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let path = resolve_path(&a.path);
+    let p = std::path::Path::new(&path);
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if p.is_dir() {
+        collect_text_files(p, &mut files, 40);
+    } else if p.is_file() {
+        files.push(p.to_path_buf());
+    } else {
+        return format!("ERROR: no such file or folder: {path}");
+    }
+    if files.is_empty() {
+        return format!("No text/code files found at {path} (binary files are skipped; PDF support is coming).");
+    }
+    let mut total = 0usize;
+    let mut done = 0usize;
+    for f in &files {
+        if let Ok(text) = std::fs::read_to_string(f) {
+            let chunks: Vec<String> = chunk_text(&text, 800).into_iter().take(60).collect();
+            if chunks.is_empty() { continue; }
+            total += mem.doc_ingest(&f.to_string_lossy(), chunks).await;
+            done += 1;
+        }
+    }
+    if total == 0 {
+        return "Could not ingest anything (files unreadable, or local embeddings unavailable).".to_string();
+    }
+    format!("Ingested {total} chunks from {done} file(s). Ask me anything from them with search_docs.")
+}
+
+async fn search_docs(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let a: SearchArgs = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let hits = mem.doc_search(&a.query, 6).await;
+    if hits.is_empty() {
+        return "No matching content in your ingested files (ingest some first with ingest_path).".to_string();
+    }
+    let mut out = format!("Top matches for \"{}\":\n", a.query);
+    for (src, chunk, score) in hits {
+        let name = std::path::Path::new(&src)
+            .file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| src.clone());
+        let snippet: String = chunk.chars().take(300).collect();
+        out.push_str(&format!("\n[{name}] (score {score:.2})\n{snippet}\n"));
     }
     out
 }
