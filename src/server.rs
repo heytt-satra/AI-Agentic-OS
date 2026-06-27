@@ -102,7 +102,8 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
 
         let mut tainted = false;
         let mut answered = false;
-        for _ in 0..max_steps() {
+        let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        'turn: for _ in 0..max_steps() {
             // Streamed model call: content tokens go to the browser live.
             let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let reply = {
@@ -135,6 +136,17 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                 for call in reply.message.tool_calls.clone().unwrap_or_default() {
                     let name = call.function.name.clone();
                     let args = call.function.arguments.clone();
+
+                    // Runaway-loop guard (gap 7): stop repeating the same call.
+                    let sig = format!("{name}|{args}");
+                    let c = seen.entry(sig).or_insert(0);
+                    *c += 1;
+                    if *c >= 4 {
+                        let _ = send(&mut socket, serde_json::json!({"type":"answer","text":"I caught myself repeating the same action and stopped to avoid a loop, sir. Could you rephrase or give me more to go on?"})).await;
+                        answered = true;
+                        break 'turn;
+                    }
+
                     let risk = policy::assess(&name, &args);
 
                     // Approval (over the WebSocket) if the policy demands it.
