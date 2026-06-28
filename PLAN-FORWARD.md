@@ -14,8 +14,7 @@ Trust is the entire wedge, so this comes first.
 - [x] Structured prompt-injection defense (data/instruction separation)
 - [x] Verifiable offline / no-telemetry mode + `jarvis privacy` report
 - [x] At-rest encryption of the activity log (pure-Rust AES-GCM)
-- [ ] C: execution containment - time/resource-bounded code_exec & run_shell so a
-      runaway or hostile command can't hang or exhaust the machine (next).
+- [x] C: execution containment - timeout+kill for code_exec & run_shell (run_bounded)
 - [ ] Full-DB encryption option (conversations/leads) - decrypt-on-start /
       encrypt-on-stop file scheme OR field encryption; with a passphrase / OS-
       keystore key option (stronger than the on-disk key-file).
@@ -24,10 +23,10 @@ Trust is the entire wedge, so this comes first.
 
 ## Phase 1 - Reliability we can measure
 You can't harden what you can't measure.
-- [ ] EVAL / TEST HARNESS (top priority): unit tests for pure logic (reward
-      scoring, chunking, path-safety, injection scan, MCP parsing) + an agent-task
-      eval suite with automatic pass/fail scoring, runnable in CI. Turns quality
-      from vibes into a number; also feeds the own-model loop.
+- [x] EVAL / TEST HARNESS (foundation): 15 cargo unit tests over the security-
+      critical pure logic (crypto round-trip, path-traversal, injection scan,
+      network classification, reward labeling, contact extraction). `cargo test`
+      green. STILL TO DO: an agent-task eval RUNNER (scored end-to-end) + CI wiring.
 - [ ] Planner -> executor -> critic loop: explicit plan, then verify each task is
       ACTUALLY complete (not just "the model said so").
 - [ ] Parallel execution: concurrent tool calls and concurrent sub-agents (today
@@ -50,8 +49,36 @@ The part that makes a personal OS get stronger with use.
       we already label, then the teacher loop (API model supervises the local one).
 - [ ] Self-healing tools: when a tool keeps failing, the agent uses code-builder
       ON ITSELF to write or fix a tool. An OS that extends its own capabilities.
-- [ ] Scheduling engine: saved agents run on a cadence ("every morning find leads
-      and draft outreach") - the leap from tool to always-on workforce.
+- [x] Scheduling engine: saved agents run on a cadence (schedule_add/list/remove +
+      a ticker in `serve`) - with autostart, the always-on workforce.
+
+## NEXT WAVE (prioritized, ready to build)
+Built this session: activity encryption, execution containment, eval/test harness,
+scheduling. The remaining items, ordered by value/effort and grouped by how they
+get built:
+
+Clean + buildable now (each ~one commit):
+1. Cost/token accounting - capture `usage` from replies into a `usage` table;
+   `jarvis cost` report + surface in privacy. (Streaming-usage is the fiddly part.)
+2. Model routing - opt-in OPENROUTER_MODEL_FAST; route trivial turns to the cheap
+   model via a Provider.routed() clone. Low risk (default unchanged).
+3. Semantic loop detection - upgrade the exact tool+args loop guard to fuzzy.
+4. Parallel sub-agents - run multiple spawn_agent calls concurrently (tokio join)
+   instead of sequentially.
+5. Persistent browser session - keep one headless-Chrome alive across browse calls.
+
+Larger, deliberate (multi-commit, but in-binary):
+6. Full-DB encryption (conversations/leads) with passphrase/keystore key.
+7. Capability tokens - fine-grained, time-boxed permissions.
+8. ANN vector index (HNSW) + chunk overlap + memory consolidation for RAG at scale.
+9. Self-healing tools - detect repeated tool failure, code-build a fix, hot-add.
+10. Agent-task eval RUNNER + CI wiring (completes Phase 1 #1).
+
+External / needs hardware or a big frontend (own deliberate projects, not a marathon):
+11. Own-model DPO training (GPU) - pipeline exists (TRAINING.md); this is the run.
+12. Local STT/TTS (Whisper/Piper) - on-device voice without the browser.
+13. Observability/control UI - live action timeline with approve/pause/replay.
+14. Native integrations (email/calendar/contacts), agent/skill registry.
 
 ## Phase 4 - Reach + UX
 - [ ] Observability/control UI: a live timeline of every agent action with
