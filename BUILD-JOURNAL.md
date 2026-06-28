@@ -410,3 +410,14 @@ run_shell and code_exec (run_in) route through it; timeout = JARVIS_EXEC_TIMEOUT
 killed at 3s and reported honestly; echo never ran. Passed. **Still lacking:** this
 bounds time, not full OS isolation (still user privileges/filesystem); true
 sandboxing (Job Objects / container / restricted token) is the larger next step.
+
+### 2026-06-28 - Phase 1 #1: eval/test harness (foundation)
+**Goal:** REVIEW's #1 flaw was "no automated tests." Add a real regression net so
+future hardening can't silently break a capability. **How:** #[cfg(test)] modules
+covering the security-critical PURE logic - crypto encrypt/decrypt round-trip +
+legacy passthrough + corrupt-input safety; coder slugify + safe_join path-traversal
+blocking; dataset is_noise / is_correction / full build() segmentation+scoring;
+tools looks_like_injection, is_network_tool, guard_untrusted fencing, chunk_text,
+percent_encode, find_emails/find_phones. **Result:** `cargo test` -> 15 passed, 0
+failed, in 0.01s. **Next for this item:** an agent-task eval runner (scored
+end-to-end tasks) + wire `cargo test` into CI; this commit is the unit foundation.

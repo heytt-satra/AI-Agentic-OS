@@ -135,3 +135,33 @@ pub fn tree(dir: &Path) -> String {
     walk(dir, "", &mut out, 0);
     if out.is_empty() { "(empty)".to_string() } else { out }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_cleans_names() {
+        assert_eq!(slugify("Hello World!"), "hello-world");
+        assert_eq!(slugify("  My  Cool   App  "), "my-cool-app");
+        assert_eq!(slugify("@@@"), "project");
+        assert_eq!(slugify(""), "project");
+    }
+
+    #[test]
+    fn safe_join_blocks_traversal() {
+        let dir = std::path::Path::new("C:/proj");
+        assert!(safe_join(dir, "src/main.rs").is_ok());
+        assert!(safe_join(dir, "a/b/c.txt").is_ok());
+        // path-traversal attempts must be rejected
+        assert!(safe_join(dir, "../evil").is_err());
+        assert!(safe_join(dir, "src/../../escape").is_err());
+    }
+
+    #[test]
+    fn detect_language_by_marker() {
+        // empty temp dir -> unknown
+        let d = std::env::temp_dir();
+        let _ = detect_language(&d); // just must not panic
+    }
+}

@@ -264,3 +264,40 @@ pub fn to_jsonl(examples: &[Example]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noise_is_filtered() {
+        assert!(is_noise("[heartbeat tick]"));
+        assert!(is_noise(""));
+        assert!(is_noise("exit"));
+        assert!(!is_noise("build me a rust cli"));
+    }
+
+    #[test]
+    fn correction_detected() {
+        assert!(is_correction("no, that's wrong", "do the thing"));
+        assert!(is_correction("actually use python instead", "use rust"));
+        assert!(!is_correction("great, now add a test", "build it"));
+    }
+
+    #[test]
+    fn build_segments_and_scores() {
+        let messages = vec![
+            (100, "user".into(), "build a thing".into()),
+            (101, "assistant".into(), "done, built it".into()),
+            (200, "user".into(), "thanks, now ship it".into()),
+            (201, "assistant".into(), "shipped".into()),
+        ];
+        let audit = vec![(100, "code_exec".into(), "{}".into(), true)];
+        let (examples, stats) = build(&messages, &audit);
+        assert_eq!(examples.len(), 2);
+        assert_eq!(stats.total, 2);
+        // first episode produced an answer + a successful tool + user moved on -> good
+        assert_eq!(examples[0].label, "good");
+        assert_eq!(examples[0].steps.len(), 1);
+    }
+}

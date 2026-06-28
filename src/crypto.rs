@@ -72,3 +72,27 @@ pub fn decrypt(stored: &str) -> String {
         Err(_) => stored.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        let enc = encrypt("a secret clipboard value");
+        assert!(enc.starts_with("enc:"));
+        assert_eq!(decrypt(&enc), "a secret clipboard value");
+    }
+
+    #[test]
+    fn legacy_plaintext_passthrough() {
+        // Old rows have no "enc:" prefix and must come back unchanged.
+        assert_eq!(decrypt("just plain text"), "just plain text");
+    }
+
+    #[test]
+    fn corrupt_ciphertext_is_safe() {
+        // Garbage after enc: must not panic; returns the input.
+        assert_eq!(decrypt("enc:notbase64!!"), "enc:notbase64!!");
+    }
+}
