@@ -1,0 +1,21 @@
+name: tests
+
+# Reliability gate (MASTERPLAN Pillar 1): run the cargo test suite on every push
+# and PR so a change can never silently break a capability. The agent-task eval
+# (`jarvis eval`) needs an API key + a live machine, so it runs locally/manually;
+# this gate covers the deterministic unit tests.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --locked --verbose

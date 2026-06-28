@@ -446,6 +446,14 @@ naive check produces false signal; the eval is only as good as its scorer.
 multi-step, network, more adversarial) so the number has room to move, then the
 planner -> critic verification loop.
 
+### 2026-06-28 - Pillar 1: tests in CI
+Added .github/workflows/test.yml: runs `cargo test --locked` on every push/PR to
+main, so a change can never silently break a capability (the reliability gate).
+The 15 deterministic unit tests run in CI; the agent-task `jarvis eval` stays
+local/manual (it needs an API key + a live machine). This completes the
+"measurable in CI" half of Pillar 1's instrument. Next: expand the eval suite +
+the planner->critic verification loop.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
