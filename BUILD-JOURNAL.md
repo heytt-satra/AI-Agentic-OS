@@ -454,6 +454,16 @@ local/manual (it needs an API key + a live machine). This completes the
 "measurable in CI" half of Pillar 1's instrument. Next: expand the eval suite +
 the planner->critic verification loop.
 
+**Hurdle - first CI run failed (environment, not code):** on the Ubuntu runner
+`cargo test` compiles the WHOLE crate, including the cross-platform GUI deps (xcap
+screen capture -> wayland-sys, enigo -> xdo, dbus, arboard). wayland-sys' build
+script ran `pkg-config wayland-client` and panicked: "Package wayland-client was
+not found" - the runner has no GUI system libraries. It builds fine on Windows
+(our dev box) because those libs exist there. Solution: added an apt step to the
+workflow installing libwayland-dev, libxkbcommon-dev, the libxcb-* set,
+libdbus-1-dev, libxdo-dev, pkg-config before `cargo test`. Environment fix, no
+code change. Lesson: cross-platform GUI crates pull system deps CI must provision.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

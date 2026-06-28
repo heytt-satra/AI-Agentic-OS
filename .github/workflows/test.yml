@@ -17,5 +17,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Linux system libs for the cross-platform GUI deps (xcap screen capture,
+      # enigo input, arboard clipboard, dbus). Without these the crate can't even
+      # compile on a bare runner - it's an environment requirement, not a code bug.
+      - name: install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libdbus-1-dev libxdo-dev pkg-config
       - name: cargo test
         run: cargo test --locked --verbose
