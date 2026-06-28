@@ -35,6 +35,8 @@ struct AppState {
 }
 
 pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
+    // Scheduler: while the HUD is up, run any due scheduled agents (Phase 3).
+    spawn_scheduler(provider.clone(), mem.clone());
     let state = AppState { provider, mem };
     let app = Router::new()
         .route("/", get(index))
@@ -48,6 +50,28 @@ pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
     open_browser(&url);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// Background scheduler: every minute, run any saved agents whose schedule is due.
+fn spawn_scheduler(provider: Provider, mem: MemoryHandle) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for (id, agent, every) in mem.schedule_due(now).await {
+                if let Some(instr) = mem.agent_get(&agent).await {
+                    let result = crate::run_subagent(&provider, &mem, &format!("scheduled agent '{agent}'"), &instr, 0).await;
+                    mem.log("assistant", &format!("[scheduled run: {agent}] {}", result.chars().take(600).collect::<String>())).await;
+                    eprintln!("[scheduler] ran '{agent}'");
+                }
+                mem.schedule_mark_run(id, now + every.max(60)).await;
+            }
+        }
+    });
 }
 
 async fn index() -> Html<&'static str> {

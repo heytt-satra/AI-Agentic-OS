@@ -96,6 +96,14 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("agent_run", "Run a saved agent by name: it executes that agent's stored instructions autonomously and returns the result.", str_prop("name", "the saved agent's name")),
         f("agent_delete", "Delete a saved agent by name.", str_prop("name", "the saved agent's name")),
+
+        // ── scheduling: run a saved agent on a cadence (always-on workforce)
+        f("schedule_add", "Schedule a saved agent to run automatically every N minutes (works while Jarvis is running, e.g. via `jarvis serve` + autostart). Use for 'every morning / every hour, do X' - first create the agent with agent_create, then schedule it.",
+          serde_json::json!({"type":"object","properties":{"agent":{"type":"string"},"minutes":{"type":"integer","description":"how often to run, in minutes"}},"required":["agent","minutes"]})),
+        f("schedule_list", "List scheduled agents and how often each runs.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("schedule_remove", "Stop a schedule by its id.",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
     ]
 }
 
@@ -224,6 +232,40 @@ pub async fn execute(
                         format!("No agent named '{}'.", a.name)
                     }
                 }
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "schedule_add" => {
+            #[derive(Deserialize)]
+            struct A { agent: String, minutes: i64 }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => {
+                    if mem.agent_get(&a.agent).await.is_none() {
+                        return format!("No saved agent named '{}'. Create it with agent_create first.", a.agent);
+                    }
+                    let id = mem.schedule_add(&a.agent, a.minutes.max(1) * 60).await;
+                    format!("Scheduled '{}' to run every {} min (schedule #{id}). It runs while Jarvis is running.", a.agent, a.minutes.max(1))
+                }
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "schedule_list" => {
+            let rows = mem.schedule_list().await;
+            if rows.is_empty() {
+                "No scheduled agents.".to_string()
+            } else {
+                let mut out = String::from("Scheduled agents:\n");
+                for (id, agent, every) in rows {
+                    out.push_str(&format!("  #{id} {agent} - every {} min\n", every / 60));
+                }
+                out
+            }
+        }
+        "schedule_remove" => {
+            #[derive(Deserialize)]
+            struct A { id: i64 }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => if mem.schedule_remove(a.id).await { format!("Removed schedule #{}.", a.id) } else { format!("No schedule #{}.", a.id) },
                 Err(e) => format!("ERROR: bad args: {e}"),
             }
         }

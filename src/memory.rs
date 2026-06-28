@@ -38,6 +38,12 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Scheduled agents (Phase 3).
+    ScheduleAdd { agent: String, every_secs: i64, reply: oneshot::Sender<i64> },
+    ScheduleList { reply: oneshot::Sender<Vec<(i64, String, i64)>> },
+    ScheduleRemove { id: i64, reply: oneshot::Sender<bool> },
+    ScheduleDue { now: i64, reply: oneshot::Sender<Vec<(i64, String, i64)>> },
+    ScheduleMarkRun { id: i64, next_run: i64 },
     // User-defined agents (gap 4).
     AgentCreate { name: String, instructions: String, reply: oneshot::Sender<bool> },
     AgentList { reply: oneshot::Sender<Vec<(String, String)>> },
@@ -276,6 +282,31 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── scheduled agents (Phase 3) ──────────────────────────────────────────
+    pub async fn schedule_add(&self, agent: &str, every_secs: i64) -> i64 {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ScheduleAdd { agent: agent.to_string(), every_secs, reply }).await.is_err() { return -1; }
+        rx.await.unwrap_or(-1)
+    }
+    pub async fn schedule_list(&self) -> Vec<(i64, String, i64)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ScheduleList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn schedule_remove(&self, id: i64) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ScheduleRemove { id, reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+    pub async fn schedule_due(&self, now: i64) -> Vec<(i64, String, i64)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ScheduleDue { now, reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn schedule_mark_run(&self, id: i64, next_run: i64) {
+        let _ = self.tx.send(MemCmd::ScheduleMarkRun { id, next_run }).await;
+    }
+
     // ── user-defined agents (gap 4) ─────────────────────────────────────────
     pub async fn agent_create(&self, name: &str, instructions: &str) -> bool {
         let (reply, rx) = oneshot::channel();
@@ -392,6 +423,11 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL
+         );
+         -- Scheduled agents (Phase 3): run a saved agent every N seconds.
+         CREATE TABLE IF NOT EXISTS schedules (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            agent TEXT NOT NULL, every_secs INTEGER NOT NULL, next_run INTEGER NOT NULL
          );
          -- Document RAG: chunks of the user's ingested files + their embeddings.
          CREATE TABLE IF NOT EXISTS documents (
@@ -555,6 +591,37 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
             let _ = reply.send(n > 0);
+        }
+        MemCmd::ScheduleAdd { agent, every_secs, reply } => {
+            let next = now_secs() + every_secs;
+            let _ = conn.execute(
+                "INSERT INTO schedules (ts, agent, every_secs, next_run) VALUES (?1, ?2, ?3, ?4)",
+                params![now_secs(), agent, every_secs, next],
+            );
+            let _ = reply.send(conn.last_insert_rowid());
+        }
+        MemCmd::ScheduleList { reply } => {
+            let rows = (|| -> Result<Vec<(i64, String, i64)>> {
+                let mut stmt = conn.prepare("SELECT id, agent, every_secs FROM schedules ORDER BY id ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::ScheduleRemove { id, reply } => {
+            let n = conn.execute("DELETE FROM schedules WHERE id=?1", params![id]).unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
+        MemCmd::ScheduleDue { now, reply } => {
+            let rows = (|| -> Result<Vec<(i64, String, i64)>> {
+                let mut stmt = conn.prepare("SELECT id, agent, every_secs FROM schedules WHERE next_run <= ?1")?;
+                let r = stmt.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::ScheduleMarkRun { id, next_run } => {
+            let _ = conn.execute("UPDATE schedules SET next_run=?2 WHERE id=?1", params![id, next_run]);
         }
         MemCmd::AgentCreate { name, instructions, reply } => {
             let ok = conn.execute(

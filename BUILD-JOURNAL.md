@@ -421,3 +421,16 @@ tools looks_like_injection, is_network_tool, guard_untrusted fencing, chunk_text
 percent_encode, find_emails/find_phones. **Result:** `cargo test` -> 15 passed, 0
 failed, in 0.01s. **Next for this item:** an agent-task eval runner (scored
 end-to-end tasks) + wire `cargo test` into CI; this commit is the unit foundation.
+
+### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
+**Goal:** saved agents that run on a cadence - with autostart, the leap from tool
+to always-on workforce ("every morning find leads and draft outreach").
+**How:** new `schedules` table (agent, every_secs, next_run) + tools schedule_add
+(minutes) / schedule_list / schedule_remove. A background ticker in `serve`
+(spawn_scheduler) checks due schedules every 60s, runs the saved agent via
+run_subagent, logs the result to memory, and sets the next run. Persona teaches the
+flow: agent_create -> schedule_add. **Test:** scheduled the greeter agent every 2
+min and listed it; verified add+list, then cleared the test row so it doesn't
+auto-fire. The ticker runs while `jarvis serve` is up (pairs with `jarvis
+autostart`). **Lacking:** cron-style times (we do intervals), and runs only while
+serve is up (by design - it's the always-on path).

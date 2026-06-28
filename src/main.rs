@@ -69,7 +69,10 @@ DEFINABLE AGENTS: when the user asks to create, save, or set up a reusable agent
 or workflow ('make an agent that finds leads and drafts intros'), use agent_create \
 with a short name and clear instructions. They can then run it by name with \
 agent_run, see them with agent_list, and remove with agent_delete. This lets users \
-build their own automations in plain language.\n\
+build their own automations in plain language. To make one run on a cadence \
+('every morning', 'every hour'), create the agent then call schedule_add with the \
+minutes; it runs automatically while Jarvis is running (jarvis serve + autostart). \
+schedule_list and schedule_remove manage them.\n\
 ORCHESTRATION: for a big goal with independent parts, act as an orchestrator: \
 delegate each part to a sub-agent with spawn_agent (give it a role and a clear, \
 self-contained task), then combine their results into the final answer. Good for \
