@@ -27,6 +27,7 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libdbus-1-dev libxdo-dev pkg-config \
-            libpipewire-0.3-dev clang libclang-dev libdrm-dev libgbm-dev
+            libpipewire-0.3-dev clang libclang-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
       - name: cargo test
         run: cargo test --locked --verbose
