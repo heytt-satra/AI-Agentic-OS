@@ -443,24 +443,66 @@ fn open_path(args: &str) -> String {
     }
 }
 
+// Execution containment (gap 7 / security): hard time limit for any shell/code
+// command. Overridable via JARVIS_EXEC_TIMEOUT (seconds).
+fn exec_timeout() -> u64 {
+    std::env::var("JARVIS_EXEC_TIMEOUT").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(180)
+}
+
+// Run a shell command bounded by a timeout; if it overruns it is KILLED so a
+// runaway or hung command can't hang the agent or exhaust the machine. Output is
+// streamed by reader threads (no pipe-buffer deadlock) and capped.
+fn run_bounded(command: &str, cwd: Option<&std::path::Path>, path: Option<&str>, timeout_secs: u64, out_cap: usize, err_cap: usize) -> String {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-Command", command]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(d) = cwd { cmd.current_dir(d); }
+    if let Some(p) = path { cmd.env("PATH", p); }
+    let mut child = match cmd.spawn() { Ok(c) => c, Err(e) => return format!("ERROR running command: {e}") };
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+    let oh = std::thread::spawn(move || { let mut s = String::new(); if let Some(mut o) = so.take() { let _ = o.read_to_string(&mut s); } s });
+    let eh = std::thread::spawn(move || { let mut s = String::new(); if let Some(mut e) = se.take() { let _ = e.read_to_string(&mut s); } s });
+    let start = std::time::Instant::now();
+    let mut exit: Option<std::process::ExitStatus> = None;
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => { exit = Some(st); break false; }
+            Ok(None) => {
+                if start.elapsed().as_secs() >= timeout_secs {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            Err(_) => break false,
+        }
+    };
+    let stdout = oh.join().unwrap_or_default();
+    let stderr = eh.join().unwrap_or_default();
+    let mut s = if timed_out {
+        format!("ERROR: command exceeded {timeout_secs}s and was killed (possible runaway/hang). Partial output:\n")
+    } else {
+        format!("exit={}\n", exit.map(|e| e.to_string()).unwrap_or_else(|| "unknown".into()))
+    };
+    if !stdout.trim().is_empty() { s.push_str(&format!("stdout:\n{}\n", stdout.chars().take(out_cap).collect::<String>())); }
+    if !stderr.trim().is_empty() { s.push_str(&format!("stderr:\n{}\n", stderr.chars().take(err_cap).collect::<String>())); }
+    s
+}
+
 fn run_shell(args: &str) -> String {
     let a: ShellArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
-    let output = if cfg!(windows) {
-        std::process::Command::new("powershell").args(["-NoProfile", "-Command", &a.command]).output()
-    } else {
-        std::process::Command::new("sh").args(["-c", &a.command]).output()
-    };
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let mut s = format!("exit={}\n", out.status);
-            if !stdout.trim().is_empty() { s.push_str(&format!("stdout:\n{}\n", stdout.chars().take(4000).collect::<String>())); }
-            if !stderr.trim().is_empty() { s.push_str(&format!("stderr:\n{}\n", stderr.chars().take(2000).collect::<String>())); }
-            s
-        }
-        Err(e) => format!("ERROR running command: {e}"),
-    }
+    run_bounded(&a.command, None, None, exec_timeout(), 4000, 2000)
 }
 
 // ── code-builder mode (Power 1) ─────────────────────────────────────────────
@@ -506,34 +548,7 @@ fn toolchain_path() -> String {
 // output budget so build/test failures come back readable.
 fn run_in(dir: &std::path::Path, command: &str) -> String {
     let path = toolchain_path();
-    let output = if cfg!(windows) {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", command])
-            .current_dir(dir)
-            .env("PATH", &path)
-            .output()
-    } else {
-        std::process::Command::new("sh")
-            .args(["-c", command])
-            .current_dir(dir)
-            .env("PATH", &path)
-            .output()
-    };
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let mut s = format!("exit={}\n", out.status);
-            if !stdout.trim().is_empty() {
-                s.push_str(&format!("stdout:\n{}\n", stdout.chars().take(8000).collect::<String>()));
-            }
-            if !stderr.trim().is_empty() {
-                s.push_str(&format!("stderr:\n{}\n", stderr.chars().take(6000).collect::<String>()));
-            }
-            s
-        }
-        Err(e) => format!("ERROR running command: {e}"),
-    }
+    run_bounded(command, Some(dir), Some(&path), exec_timeout(), 8000, 6000)
 }
 
 fn code_new_project(args: &str) -> String {

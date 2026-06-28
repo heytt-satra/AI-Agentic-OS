@@ -399,3 +399,14 @@ the decrypt-on-start/encrypt-on-stop file dance - real shutdown-coordination and
 data-loss risk - or field encryption that breaks FTS keyword search); and the key
 sits on the same disk (a passphrase or OS-keystore option is the stronger later
 upgrade). Activity - the scariest data - is covered now.
+
+### 2026-06-28 - Fix 4 (C): execution containment
+**Goal:** a runaway or hostile command (fork bomb, infinite loop, hang) must not
+freeze the agent or exhaust the machine. **How:** new run_bounded() spawns the
+command with piped output, streams stdout/stderr on reader threads (no pipe
+deadlock), polls try_wait() to a deadline, and KILLS the child on overrun.
+run_shell and code_exec (run_in) route through it; timeout = JARVIS_EXEC_TIMEOUT
+(default 180s). **Test:** JARVIS_EXEC_TIMEOUT=3 + `Start-Sleep 30; echo done` was
+killed at 3s and reported honestly; echo never ran. Passed. **Still lacking:** this
+bounds time, not full OS isolation (still user privileges/filesystem); true
+sandboxing (Job Objects / container / restricted token) is the larger next step.
