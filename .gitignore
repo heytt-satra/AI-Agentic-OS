@@ -17,3 +17,6 @@
 
 # MCP server config - user-specific (may hold tokens), never commit
 /mcp.json
+
+# local encryption key for at-rest data - NEVER commit (losing it loses the data)
+/.jarvis-key

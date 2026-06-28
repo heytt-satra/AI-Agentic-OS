@@ -6,6 +6,7 @@
 
 mod activity;
 mod coder;
+mod crypto;
 mod dataset;
 mod embeddings;
 mod mcp;

@@ -369,3 +369,33 @@ out given the current brain + offline setting.
 with JARVIS_OFFLINE=1 a web_search turn was refused because the brain is cloud, with
 a clear message to switch to a local model. Passed. Honest gap noted in the report
 itself: the DB is still plaintext - encryption is the next fix.
+
+### 2026-06-28 - Fix 3 (A+B): at-rest encryption of the activity log
+**Decision on B (full-DB / SQLCipher):** REJECTED for us. SQLCipher needs
+OpenSSL, whose vendored build on Windows wants Perl - that breaks our pure-Rust,
+zero-install rule (the principle that's part of the moat). So we encrypt the
+pure-Rust way (AES-256-GCM via the `aes-gcm` crate) and scope it to the highest-
+risk data first: the activity log (window titles + clipboard) - the exact "Big
+Brother" data the privacy-fleeing market fears.
+
+**Design (safe, no migration):** crypto.rs holds a key in a local key-file
+(~/.jarvis-key, gitignored). Values are stored as "enc:<base64(nonce||ct)>";
+anything without that prefix is treated as legacy plaintext and returned as-is -
+so old rows keep working and nothing has to be migrated or risked. Encrypt on
+insert (LogActivity), decrypt on read (query_activity + query_activity_since);
+keyword filtering moved to AFTER decrypt since ciphertext won't LIKE-match.
+
+**Failed first test (documented honestly):** launched `serve` for 10s to generate
+a row, then checked the DB - found 0 encrypted rows and no key-file. Looked like
+the code failed. Root cause was the TEST, not the code: the 10s window was too
+short for the tracker's 5-8s ticks, and Start-Process didn't pin the working dir,
+so no fresh row was written. Re-ran with a 30s serve, -WorkingDirectory pinned,
+and clipboard changes. Result: new rows stored as `enc:...`, a planted secret
+clipboard value did NOT appear in plaintext, old rows still readable, and recall
+decrypted correctly ("copied TOPSECRET-clip-xyz-99"). Passed.
+
+**What we still lack:** full-DB encryption of conversations/leads too (needs either
+the decrypt-on-start/encrypt-on-stop file dance - real shutdown-coordination and
+data-loss risk - or field encryption that breaks FTS keyword search); and the key
+sits on the same disk (a passphrase or OS-keystore option is the stronger later
+upgrade). Activity - the scariest data - is covered now.

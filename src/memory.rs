@@ -512,9 +512,11 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             );
         }
         MemCmd::LogActivity { kind, app, detail } => {
+            // Encrypt the sensitive part (window titles + clipboard) at rest.
+            let enc = crate::crypto::encrypt(&detail);
             let _ = conn.execute(
                 "INSERT INTO activity (ts, kind, app, detail) VALUES (?1, ?2, ?3, ?4)",
-                params![now_secs(), kind, app, detail],
+                params![now_secs(), kind, app, enc],
             );
         }
         MemCmd::ActivityRecent { n, reply } => {
@@ -715,15 +717,22 @@ fn query_activity_since(conn: &Connection, since: i64, query: Option<&str>) -> R
     let mut rows = Vec::new();
     if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
         let like = format!("%{q}%");
+        // NOTE: encrypted detail won't match a LIKE filter; we widen and filter
+        // after decrypt below.
         let mut stmt = conn.prepare(
-            "SELECT ts, kind, app, detail FROM activity
-             WHERE ts >= ?1 AND (app LIKE ?2 OR detail LIKE ?2)
-             ORDER BY id ASC LIMIT 2000",
+            "SELECT ts, kind, app, detail FROM activity WHERE ts >= ?1 ORDER BY id ASC LIMIT 2000",
         )?;
-        let mapped = stmt.query_map(params![since, like], |r| {
+        let mapped = stmt.query_map(params![since], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
         })?;
-        for r in mapped { rows.push(r?); }
+        let needle = like.trim_matches('%').to_lowercase();
+        for r in mapped {
+            let (ts, kind, app, detail) = r?;
+            let detail = crate::crypto::decrypt(&detail);
+            if app.to_lowercase().contains(&needle) || detail.to_lowercase().contains(&needle) {
+                rows.push((ts, kind, app, detail));
+            }
+        }
     } else {
         let mut stmt = conn.prepare(
             "SELECT ts, kind, app, detail FROM activity WHERE ts >= ?1 ORDER BY id ASC LIMIT 2000",
@@ -731,29 +740,32 @@ fn query_activity_since(conn: &Connection, since: i64, query: Option<&str>) -> R
         let mapped = stmt.query_map(params![since], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
         })?;
-        for r in mapped { rows.push(r?); }
+        for r in mapped {
+            let (ts, kind, app, detail) = r?;
+            rows.push((ts, kind, app, crate::crypto::decrypt(&detail)));
+        }
     }
     Ok(rows)
 }
 
 fn query_activity(conn: &Connection, query: Option<&str>, n: i64) -> Result<Vec<(i64, String, String, String)>> {
+    // detail is encrypted at rest, so we fetch recent rows, decrypt, then filter.
+    let mut stmt = conn.prepare("SELECT ts, kind, app, detail FROM activity ORDER BY id DESC LIMIT ?1")?;
+    let mapped = stmt.query_map(params![n.max(1)], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+    })?;
+    let needle = query.map(|q| q.to_lowercase());
     let mut rows = Vec::new();
-    if let Some(q) = query {
-        let like = format!("%{}%", q);
-        let mut stmt = conn.prepare(
-            "SELECT ts, kind, app, detail FROM activity
-             WHERE app LIKE ?1 OR detail LIKE ?1 ORDER BY id DESC LIMIT ?2",
-        )?;
-        let mapped = stmt.query_map(params![like, n], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
-        })?;
-        for r in mapped { rows.push(r?); }
-    } else {
-        let mut stmt = conn.prepare("SELECT ts, kind, app, detail FROM activity ORDER BY id DESC LIMIT ?1")?;
-        let mapped = stmt.query_map(params![n], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
-        })?;
-        for r in mapped { rows.push(r?); }
+    for r in mapped {
+        let (ts, kind, app, detail) = r?;
+        let detail = crate::crypto::decrypt(&detail);
+        let keep = match &needle {
+            Some(q) => app.to_lowercase().contains(q) || detail.to_lowercase().contains(q),
+            None => true,
+        };
+        if keep {
+            rows.push((ts, kind, app, detail));
+        }
     }
     rows.reverse(); // chronological
     Ok(rows)
