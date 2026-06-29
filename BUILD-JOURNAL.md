@@ -464,6 +464,16 @@ workflow installing libwayland-dev, libxkbcommon-dev, the libxcb-* set,
 libdbus-1-dev, libxdo-dev, pkg-config before `cargo test`. Environment fix, no
 code change. Lesson: cross-platform GUI crates pull system deps CI must provision.
 
+It took three rounds of whack-a-mole to find the full chain (each fix surfaced the
+next missing lib, read from the actual CI logs - not guessed): wayland-client ->
+then libpipewire-0.3 (xcap's wayland capture via libspa-sys, which also needs
+clang/libclang for bindgen, plus libdrm/libgbm for drm-sys/gbm-sys) -> then egl
+(khronos-egl, needs libegl1-mesa-dev/libgl1-mesa-dev). Final apt set:
+libwayland-dev libxkbcommon-dev libxcb{1,-randr0,-shm0,-xfixes0}-dev libdbus-1-dev
+libxdo-dev libpipewire-0.3-dev clang libclang-dev libdrm-dev libgbm-dev
+libegl1-mesa-dev libgl1-mesa-dev. Result: CI green - `cargo test` (15 tests)
+passes on every push. The reliability gate is live.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
