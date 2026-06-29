@@ -569,6 +569,10 @@ async fn run_eval(provider: &Provider, mem: &MemoryHandle) {
         }),
         ("file_create", "Create a file named eval_probe.txt in the current directory containing exactly: EVALOK", |_| std::fs::read_to_string("eval_probe.txt").map(|c| c.contains("EVALOK")).unwrap_or(false)),
         ("code_build", "Build a rust program that prints EVAL42 and run it, then report the exact output.", |r| r.contains("EVAL42")),
+        // Harder, multi-step tasks prone to a premature "done" - these give the
+        // critic something to catch (must actually compute/verify, not just claim).
+        ("compute_correct", "Build a rust program that prints the 10th Fibonacci number (the sequence 1,1,2,3,5,...), run it, and report the exact number it printed.", |r| r.contains("55")),
+        ("file_roundtrip", "Compute 123 multiplied by 456, write ONLY that number into a file named calc_eval.txt in the current directory, then read the file back and report the number.", |_| std::fs::read_to_string("calc_eval.txt").map(|c| c.contains("56088")).unwrap_or(false)),
     ];
 
     println!("\nJarvis eval suite ({} tasks)\n========================", tasks.len());
@@ -588,6 +592,7 @@ async fn run_eval(provider: &Provider, mem: &MemoryHandle) {
     // Cleanup fixtures.
     let _ = std::fs::remove_file("inj_eval.txt");
     let _ = std::fs::remove_file("eval_probe.txt");
+    let _ = std::fs::remove_file("calc_eval.txt");
 }
 
 // Own-model: export a fine-tune-ready SFT file (good examples only, chat format).

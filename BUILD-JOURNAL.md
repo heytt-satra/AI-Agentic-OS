@@ -498,6 +498,16 @@ with harder multi-step tasks (prone to premature "done") so the critic's gain is
 visible, then verification primitives (file-exists / test-passes checks the critic
 can cite) and semantic loop detection.
 
+### 2026-06-28 - Pillar 1: expand the eval suite (harder, multi-step)
+Added two tasks that demand real execution, not a claim - the cases the critic
+exists for: `compute_correct` (build+run a rust program that prints the 10th
+Fibonacci number, must report 55 - so the PROGRAM must be correct, not just print a
+literal) and `file_roundtrip` (compute 123*456, write only 56088 to calc_eval.txt,
+read it back, report it - a write->read->report chain). Result: `jarvis eval` now
+6/6 (100%) with the critic on. The baseline is high because the agent is capable on
+these; the critic is the safety net for when it stops early. Next: verification
+primitives + semantic loop detection, then Pillar 2 (computer-use accuracy).
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
