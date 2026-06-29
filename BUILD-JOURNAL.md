@@ -633,6 +633,14 @@ on screen returned `FAIL: "..." is NOT visible`. The PASS path rides on ui_list,
 already proven (32 real Notepad controls). Pairs with check_file to give the critic
 both file and screen evidence.
 
+### 2026-06-28 - Pillar 1: activate the verification primitives (persona)
+Small but important: I built check_file/check_screen but never told the agent to
+USE them. Added a "VERIFY BEFORE YOU CLAIM DONE" rule to the persona - after a file
+task call check_file, after a GUI step call check_screen, and if a check returns
+FAIL, fix and re-check instead of reporting success. This closes the loop so the
+reliability primitives actually run in normal operation, not just when asked.
+Build clean.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
