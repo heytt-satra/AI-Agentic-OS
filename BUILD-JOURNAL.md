@@ -712,6 +712,21 @@ process never exits). Fix: rebuild with `cargo build`, then suggest worked.
 **Next:** a trigger engine (time/context) that proposes these for one-tap approval,
 and feeding routines into the heartbeat.
 
+### 2026-06-29 - Own-model (Pillar 4): tune the training pipeline for a 6GB GPU
+**Context:** owner has an RTX 4050 laptop (6GB, 105W). Honest assessment: 6GB fits
+QLoRA (4-bit) of a SMALL base (1.5-3B), NOT full fine-tuning and NOT 7B (7B QLoRA
+OOMs ~6GB). SFT first; DPO needs paired data + more VRAM, so it's later.
+**Changes (prep, since I can't run their GPU):** hardened scripts/train_lora.py for
+6GB - bnb 4bit double-quant, gradient_checkpointing (+use_reentrant False),
+paged_adamw_8bit, grad-accum 16, and new --max-seq (default 1024) / --lora-r flags
+to dial VRAM down further (768/512, r8) if it OOMs. use_cache=False for checkpointing.
+py_compile clean. Updated TRAINING.md with a "what actually fits on 6GB" section and
+- the key payoff - wiring the tuned 1.5B as OPENROUTER_MODEL_FAST so model routing
+sends only TRIVIAL turns to it ($0/call) while the strong model does real work; or
+fully local + JARVIS_OFFLINE=1 for private. This connects the own-model track to the
+routing + cost-accounting + offline pieces built earlier. The training RUN itself is
+the owner's to execute on their GPU.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

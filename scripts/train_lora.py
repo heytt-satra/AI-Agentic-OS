@@ -29,6 +29,10 @@ def main():
     ap.add_argument("--base", default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="base model to fine-tune")
     ap.add_argument("--out", default="./jarvis-lora", help="where to save the LoRA adapter")
     ap.add_argument("--epochs", type=float, default=2.0)
+    # 6GB-safety knobs: shorter sequences + smaller LoRA use less VRAM. Lower
+    # --max-seq to 768 or 512 if you still OOM; raise it if you have >8GB.
+    ap.add_argument("--max-seq", type=int, default=1024, help="max sequence length (lower = less VRAM)")
+    ap.add_argument("--lora-r", type=int, default=16, help="LoRA rank (lower = less VRAM)")
     args = ap.parse_args()
 
     ds = load_dataset("json", data_files=args.data, split="train")
@@ -39,24 +43,30 @@ def main():
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,  # extra ~0.4GB saving, important on 6GB
     )
     model = AutoModelForCausalLM.from_pretrained(args.base, quantization_config=bnb, device_map="auto")
+    model.config.use_cache = False  # required with gradient checkpointing
 
     peft = LoraConfig(
-        r=16, lora_alpha=32, lora_dropout=0.05,
+        r=args.lora_r, lora_alpha=args.lora_r * 2, lora_dropout=0.05,
         target_modules="all-linear", task_type="CAUSAL_LM",
     )
     cfg = SFTConfig(
         output_dir=args.out,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=16,           # effective batch 16, fits 6GB
+        gradient_checkpointing=True,              # big VRAM saver (trades compute)
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        optim="paged_adamw_8bit",                 # paged 8-bit optimizer for low VRAM
         learning_rate=2e-4,
         logging_steps=10,
         save_strategy="epoch",
         bf16=True,
-        max_seq_length=2048,
+        max_seq_length=args.max_seq,
         packing=False,
+        report_to="none",
     )
     # SFTTrainer applies the model's chat template to the "messages" field.
     trainer = SFTTrainer(model=model, args=cfg, train_dataset=ds, peft_config=peft, processing_class=tok)
