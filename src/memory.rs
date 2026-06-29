@@ -123,10 +123,13 @@ impl MemoryHandle {
                     backfill_embeddings(&conn, emb);
                 }
 
+                // ANN index cache for large-corpus semantic search (rebuilt lazily).
+                let mut ann = crate::ann::AnnCache::default();
+
                 // blocking_recv() blocks this thread until a command arrives.
                 // Allowed because we are NOT on a tokio runtime thread.
                 while let Some(cmd) = rx.blocking_recv() {
-                    handle_cmd(&conn, embedder.as_ref(), cmd);
+                    handle_cmd(&conn, embedder.as_ref(), &mut ann, cmd);
                 }
             })
             .context("spawning memory thread")?;
@@ -543,7 +546,7 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
+fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::ann::AnnCache, cmd: MemCmd) {
     match cmd {
         MemCmd::Log { role, content } => {
             if conn
@@ -809,10 +812,38 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let _ = reply.send(n);
         }
         MemCmd::DocSearch { query, k, reply } => {
+            // Brute-force cosine is sub-ms at small scale; above this many chunks
+            // we switch to the cached HNSW index (Pillar 3) to stay fast.
+            const ANN_THRESHOLD: i64 = 2000;
             let mut hits: Vec<(String, String, f32)> = Vec::new();
             if let Some(emb) = embedder {
                 if let Ok(qv) = emb.embed(&query) {
-                    if let Ok(mut stmt) = conn.prepare("SELECT source, chunk, vec FROM documents") {
+                    let count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap_or(0);
+                    if count >= ANN_THRESHOLD {
+                        // Rebuild the ANN index only when the corpus changed.
+                        if ann.built_for != count as usize || ann.index.is_none() {
+                            let mut vecs = Vec::new();
+                            let mut meta = Vec::new();
+                            if let Ok(mut stmt) = conn.prepare("SELECT source, chunk, vec FROM documents") {
+                                if let Ok(rows) = stmt.query_map([], |r| {
+                                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+                                }) {
+                                    for (s, c, b) in rows.filter_map(|x| x.ok()) {
+                                        vecs.push(blob_to_vec(&b));
+                                        meta.push((s, c));
+                                    }
+                                }
+                            }
+                            ann.rebuild(count as usize, vecs, meta);
+                        }
+                        if let Some(idx) = &ann.index {
+                            for (i, score) in idx.search(&qv, k.max(1) as usize) {
+                                if let Some((s, c)) = ann.meta.get(i) {
+                                    hits.push((s.clone(), c.clone(), score));
+                                }
+                            }
+                        }
+                    } else if let Ok(mut stmt) = conn.prepare("SELECT source, chunk, vec FROM documents") {
                         if let Ok(rows) = stmt.query_map([], |r| {
                             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
                         }) {

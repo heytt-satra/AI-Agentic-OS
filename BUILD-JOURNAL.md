@@ -739,3 +739,28 @@ min and listed it; verified add+list, then cleared the test row so it doesn't
 auto-fire. The ticker runs while `jarvis serve` is up (pairs with `jarvis
 autostart`). **Lacking:** cron-style times (we do intervals), and runs only while
 serve is up (by design - it's the always-on path).
+
+### 2026-06-29 - Decision: defer own-model training; stay model-agnostic
+Owner's call (recorded): hold the own-model/DPO/SFT track until there are enough
+users + data + compute to make a trained model genuinely smart - a thin-data 1.5B
+would be worse than a frontier model. Until then keep JARVIS-OS model-agnostic and
+let users pick any model (OpenRouter slug or local via OPENROUTER_BASE_URL), with
+optional routing. The pipeline stays ready but dormant (TRAINING.md, train_lora.py).
+So the next frontier work is HNSW (scale), not training.
+
+### 2026-06-29 - Pillar 3: HNSW ANN index for semantic search at scale
+**Goal:** brute-force cosine is O(n) per query - fine now (sub-ms at thousands), but
+it dies at 100k-1M+ vectors. Add an index so search stays fast as the corpus grows.
+**How:** new ann.rs wraps instant-distance (pure-Rust HNSW, no C deps -> keeps
+zero-install). AnnIndex::build assigns each point its row index as the value so
+results map back to (source, chunk); search returns top-k by cosine (= 1 - the
+crate's distance). An AnnCache lives in the memory actor, rebuilt ONLY when the
+document row count changes. DocSearch uses the ANN path above 2000 chunks and the
+existing exact brute-force below, so small corpora are byte-for-byte unchanged.
+**Tests:** ann_top1_matches_brute_force (query = a stored point -> HNSW returns it
+exactly) and ann_high_recall_topk (ANN top-5 overlaps brute-force top-5 >= 4/5).
+Full suite 24 passed.
+**Honest framing:** at current data sizes this is future-proofing, not a visible
+speedup - which is why it's threshold-gated and leaves the small path alone. The win
+shows up once a user ingests very large document sets. Next scale step: memory
+consolidation (summarize + prune the unbounded activity log).

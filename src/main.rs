@@ -5,6 +5,7 @@
 // Everything is logged to SQLite memory.
 
 mod activity;
+mod ann;
 mod coder;
 mod crypto;
 mod dataset;
