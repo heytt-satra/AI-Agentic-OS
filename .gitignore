@@ -25,3 +25,7 @@
 scripts/__pycache__/
 __pycache__/
 *.pyc
+.gstack/
+
+# design-review working screenshots
+.design-review/

@@ -288,135 +288,163 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>JARVIS</title>
 <style>
-  /* JARVIS-OS HUD - cleaner/minimal instrument aesthetic (see DESIGN.md)
-     amber = system, cyan = live data only, red = danger only. */
+  /* JARVIS-OS HUD - instrument-panel redesign (see DESIGN.md)
+     amber = system, cyan = live data only, red = danger only.
+     Two zones: a left status rail + a focused conversation column. */
   :root{
-    --bg:#04060a; --surface:#0a0f14;
-    --amber:#ffb000; --amber-soft:#ffd98a; --amber-dim:#a9791f;
-    --cyan:#39d3c0; --red:#ff5c5c;
-    --ink:#cdd6df; --muted:#5d6b77; --line:rgba(255,176,0,.14);
+    --bg:#04060a; --surface:#0a0f15; --surface2:#0c131c;
+    --amber:#ffb000; --amber-soft:#ffd98a; --amber-dim:#bb8c30;
+    --cyan:#3ad8c4; --red:#ff5c5c;
+    --ink:#dbe3ea; --muted:#8290a0; --faint:#5b6775;
+    --line:rgba(255,176,0,.16); --line2:rgba(255,255,255,.06);
     --mono:'SF Mono','JetBrains Mono','Cascadia Code','Cascadia Mono',Consolas,ui-monospace,monospace;
   }
   *{box-sizing:border-box}
   html,body{height:100%;margin:0}
   body{
-    /* one very faint grid - calm, not a scanline field */
-    background:
-      repeating-linear-gradient(0deg, transparent 0 47px, rgba(255,176,0,.018) 47px 48px),
-      repeating-linear-gradient(90deg, transparent 0 47px, rgba(255,176,0,.018) 47px 48px),
-      radial-gradient(120% 120% at 50% 0%, #060a10 0%, var(--bg) 60%);
-    color:var(--ink); font-family:var(--mono); display:flex; flex-direction:column;
-    overflow:hidden; -webkit-font-smoothing:antialiased;
+    background:radial-gradient(130% 100% at 18% -10%, #0a121c 0%, var(--bg) 55%);
+    color:var(--ink); font-family:var(--mono); overflow:hidden; -webkit-font-smoothing:antialiased;
   }
-  /* bracket-framed viewport */
-  .frame{position:fixed; pointer-events:none; width:26px; height:26px; z-index:5;
-    border-color:var(--line); border-style:solid; border-width:0}
-  .frame.tl{top:16px; left:16px; border-top-width:1px; border-left-width:1px}
-  .frame.tr{top:16px; right:16px; border-top-width:1px; border-right-width:1px}
-  .frame.bl{bottom:16px; left:16px; border-bottom-width:1px; border-left-width:1px}
-  .frame.br{bottom:16px; right:16px; border-bottom-width:1px; border-right-width:1px}
+  .app{display:grid; grid-template-columns:300px 1fr; height:100vh}
 
-  header{
-    display:flex; align-items:center; justify-content:space-between;
-    padding:20px 34px 14px; font-size:15px; color:var(--amber);
-    text-transform:uppercase; letter-spacing:.5em;
+  /* ── left instrument rail ─────────────────────────────────── */
+  .rail{
+    display:flex; flex-direction:column; align-items:center; gap:18px;
+    padding:26px 22px;
+    background:linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+    border-right:1px solid var(--line);
   }
-  header .wm{font-weight:600}
-  header .stat{letter-spacing:.16em; font-size:10.5px; color:var(--muted);
-    text-transform:uppercase; display:flex; gap:22px}
-  header .stat b{color:var(--amber-dim); font-weight:400}
-  #conn .dot{color:var(--cyan)}
+  .brand{align-self:stretch; display:flex; align-items:baseline; gap:9px;
+    font-size:17px; letter-spacing:.42em; color:var(--amber); font-weight:600}
+  .brand .ver{font-size:9px; letter-spacing:.3em; color:var(--faint); font-weight:400}
+  .orbWrap{display:flex; flex-direction:column; align-items:center; gap:11px; margin-top:6px}
+  #orb{display:block; width:188px; height:188px}
+  #state{font-size:11px; letter-spacing:.34em; color:var(--cyan); text-transform:uppercase}
+  #tool{height:13px; font-size:9.5px; letter-spacing:.2em; color:var(--amber-dim);
+    text-transform:uppercase; opacity:0; transition:opacity .3s; text-align:center}
 
-  main{flex:1; display:flex; flex-direction:column; align-items:center; min-height:0}
-  #orbWrap{padding:14px 0 2px; position:relative}
-  canvas{display:block}
-  #tool{height:15px; font-size:10.5px; letter-spacing:.22em; color:var(--cyan);
-    text-transform:uppercase; opacity:0; transition:opacity .3s}
-  #state{height:14px; font-size:10px; letter-spacing:.3em; color:var(--muted);
-    text-transform:uppercase; margin-top:2px}
+  .panel{align-self:stretch; display:flex; flex-direction:column; gap:1px; margin-top:4px;
+    border:1px solid var(--line2); border-radius:3px; overflow:hidden}
+  .row{display:flex; justify-content:space-between; align-items:center; gap:10px;
+    padding:11px 13px; background:var(--surface2); font-size:11.5px}
+  .row .k{color:var(--faint); letter-spacing:.18em; text-transform:uppercase; font-size:9.5px}
+  .row .v{color:var(--ink); text-align:right; word-break:break-word}
+  #model{color:var(--amber-soft)}
+  #conn{color:var(--cyan)} #conn .dot{margin-right:6px}
+  .toggle{cursor:pointer; user-select:none; color:var(--muted)} .toggle.on{color:var(--cyan)}
+  .hint{margin-top:auto; align-self:stretch; font-size:9.5px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--faint); line-height:1.8;
+    border-top:1px solid var(--line2); padding-top:14px}
+  .hint b{color:var(--amber-dim); font-weight:400}
 
+  /* ── main conversation column ─────────────────────────────── */
+  .main{display:flex; flex-direction:column; min-height:0}
+  .topline{height:2px; flex:0 0 auto;
+    background:linear-gradient(90deg, var(--amber) 0%, transparent 42%); opacity:.5}
   #log{
-    width:min(900px,90vw); flex:1; overflow-y:auto; padding:14px 4px 10px;
-    display:flex; flex-direction:column; gap:18px; scrollbar-width:thin;
-    scrollbar-color:var(--line) transparent;
+    flex:1; overflow-y:auto; padding:32px clamp(20px,6vw,90px);
+    display:flex; flex-direction:column; align-items:center; gap:22px;
+    scrollbar-width:thin; scrollbar-color:var(--line) transparent;
   }
-  #log::-webkit-scrollbar{width:6px}
-  #log::-webkit-scrollbar-thumb{background:var(--line)}
-  .msg{font-size:14px; line-height:1.55; white-space:pre-wrap; word-wrap:break-word;
-    animation:rise .4s ease-out both}
+  #log::-webkit-scrollbar{width:7px}
+  #log::-webkit-scrollbar-thumb{background:var(--line); border-radius:4px}
+  #empty{margin:auto; max-width:420px; text-align:center}
+  #empty .big{font-size:13px; letter-spacing:.2em; text-transform:uppercase;
+    color:var(--amber-soft); margin-bottom:10px}
+  #empty .sub{font-size:12.5px; line-height:1.85; color:var(--faint)}
+  .msg{width:100%; max-width:760px; font-size:14.5px; line-height:1.62;
+    white-space:pre-wrap; word-wrap:break-word; animation:rise .4s ease-out both}
   @keyframes rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
-  .msg .who{font-size:10px; letter-spacing:.24em; text-transform:uppercase;
-    color:var(--muted); display:block; margin-bottom:5px}
+  .msg .who{font-size:9.5px; letter-spacing:.24em; text-transform:uppercase;
+    color:var(--faint); display:block; margin-bottom:6px}
   .user .body{color:var(--ink)}
   .jarvis .who{color:var(--amber)}
   .jarvis .body{color:var(--amber-soft)}
   .err .who{color:var(--red)}
   .err .body{color:var(--red)}
 
-  footer{width:min(900px,90vw); padding:12px 0 26px}
+  .composer{padding:16px clamp(20px,6vw,90px) 24px; border-top:1px solid var(--line2)}
   .inbar{
-    display:flex; align-items:center; gap:12px; border:1px solid var(--line);
-    border-radius:2px; background:var(--surface); padding:13px 16px;
-    transition:border-color .2s, box-shadow .2s;
+    display:flex; align-items:center; gap:12px; max-width:760px; margin:0 auto;
+    border:1px solid var(--line); border-radius:3px; background:var(--surface);
+    padding:14px 16px; transition:border-color .2s, box-shadow .2s;
   }
-  .inbar:focus-within{border-color:var(--amber); box-shadow:0 0 0 1px rgba(255,176,0,.2)}
+  .inbar:focus-within{border-color:var(--amber); box-shadow:0 0 0 1px rgba(255,176,0,.18)}
   .inbar .chev{color:var(--amber)}
-  input{
-    flex:1; background:transparent; border:0; outline:0; color:var(--ink);
-    font-family:var(--mono); font-size:14px; caret-color:var(--amber);
-  }
-  input::placeholder{color:var(--muted)}
-  /* voice controls */
-  .toggle{cursor:pointer; user-select:none}
-  .toggle.on{color:var(--cyan)}
-  #mic{font-family:var(--mono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
-    color:var(--muted); background:transparent; border:1px solid var(--line); border-radius:2px;
-    padding:7px 11px; cursor:pointer; transition:.15s; white-space:nowrap}
+  #in{flex:1; background:transparent; border:0; outline:0; color:var(--ink);
+    font-family:var(--mono); font-size:14.5px; caret-color:var(--amber)}
+  #in::placeholder{color:var(--muted)}
+  #mic{font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); background:transparent; border:1px solid var(--line); border-radius:3px;
+    padding:8px 12px; cursor:pointer; transition:.15s; white-space:nowrap}
   #mic:hover{border-color:var(--amber); color:var(--amber)}
   #mic.live{border-color:var(--cyan); color:var(--cyan); animation:micpulse 1s ease-in-out infinite}
   @keyframes micpulse{0%,100%{opacity:1}50%{opacity:.5}}
 
+  /* ── approval modal ───────────────────────────────────────── */
   #approvalWrap{position:fixed;inset:0;background:rgba(2,4,7,.82);display:none;
-    align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(2px)}
+    align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(3px)}
   #approvalWrap.show{display:flex}
-  .approval{width:min(520px,90vw);border:1px solid var(--red);border-radius:2px;
-    background:var(--surface);padding:22px 24px}
-  .approval .h{font-size:10.5px;letter-spacing:.24em;text-transform:uppercase;
+  .approval{width:min(520px,90vw);border:1px solid var(--red);border-radius:3px;
+    background:var(--surface);padding:24px}
+  .approval .h{font-size:10px;letter-spacing:.24em;text-transform:uppercase;
     color:var(--red);margin-bottom:12px}
   .approval .lbl{font-size:14px;color:var(--amber-soft);word-break:break-word;margin-bottom:6px}
-  .approval .warn{font-size:11px;color:var(--red);margin-bottom:16px;min-height:14px}
+  .approval .warn{font-size:11px;color:var(--red);margin-bottom:18px;min-height:14px}
   .approval .btns{display:flex;gap:10px}
-  .approval button{flex:1;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
-    text-transform:uppercase;padding:11px;background:transparent;color:var(--ink);
-    border:1px solid var(--line);border-radius:2px;cursor:pointer;transition:.15s}
+  .approval button{flex:1;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;
+    text-transform:uppercase;padding:12px;background:transparent;color:var(--ink);
+    border:1px solid var(--line);border-radius:3px;cursor:pointer;transition:.15s}
   .approval button:hover{border-color:var(--amber);color:var(--amber)}
   .approval button.deny:hover{border-color:var(--red);color:var(--red)}
+
+  /* ── responsive: rail collapses to a top strip ────────────── */
+  @media(max-width:760px){
+    .app{grid-template-columns:1fr; grid-template-rows:auto 1fr}
+    .rail{flex-direction:row; flex-wrap:wrap; align-items:center; gap:12px;
+      padding:13px 16px; border-right:0; border-bottom:1px solid var(--line)}
+    .brand{align-self:auto; font-size:14px; letter-spacing:.3em}
+    .orbWrap{flex-direction:row; gap:9px; margin:0} #orb{width:38px; height:38px}
+    #tool{display:none}
+    .panel{flex:1 1 100%; flex-direction:row; flex-wrap:wrap; gap:8px; margin:0; border:0}
+    .row{flex:1 1 auto; border:1px solid var(--line2); border-radius:3px; padding:7px 11px}
+    .hint{display:none}
+  }
 </style>
 </head>
 <body>
-  <div class="frame tl"></div><div class="frame tr"></div>
-  <div class="frame bl"></div><div class="frame br"></div>
-  <header>
-    <span class="wm">JARVIS</span>
-    <span class="stat">
-      <span id="model">MODEL <b>…</b></span>
-      <span id="voice" class="toggle">VOICE OFF</span>
-      <span id="conn"><span class="dot">●</span> CONNECTING</span>
-    </span>
-  </header>
-  <main>
-    <div id="orbWrap"><canvas id="orb" width="260" height="260"></canvas></div>
-    <div id="tool"></div>
-    <div id="state">STANDBY</div>
-    <div id="log"></div>
-    <footer>
-      <div class="inbar">
-        <span class="chev">&gt;</span>
-        <input id="in" autocomplete="off" placeholder="Speak to Jarvis" autofocus/>
-        <button id="mic" title="Push to talk">&#9679; Talk</button>
+  <div class="app">
+    <aside class="rail">
+      <div class="brand">JARVIS <span class="ver">OS</span></div>
+      <div class="orbWrap">
+        <canvas id="orb" width="260" height="260"></canvas>
+        <div id="state">STANDBY</div>
+        <div id="tool"></div>
       </div>
-    </footer>
-  </main>
+      <div class="panel">
+        <div class="row"><span class="k">Model</span><span class="v" id="model">…</span></div>
+        <div class="row"><span class="k">Link</span><span class="v" id="conn"><span class="dot">&#9679;</span>CONNECTING</span></div>
+        <div class="row"><span class="k">Voice</span><span class="v toggle" id="voice">OFF</span></div>
+      </div>
+      <div class="hint">On your machine. <b>Private by default.</b><br/>Ask me to do anything.</div>
+    </aside>
+    <section class="main">
+      <div class="topline"></div>
+      <div id="log">
+        <div id="empty">
+          <div class="big">Standby</div>
+          <div class="sub">Type below or hit Talk. I can run apps, write code, search the web, find leads, and act on your machine.</div>
+        </div>
+      </div>
+      <footer class="composer">
+        <div class="inbar">
+          <span class="chev">&gt;</span>
+          <input id="in" autocomplete="off" placeholder="Speak to Jarvis" autofocus/>
+          <button id="mic" title="Push to talk">&#9679; Talk</button>
+        </div>
+      </footer>
+    </section>
+  </div>
   <div id="approvalWrap"><div class="approval">
     <div class="h">&#9888; Approval required</div>
     <div class="lbl" id="apLbl"></div>
@@ -482,6 +510,7 @@ function draw(){
 draw();
 
 function addMsg(cls, who){
+  const e=document.getElementById('empty'); if(e) e.style.display='none';
   const d=document.createElement('div'); d.className='msg '+cls;
   d.innerHTML='<span class="who">'+who+'</span><span class="body"></span>';
   log.appendChild(d); log.scrollTop=log.scrollHeight;
@@ -506,7 +535,7 @@ function connect(){
   ws.onclose=()=>{connEl.innerHTML='<span class="dot" style="color:var(--red)">●</span> OFFLINE'; setTimeout(connect,1500);};
   ws.onmessage=(e)=>{
     const m=JSON.parse(e.data);
-    if(m.type==='hello'){ modelEl.innerHTML='MODEL <b>'+m.model+'</b>'; }
+    if(m.type==='hello'){ modelEl.textContent=m.model; }
     else if(m.type==='state'){ if(m.state!=='speaking') setState(m.state); }
     else if(m.type==='tool'){ flashTool(m.name); }
     else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); setState('speaking'); log.scrollTop=log.scrollHeight; }
@@ -547,7 +576,7 @@ let voiceOn=false;
 const voiceBtn=document.getElementById('voice');
 voiceBtn.onclick=()=>{
   voiceOn=!voiceOn;
-  voiceBtn.textContent='VOICE '+(voiceOn?'ON':'OFF');
+  voiceBtn.textContent=(voiceOn?'ON':'OFF');
   voiceBtn.classList.toggle('on',voiceOn);
   if(!voiceOn && window.speechSynthesis) speechSynthesis.cancel();
 };
