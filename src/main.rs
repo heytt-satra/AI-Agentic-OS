@@ -261,6 +261,15 @@ async fn main() -> Result<()> {
             run_suggest(&mem).await;
             return Ok(());
         }
+        Some("consolidate") => {
+            // Pillar 3: summarize + prune activity older than N days (default 30)
+            // so the second-brain log stays bounded.
+            let days = std::env::args().nth(2).and_then(|v| v.parse::<i64>().ok()).filter(|d| *d >= 0).unwrap_or(30);
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            let (pruned, summaries) = mem.consolidate_activity(now - days * 86_400).await;
+            println!("Consolidated activity older than {days} days: pruned {pruned} raw rows into {summaries} daily summaries. Recent activity is untouched; the DB stays lean.");
+            return Ok(());
+        }
         Some("grants") => {
             let g = mem.grants_list().await;
             if g.is_empty() {

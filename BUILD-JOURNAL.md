@@ -764,3 +764,20 @@ Full suite 24 passed.
 speedup - which is why it's threshold-gated and leaves the small path alone. The win
 shows up once a user ingests very large document sets. Next scale step: memory
 consolidation (summarize + prune the unbounded activity log).
+
+### 2026-06-29 - Pillar 3: memory consolidation (Pillar 3 COMPLETE)
+**Problem:** the second-brain activity log grows unbounded (window + clipboard
+every ~5s while serve runs), so jarvis.db would balloon over time.
+**How:** `jarvis consolidate [days]` (default 30) collapses activity rows older than
+the cutoff into one count per (day, app) in a new activity_summary table, then
+prunes the raw rows - bounding growth while keeping the gist. The summarizer
+(proactivity::summarize_days) is PURE and unit-tested; the actor handler does the
+accumulate-then-delete. Conservative + explicit (user runs it; default 30-day
+window protects recent raw history for detailed recall).
+**Test:** unit test groups by (day, app), skips clipboard/no-app rows. End-to-end:
+inserted a synthetic 100-day-old row, ran `consolidate 99` -> "pruned 1 raw rows
+into 1 daily summaries"; verified the raw row is gone (0 left) and a summary row
+exists, then cleaned up. Recent activity untouched. (Re-applied the stale-binary
+lesson: ran `cargo build` before testing the new subcommand, not just `cargo test`.)
+**Pillar 3 now COMPLETE:** chunk overlap + HNSW index + consolidation. Could later
+auto-run consolidation periodically in serve; the command is the safe v1.

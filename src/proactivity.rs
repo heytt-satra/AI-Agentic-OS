@@ -49,9 +49,46 @@ pub fn mine_routines(rows: &[(i64, String, String, String)], min_days: usize, to
     routines
 }
 
+// Memory consolidation (Pillar 3): collapse raw activity rows into one count per
+// (day, app) so old history can be pruned without losing the gist. Pure -> tested.
+pub fn summarize_days(rows: &[(i64, String, String, String)]) -> Vec<(String, String, usize)> {
+    let mut map: HashMap<(String, String), usize> = HashMap::new();
+    for (ts, kind, app, _detail) in rows {
+        if kind != "window" {
+            continue;
+        }
+        let app = app.trim();
+        if app.is_empty() {
+            continue;
+        }
+        if let Some(dt) = Local.timestamp_opt(*ts, 0).single() {
+            *map.entry((dt.format("%Y-%m-%d").to_string(), app.to_string())).or_default() += 1;
+        }
+    }
+    let mut v: Vec<(String, String, usize)> = map.into_iter().map(|((d, a), c)| (d, a, c)).collect();
+    v.sort();
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarize_groups_by_day_and_app() {
+        let base = 1_700_000_000i64;
+        let rows = vec![
+            (base, "window".to_string(), "Chrome".to_string(), String::new()),
+            (base + 60, "window".to_string(), "Chrome".to_string(), String::new()),
+            (base + 120, "window".to_string(), "Slack".to_string(), String::new()),
+            (base, "clipboard".to_string(), String::new(), "x".to_string()),
+        ];
+        let s = summarize_days(&rows);
+        let chrome = s.iter().find(|(_, a, _)| a == "Chrome").expect("chrome summary");
+        assert_eq!(chrome.2, 2); // two Chrome focuses, same day
+        assert!(s.iter().any(|(_, a, c)| a == "Slack" && *c == 1));
+        assert!(s.iter().all(|(_, a, _)| !a.is_empty())); // clipboard/no-app skipped
+    }
 
     #[test]
     fn mines_recurring_and_skips_oneoffs() {

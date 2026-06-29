@@ -38,6 +38,8 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Memory consolidation (Pillar 3): summarize + prune activity older than before_ts.
+    ConsolidateActivity { before_ts: i64, reply: oneshot::Sender<(usize, usize)> }, // (pruned, summaries)
     // Self-healing skills (Pillar 4).
     SkillCreate { name: String, description: String, command: String, reply: oneshot::Sender<()> },
     SkillGet { name: String, reply: oneshot::Sender<Option<(String, String)>> }, // (description, command)
@@ -297,6 +299,13 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── memory consolidation (Pillar 3) ──────────────────────────────────────
+    pub async fn consolidate_activity(&self, before_ts: i64) -> (usize, usize) {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ConsolidateActivity { before_ts, reply }).await.is_err() { return (0, 0); }
+        rx.await.unwrap_or((0, 0))
+    }
+
     // ── self-healing skills (Pillar 4) ───────────────────────────────────────
     pub async fn skill_create(&self, name: &str, description: &str, command: &str) {
         let (reply, rx) = oneshot::channel();
@@ -490,6 +499,11 @@ fn open_db(path: &str) -> Result<Connection> {
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL
          );
+         -- Consolidated activity (Pillar 3): per-day-per-app counts kept after the
+         -- raw rows are pruned, so the activity log stays bounded.
+         CREATE TABLE IF NOT EXISTS activity_summary (
+            day TEXT NOT NULL, app TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day, app)
+         );
          -- Self-healing skills: agent-authored shell-command tools (Pillar 4).
          CREATE TABLE IF NOT EXISTS skills (
             name TEXT PRIMARY KEY, ts INTEGER NOT NULL, description TEXT NOT NULL, command TEXT NOT NULL
@@ -670,6 +684,30 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
             let _ = reply.send(n > 0);
+        }
+        MemCmd::ConsolidateActivity { before_ts, reply } => {
+            // Load the old rows, summarize to (day, app, count), accumulate into
+            // activity_summary, then prune the raw rows. Bounds the log's growth.
+            let rows = (|| -> Result<Vec<(i64, String, String, String)>> {
+                let mut stmt = conn.prepare("SELECT ts, kind, app FROM activity WHERE ts < ?1")?;
+                let r = stmt.query_map(params![before_ts], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, String::new()))
+                })?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let pruned = rows.len();
+            let summaries = crate::proactivity::summarize_days(&rows);
+            for (day, app, count) in &summaries {
+                let _ = conn.execute(
+                    "INSERT INTO activity_summary (day, app, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(day, app) DO UPDATE SET count = count + ?3",
+                    params![day, app, *count as i64],
+                );
+            }
+            if pruned > 0 {
+                let _ = conn.execute("DELETE FROM activity WHERE ts < ?1", params![before_ts]);
+            }
+            let _ = reply.send((pruned, summaries.len()));
         }
         MemCmd::SkillCreate { name, description, command, reply } => {
             let _ = conn.execute(
