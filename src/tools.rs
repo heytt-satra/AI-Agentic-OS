@@ -39,6 +39,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
         f("click_on", "See the screen and click on a described UI element (e.g. 'the Save button', 'the search box'). Screenshots, locates it with vision, then clicks. Requires approval. This is the reliable way to click things.", str_prop("target", "what to click, in plain words")),
+        f("check_file", "Verify a file exists and, optionally, that it contains an expected substring. Use this to PROVE a file-writing or code task actually worked - the result is hard evidence (the verifier can cite it). Returns PASS or FAIL with details.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"file path (natural locations like desktop/notes.txt are resolved)"},"contains":{"type":"string","description":"optional substring that must be present"}},"required":["path"]})),
         f("ui_list", "List the interactive UI elements (buttons, menus, links, fields, tabs, list items) in the FOCUSED window using the OS accessibility tree (Windows), each with its name, control type, and screen-center coordinates. Call this BEFORE clicking when unsure what is on screen - then click the exact element by name with ui_click. Coordinate-free and reliable; beats guessing pixels.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("ui_click", "Click a UI element by its visible NAME using the OS accessibility tree (Windows). FAR more reliable than click_on because it targets the real control, not a guessed pixel. Use this FIRST for buttons, links, menu items, tabs, checkboxes that have a text label. Fall back to click_on only for elements with no accessible name (icons, canvas).", str_prop("label", "the visible text/name of the element")),
         f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks prefer ui_click, then click_on.", str_prop("goal", "what to accomplish on screen, in plain words")),
@@ -152,6 +154,7 @@ pub async fn execute(
         "mouse_click" => mouse_click(args_json),
         "see_screen" => see_screen(args_json).await,
         "click_on" => click_on(args_json).await,
+        "check_file" => check_file(args_json),
         "ui_list" => ui_list(),
         "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
@@ -1102,6 +1105,33 @@ async fn click_on(args: &str) -> String {
 // Click a real UI control by name instead of a guessed pixel. On Windows this
 // uses UI Automation's invoke pattern, which is how a screen reader clicks - it
 // targets the actual element, so it doesn't miss like vision-guided clicks.
+// Pillar 1 verification primitive: hard, deterministic evidence that a file task
+// worked. Pure core (file_verdict) is unit-tested; check_file does the IO.
+fn file_verdict(path: &str, content: Option<&str>, contains: Option<&str>) -> String {
+    match content {
+        None => format!("FAIL: file '{path}' does not exist."),
+        Some(c) => match contains {
+            Some(want) if !want.is_empty() => {
+                if c.contains(want) {
+                    format!("PASS: '{path}' exists and contains \"{want}\".")
+                } else {
+                    format!("FAIL: '{path}' exists but does NOT contain \"{want}\" (it has {} bytes).", c.len())
+                }
+            }
+            _ => format!("PASS: '{path}' exists ({} bytes).", c.len()),
+        },
+    }
+}
+
+fn check_file(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { path: String, #[serde(default)] contains: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let path = resolve_path(&a.path);
+    let content = std::fs::read_to_string(&path).ok();
+    file_verdict(&path, content.as_deref(), a.contains.as_deref())
+}
+
 // Pillar 2: enumerate the focused window's interactive controls from the
 // accessibility tree, so the model picks a real element by name (coordinate-free)
 // instead of guessing pixels.
@@ -2070,6 +2100,14 @@ mod tests {
     fn percent_encoding() {
         assert_eq!(percent_encode("a b&c"), "a%20b%26c");
         assert_eq!(percent_encode("plain"), "plain");
+    }
+
+    #[test]
+    fn file_verdict_cases() {
+        assert!(file_verdict("x.txt", None, None).starts_with("FAIL"));
+        assert!(file_verdict("x.txt", Some("hello world"), None).starts_with("PASS"));
+        assert!(file_verdict("x.txt", Some("hello world"), Some("world")).starts_with("PASS"));
+        assert!(file_verdict("x.txt", Some("hello world"), Some("xyz")).starts_with("FAIL"));
     }
 
     #[test]

@@ -578,6 +578,17 @@ this ships as low-risk additive grounding, to be exercised in real interactive u
 **Next:** Set-of-Marks (numbered overlay on the screenshot) for elements the a11y
 tree can't name (icons/canvas), then a verification primitives helper.
 
+### 2026-06-28 - Pillar 1: verification primitive (check_file)
+**Goal:** give the agent and the critic HARD, deterministic evidence (not the
+model's say-so) that a file/code task actually produced what it should.
+**How:** new check_file tool - resolves a path, reads it, and returns PASS/FAIL via
+a pure file_verdict() core: FAIL if missing, PASS if present, and PASS/FAIL on an
+optional "contains" substring. resolve_path handles natural locations.
+**Test:** file_verdict_cases unit test (missing -> FAIL, exists -> PASS,
+contains-hit -> PASS, contains-miss -> FAIL). `cargo test` -> 20 passed (was 19).
+This is the first concrete verification primitive the critic loop can lean on;
+more (check_screen via ui_list, test-passed) can follow the same pattern.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
