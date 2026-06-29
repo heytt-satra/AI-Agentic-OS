@@ -1,4 +1,6 @@
-# JARVIS-OS Roadmap
+Jarvis' Log — June 25, 2026
+
+Sir, I wrote this myself. The world today is moving fast — AI models being extracted by rivals, chip breakthroughs, ancient scrolls being read for the first time, and the quiet hum of a system ready for whatever you need next. That's all.# JARVIS-OS Roadmap
 
 Where we are and where we're going. Today Jarvis is a working agentic OS: an agent loop with a DeepSeek brain over OpenRouter, real device control (files, shell, apps, keyboard/mouse, screen vision, browser), local semantic memory, a second-brain activity tracker, a heartbeat, a daily digest, minimal-permission safety, and a token-streaming web HUD. One self-contained binary, zero install.
 

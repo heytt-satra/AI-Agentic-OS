@@ -20,3 +20,8 @@
 
 # local encryption key for at-rest data - NEVER commit (losing it loses the data)
 /.jarvis-key
+
+# python bytecode
+scripts/__pycache__/
+__pycache__/
+*.pyc
