@@ -44,6 +44,7 @@ pub fn definitions() -> Vec<Tool> {
         f("check_file", "Verify a file exists and, optionally, that it contains an expected substring. Use this to PROVE a file-writing or code task actually worked - the result is hard evidence (the verifier can cite it). Returns PASS or FAIL with details.",
           serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"file path (natural locations like desktop/notes.txt are resolved)"},"contains":{"type":"string","description":"optional substring that must be present"}},"required":["path"]})),
         f("ui_list", "List the interactive UI elements (buttons, menus, links, fields, tabs, list items) in the FOCUSED window using the OS accessibility tree (Windows), each with its name, control type, and screen-center coordinates. Call this BEFORE clicking when unsure what is on screen - then click the exact element by name with ui_click. Coordinate-free and reliable; beats guessing pixels.", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("ui_marks", "Set-of-Marks: screenshot the screen with a numbered green box drawn on every interactive element, save the annotated image, and return a numbered legend (number -> name -> center). Use when you must visually identify what to click (icons, ambiguous controls) - read the saved image, pick a number, then click that element's center with click_on, or click it by name with ui_click.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("ui_click", "Click a UI element by its visible NAME using the OS accessibility tree (Windows). FAR more reliable than click_on because it targets the real control, not a guessed pixel. Use this FIRST for buttons, links, menu items, tabs, checkboxes that have a text label. Fall back to click_on only for elements with no accessible name (icons, canvas).", str_prop("label", "the visible text/name of the element")),
         f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks prefer ui_click, then click_on.", str_prop("goal", "what to accomplish on screen, in plain words")),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
@@ -159,6 +160,7 @@ pub async fn execute(
         "check_file" => check_file(args_json),
         "check_screen" => check_screen(args_json),
         "ui_list" => ui_list(),
+        "ui_marks" => ui_marks(),
         "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
         "browse_url" => browse_url(args_json).await,
@@ -1200,29 +1202,19 @@ fn focused_top_window(automation: &uiautomation::UIAutomation) -> Option<uiautom
     Some(focused)
 }
 
+// Shared collector: the focused window's interactive elements as structured data
+// (label, left, top, right, bottom). Used by ui_list (text), check_screen, and
+// ui_marks (the Set-of-Marks overlay).
 #[cfg(windows)]
-fn ui_list_native() -> String {
+fn collect_ui_elements() -> Result<(String, Vec<(String, i32, i32, i32, i32)>), String> {
     use uiautomation::types::TreeScope;
     use uiautomation::UIAutomation;
-    let automation = match UIAutomation::new() {
-        Ok(a) => a,
-        Err(e) => return format!("ERROR: UI Automation init failed: {e}"),
-    };
-    let top = match focused_top_window(&automation) {
-        Some(w) => w,
-        None => return "ERROR: no focused UI element. Click the app first.".to_string(),
-    };
-    let cond = match automation.create_true_condition() {
-        Ok(c) => c,
-        Err(e) => return format!("ERROR: condition build failed: {e}"),
-    };
-    let elems = match top.find_all(TreeScope::Subtree, &cond) {
-        Ok(v) => v,
-        Err(e) => return format!("ERROR: could not enumerate elements: {e}"),
-    };
+    let automation = UIAutomation::new().map_err(|e| format!("UI Automation init failed: {e}"))?;
+    let top = focused_top_window(&automation).ok_or("no focused UI element. Click the app first.")?;
+    let cond = automation.create_true_condition().map_err(|e| format!("condition build failed: {e}"))?;
+    let elems = top.find_all(TreeScope::Subtree, &cond).map_err(|e| format!("could not enumerate elements: {e}"))?;
     let win = top.get_name().unwrap_or_default();
-    let mut out = format!("Interactive elements in window \"{win}\":\n");
-    let mut n = 0;
+    let mut out = Vec::new();
     for el in elems.iter() {
         let name = el.get_name().unwrap_or_default();
         if name.trim().is_empty() {
@@ -1232,21 +1224,159 @@ fn ui_list_native() -> String {
         if !is_interactive_ct(&ct) {
             continue;
         }
-        let (cx, cy) = match el.get_bounding_rectangle() {
-            Ok(r) => ((r.get_left() + r.get_right()) / 2, (r.get_top() + r.get_bottom()) / 2),
-            Err(_) => (0, 0),
-        };
-        n += 1;
-        out.push_str(&format!("{n}. [{ct}] \"{}\" @ ({cx},{cy})\n", name.chars().take(80).collect::<String>()));
-        if n >= 80 {
-            out.push_str("(truncated at 80)\n");
+        if let Ok(r) = el.get_bounding_rectangle() {
+            out.push((format!("[{ct}] {}", name.chars().take(80).collect::<String>()),
+                      r.get_left(), r.get_top(), r.get_right(), r.get_bottom()));
+        }
+        if out.len() >= 60 {
             break;
         }
     }
-    if n == 0 {
-        out.push_str("(no named interactive elements found - try see_screen + click_on)\n");
+    Ok((win, out))
+}
+
+#[cfg(windows)]
+fn ui_list_native() -> String {
+    match collect_ui_elements() {
+        Err(e) => format!("ERROR: {e}"),
+        Ok((win, els)) => {
+            if els.is_empty() {
+                return format!("Interactive elements in window \"{win}\":\n(no named interactive elements found - try see_screen + click_on)\n");
+            }
+            let mut out = format!("Interactive elements in window \"{win}\":\n");
+            for (i, (name, l, t, r, b)) in els.iter().enumerate() {
+                let (cx, cy) = ((l + r) / 2, (t + b) / 2);
+                out.push_str(&format!("{}. {name} @ ({cx},{cy})\n", i + 1));
+            }
+            out
+        }
     }
-    out
+}
+
+// ── Set-of-Marks (Pillar 2): numbered overlay on a real screenshot ───────────
+// Draw a numbered box on every interactive element (bounds from the a11y tree),
+// save the annotated image, and return a legend (number -> name -> center). Lets
+// a vision step pick "box N" for elements the tree can name but the model needs to
+// see, and for icons with weak names. Pure pixel drawing + a built-in 3x5 digit
+// font, so no new image/font dependency (stays zero-install).
+fn ui_marks() -> String {
+    #[cfg(windows)]
+    { ui_marks_native() }
+    #[cfg(not(windows))]
+    { "ui_marks is Windows-only for now; use see_screen + click_on elsewhere.".to_string() }
+}
+
+#[cfg(windows)]
+const DIGITS: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
+    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
+    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
+    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
+    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
+    [0b111, 0b001, 0b010, 0b100, 0b100], // 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
+    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+];
+
+#[cfg(windows)]
+fn put_px(img: &mut xcap::image::RgbaImage, x: i32, y: i32, c: xcap::image::Rgba<u8>, iw: i32, ih: i32) {
+    if x >= 0 && y >= 0 && x < iw && y < ih {
+        img.put_pixel(x as u32, y as u32, c);
+    }
+}
+
+#[cfg(windows)]
+fn fill_rect(img: &mut xcap::image::RgbaImage, l: i32, t: i32, r: i32, b: i32, c: xcap::image::Rgba<u8>, iw: i32, ih: i32) {
+    for y in t..=b {
+        for x in l..=r {
+            put_px(img, x, y, c, iw, ih);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn draw_rect_border(img: &mut xcap::image::RgbaImage, l: i32, t: i32, r: i32, b: i32, c: xcap::image::Rgba<u8>, thick: i32, iw: i32, ih: i32) {
+    for o in 0..thick {
+        for x in l..=r { put_px(img, x, t + o, c, iw, ih); put_px(img, x, b - o, c, iw, ih); }
+        for y in t..=b { put_px(img, l + o, y, c, iw, ih); put_px(img, r - o, y, c, iw, ih); }
+    }
+}
+
+#[cfg(windows)]
+fn draw_digit(img: &mut xcap::image::RgbaImage, x: i32, y: i32, d: usize, scale: i32, c: xcap::image::Rgba<u8>, iw: i32, ih: i32) {
+    if d > 9 { return; }
+    for (row, bits) in DIGITS[d].iter().enumerate() {
+        for col in 0..3i32 {
+            if bits & (1 << (2 - col)) != 0 {
+                let px = x + col * scale;
+                let py = y + row as i32 * scale;
+                fill_rect(img, px, py, px + scale - 1, py + scale - 1, c, iw, ih);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn draw_label(img: &mut xcap::image::RgbaImage, mut x: i32, y: i32, n: usize, scale: i32, iw: i32, ih: i32) {
+    let black = xcap::image::Rgba([0u8, 0, 0, 255]);
+    let white = xcap::image::Rgba([255u8, 255, 255, 255]);
+    let s = n.to_string();
+    let dw = 3 * scale;
+    let gap = scale;
+    let h = 5 * scale;
+    let bgw = s.len() as i32 * (dw + gap) + gap;
+    fill_rect(img, x - 1, y - 1, x - 1 + bgw, y - 1 + h + 2, black, iw, ih);
+    for ch in s.chars() {
+        let d = (ch as u8 - b'0') as usize;
+        draw_digit(img, x, y, d, scale, white, iw, ih);
+        x += dw + gap;
+    }
+}
+
+#[cfg(windows)]
+fn ui_marks_native() -> String {
+    let (win, els) = match collect_ui_elements() {
+        Ok(x) => x,
+        Err(e) => return format!("ERROR: {e}"),
+    };
+    if els.is_empty() {
+        return format!("No interactive elements to mark in \"{win}\".");
+    }
+    let monitors = match xcap::Monitor::all() {
+        Ok(m) => m,
+        Err(e) => return format!("ERROR: screen capture: {e}"),
+    };
+    let monitor = match monitors.into_iter().next() {
+        Some(m) => m,
+        None => return "ERROR: no monitor found".to_string(),
+    };
+    let mut img = match monitor.capture_image() {
+        Ok(i) => i,
+        Err(e) => return format!("ERROR capturing screen: {e}"),
+    };
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+    let green = xcap::image::Rgba([0u8, 230, 0, 255]);
+    for (i, (_n, l, t, r, b)) in els.iter().enumerate() {
+        draw_rect_border(&mut img, *l, *t, *r, *b, green, 2, iw, ih);
+        draw_label(&mut img, (*l).max(0) + 3, (*t).max(0) + 3, i + 1, 4, iw, ih);
+    }
+    let path = resolve_path("desktop/jarvis-marks.png");
+    let dynimg = xcap::image::DynamicImage::ImageRgba8(img);
+    let mut bytes = Vec::new();
+    let mut cur = std::io::Cursor::new(&mut bytes);
+    if let Err(e) = dynimg.write_to(&mut cur, xcap::image::ImageFormat::Png) {
+        return format!("ERROR encoding annotated image: {e}");
+    }
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        return format!("ERROR saving annotated image: {e}");
+    }
+    let mut legend = format!("Set-of-Marks for \"{win}\" saved to {path}\nNumbered boxes (number -> element -> center):\n");
+    for (i, (name, l, t, r, b)) in els.iter().enumerate() {
+        legend.push_str(&format!("{}: {name} @ ({},{})\n", i + 1, (l + r) / 2, (t + b) / 2));
+    }
+    legend
 }
 
 fn ui_click(args: &str) -> String {

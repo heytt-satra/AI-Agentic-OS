@@ -641,6 +641,21 @@ FAIL, fix and re-check instead of reporting success. This closes the loop so the
 reliability primitives actually run in normal operation, not just when asked.
 Build clean.
 
+### 2026-06-28 - Pillar 2 #4: Set-of-Marks (ui_marks) - Pillar 2 COMPLETE
+**Goal:** for elements the model must identify visually (icons, ambiguous controls),
+give it a screenshot with numbered boxes it can point at. **How:** factored
+collect_ui_elements() (label + bounds), then ui_marks draws a green border on each
+element's real bounds and a numbered label using a BUILT-IN 3x5 digit font (pure
+pixel drawing via xcap::image - NO new image/font dependency, stays zero-install),
+saves the annotated PNG, and returns a numbered legend (number -> name -> center).
+**Verification (the good kind):** opened Notepad, ran ui_marks -> 480KB PNG saved;
+I then READ the image back and confirmed numbered green boxes correctly overlay
+Notepad's toolbar buttons, menu bar, and tabs. Real visual proof, not a claim.
+**Pillar 2 now COMPLETE:** ui_list (a11y element list) + ui_click (per-window +
+verify) + a11y-first operate_app + Set-of-Marks. **Minor note:** the agent flagged
+a resolve_path quirk when check_file was given the returned absolute OneDrive path -
+cosmetic, logged for later.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
