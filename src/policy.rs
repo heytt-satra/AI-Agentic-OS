@@ -52,6 +52,13 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
             (is_dangerous_shell(&cmd), cmd.clone(), format!("code: {cmd}"))
         }
 
+        // self-healing skills run a stored shell command we can't inspect here,
+        // so they ALWAYS need approval - unless a capability token grants them.
+        "skill_run" => {
+            let name = field("name");
+            (true, name.clone(), format!("run skill '{name}'"))
+        }
+
         // everything else just runs
         _ => (false, String::new(), String::new()),
     };

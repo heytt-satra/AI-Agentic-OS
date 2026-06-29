@@ -110,6 +110,16 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("schedule_remove", "Stop a schedule by its id.",
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
+
+        // ── self-healing / self-extending skills (Pillar 4)
+        f("skill_create", "EXTEND YOURSELF: save a reusable SKILL - a named shell-command template that becomes a callable capability. When a built-in tool can't do something, or keeps failing, write a shell command that does it (use {placeholders} for inputs) and save it; then run it with skill_run. Example: name 'to_mp3', command 'ffmpeg -y -i {input} {output}'.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"command":{"type":"string","description":"shell command, with {placeholder} markers for inputs"}},"required":["name","description","command"]})),
+        f("skill_list", "List saved skills (self-authored shell-command tools).",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("skill_remove", "Delete a saved skill by name.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
+        f("skill_run", "Run a saved skill by name. Pass the placeholder values as extra fields (e.g. {\"name\":\"to_mp3\",\"input\":\"a.wav\",\"output\":\"a.mp3\"}). Executes a shell command, so it needs approval unless the skill_run capability has been granted.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
     ]
 }
 
@@ -279,6 +289,36 @@ pub async fn execute(
                 Err(e) => format!("ERROR: bad args: {e}"),
             }
         }
+        "skill_create" => {
+            #[derive(Deserialize)]
+            struct A { name: String, description: String, command: String }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => {
+                    mem.skill_create(&a.name, &a.description, &a.command).await;
+                    format!("Saved skill '{}'. Run it with skill_run (it executes a shell command, so it needs approval unless skill_run is granted).", a.name)
+                }
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "skill_list" => {
+            let skills = mem.skill_list().await;
+            if skills.is_empty() {
+                "No skills saved yet. Create one with skill_create.".to_string()
+            } else {
+                let mut out = String::from("Saved skills:\n");
+                for (name, desc) in skills { out.push_str(&format!("  {name} - {desc}\n")); }
+                out
+            }
+        }
+        "skill_remove" => {
+            #[derive(Deserialize)]
+            struct A { name: String }
+            match serde_json::from_str::<A>(args_json) {
+                Ok(a) => if mem.skill_remove(&a.name).await { format!("Removed skill '{}'.", a.name) } else { format!("No skill named '{}'.", a.name) },
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "skill_run" => skill_run(args_json, mem).await,
         // Tools discovered from MCP servers are routed to the MCP hub.
         n if n.starts_with("mcp__") => match crate::mcp::handle() {
             Some(h) => h.call(n, args_json).await,
@@ -555,6 +595,36 @@ fn run_bounded(command: &str, cwd: Option<&std::path::Path>, path: Option<&str>,
 fn run_shell(args: &str) -> String {
     let a: ShellArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
     run_bounded(&a.command, None, None, exec_timeout(), 4000, 2000)
+}
+
+// Self-healing skills (Pillar 4): look up a saved skill, fill its {placeholders}
+// from the call args, and run it (bounded). Gated as needs-approval in policy.
+async fn skill_run(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    let v: serde_json::Value = match serde_json::from_str(args) { Ok(v) => v, Err(e) => return format!("ERROR: bad args: {e}") };
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if name.is_empty() {
+        return "ERROR: skill_run needs a 'name'.".to_string();
+    }
+    let (_desc, mut cmd) = match mem.skill_get(&name).await {
+        Some(x) => x,
+        None => return format!("No skill named '{name}'. List them with skill_list or create it with skill_create."),
+    };
+    // Substitute {key} placeholders from the remaining args.
+    if let Some(obj) = v.as_object() {
+        for (k, val) in obj {
+            if k == "name" { continue; }
+            let s = match val {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            cmd = cmd.replace(&format!("{{{k}}}"), &s);
+        }
+    }
+    if cmd.contains('{') && cmd.contains('}') {
+        return format!("Skill '{name}' still has unfilled placeholders after substitution: {cmd}. Pass the missing values.");
+    }
+    let out = run_bounded(&cmd, None, Some(&toolchain_path()), exec_timeout(), 6000, 4000);
+    format!("skill '{name}' ran: {cmd}\n{out}")
 }
 
 // ── code-builder mode (Power 1) ─────────────────────────────────────────────

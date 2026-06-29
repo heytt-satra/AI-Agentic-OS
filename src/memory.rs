@@ -38,6 +38,11 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Self-healing skills (Pillar 4).
+    SkillCreate { name: String, description: String, command: String, reply: oneshot::Sender<()> },
+    SkillGet { name: String, reply: oneshot::Sender<Option<(String, String)>> }, // (description, command)
+    SkillList { reply: oneshot::Sender<Vec<(String, String)>> }, // (name, description)
+    SkillRemove { name: String, reply: oneshot::Sender<bool> },
     // Capability tokens (security).
     GrantAdd { capability: String, expires_at: i64, reply: oneshot::Sender<()> },
     GrantActive { capability: String, reply: oneshot::Sender<bool> },
@@ -289,6 +294,28 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── self-healing skills (Pillar 4) ───────────────────────────────────────
+    pub async fn skill_create(&self, name: &str, description: &str, command: &str) {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SkillCreate { name: name.to_string(), description: description.to_string(), command: command.to_string(), reply }).await.is_err() { return; }
+        let _ = rx.await;
+    }
+    pub async fn skill_get(&self, name: &str) -> Option<(String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SkillGet { name: name.to_string(), reply }).await.is_err() { return None; }
+        rx.await.unwrap_or(None)
+    }
+    pub async fn skill_list(&self) -> Vec<(String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SkillList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn skill_remove(&self, name: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SkillRemove { name: name.to_string(), reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+
     // ── capability tokens (security) ─────────────────────────────────────────
     pub async fn grant_add(&self, capability: &str, minutes: i64) {
         let expires_at = now_secs() + minutes.max(1) * 60;
@@ -459,6 +486,10 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL
+         );
+         -- Self-healing skills: agent-authored shell-command tools (Pillar 4).
+         CREATE TABLE IF NOT EXISTS skills (
+            name TEXT PRIMARY KEY, ts INTEGER NOT NULL, description TEXT NOT NULL, command TEXT NOT NULL
          );
          -- Capability tokens (security): time-boxed, user-authorized grants that
          -- auto-approve an otherwise-gated tool/category until they expire.
@@ -635,6 +666,34 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
             let n = conn
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
+        MemCmd::SkillCreate { name, description, command, reply } => {
+            let _ = conn.execute(
+                "INSERT INTO skills (name, ts, description, command) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(name) DO UPDATE SET description=?3, command=?4, ts=?2",
+                params![name, now_secs(), description, command],
+            );
+            let _ = reply.send(());
+        }
+        MemCmd::SkillGet { name, reply } => {
+            let row = conn.query_row(
+                "SELECT description, command FROM skills WHERE name=?1",
+                params![name],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            ).ok();
+            let _ = reply.send(row);
+        }
+        MemCmd::SkillList { reply } => {
+            let rows = (|| -> Result<Vec<(String, String)>> {
+                let mut stmt = conn.prepare("SELECT name, description FROM skills ORDER BY name ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::SkillRemove { name, reply } => {
+            let n = conn.execute("DELETE FROM skills WHERE name=?1", params![name]).unwrap_or(0);
             let _ = reply.send(n > 0);
         }
         MemCmd::GrantAdd { capability, expires_at, reply } => {

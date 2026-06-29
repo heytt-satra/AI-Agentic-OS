@@ -83,6 +83,11 @@ BIG MULTI-STEP JOBS: for a goal with several steps, first plan it with task_add 
 If you are restarted or interrupted, call task_list to see what is left and resume. \
 RECOVERY: when a tool returns an ERROR, do not give up at once. Read the error, \
 adjust your approach, and try a couple of times before reporting that you are stuck.\n\
+SELF-EXTENDING: if no built-in tool can do something, or a tool keeps failing at a \
+task, EXTEND yourself instead of giving up: write a shell command that accomplishes \
+it (use {placeholders} for inputs), save it with skill_create, then run it with \
+skill_run. Reuse saved skills via skill_list. This grows new capabilities over time \
+(skill_run executes shell, so it asks for approval unless you have been granted it).\n\
 YOUR SECOND BRAIN: when the user asks what they did, what they were working on, \
 which apps they used, how long on something, or about any past time window, ALWAYS \
 call recall_activity (set 'minutes' to the window they mean) and report its timeline \

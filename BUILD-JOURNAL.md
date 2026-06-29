@@ -674,6 +674,24 @@ the write lands before the command returns. Re-test: `grant deploy 15` -> `grant
 shows "deploy - 14 min left". Passed. Next: map tools to coarse categories (shell/
 install/spend/files) so one grant covers a group, and surface grants in `privacy`.
 
+### 2026-06-28 - Pillar 4: self-healing / self-extending skills
+**Goal:** an OS that grows new capabilities instead of giving up - when no built-in
+tool fits or one keeps failing, the agent writes a shell command that does the job
+and saves it as a callable skill. **How:** `skills` table + skill_create/list/
+remove/run; skill_run looks up the saved command, substitutes {placeholders} from
+the call args, and runs it bounded (run_bounded). **Security (the key part):**
+skill_run executes an agent-authored shell command, so policy marks it
+needs_approval ALWAYS - it only runs autonomously when the user has granted the
+skill_run capability token (the feature I built right before this, which is exactly
+why it had to come first). Sub-agents can't run it (needs_approval). Persona gained
+a SELF-EXTENDING rule. **Test (end to end):** `jarvis grant skill_run 30`, then told
+Jarvis to create skill 'echotest' (command `echo SKILLWORKS-{tag}`) and run it with
+tag=42 -> it created the skill, the grant auto-approved execution (no prompt), the
+placeholder filled, and it printed `SKILLWORKS-42`. The agent extended itself,
+safely. **Honest scope:** hot-loading new COMPILED Rust tools isn't feasible
+in-binary; scriptable shell skills are the pragmatic, real self-extension, and the
+capability-token gate keeps it safe.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
