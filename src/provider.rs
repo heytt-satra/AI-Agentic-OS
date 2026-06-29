@@ -71,10 +71,12 @@ pub struct FunctionDef {
     pub parameters: serde_json::Value,
 }
 
-// What chat() hands back: the assistant's message + why it stopped.
+// What chat() hands back: the assistant's message + why it stopped + how many
+// tokens it cost (0 if the API didn't report usage, e.g. the streaming path).
 pub struct Reply {
     pub message: Message,
     pub finish_reason: String,
+    pub tokens: u64,
 }
 
 // ── Private wire types (only used to (de)serialize the HTTP body) ────────────
@@ -91,6 +93,14 @@ struct ChatRequest {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Deserialize)]
+struct Usage {
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -207,10 +217,12 @@ impl Provider {
         if parsed.choices.is_empty() {
             anyhow::bail!("no choices in response");
         }
+        let tokens = parsed.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
         let choice = parsed.choices.swap_remove(0);
         Ok(Reply {
             message: choice.message,
             finish_reason: choice.finish_reason.unwrap_or_default(),
+            tokens,
         })
     }
 
@@ -318,6 +330,7 @@ impl Provider {
                 tool_call_id: None,
             },
             finish_reason: finish,
+            tokens: 0, // streaming responses don't carry usage in this path
         })
     }
 

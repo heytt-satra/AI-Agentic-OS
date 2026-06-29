@@ -216,6 +216,20 @@ async fn main() -> Result<()> {
             run_eval(&provider, &mem).await;
             return Ok(());
         }
+        Some("cost") => {
+            // Pillar 8: token usage accounting (REPL + sub-agent + eval paths;
+            // the streaming HUD path does not report usage yet).
+            let (calls, tokens) = mem.usage_total().await;
+            let rate: f64 = std::env::var("JARVIS_COST_PER_MTOK").ok()
+                .and_then(|v| v.parse().ok()).unwrap_or(0.30);
+            let est = tokens as f64 / 1_000_000.0 * rate;
+            println!("\nJarvis token usage\n==================");
+            println!("LLM calls recorded: {calls}");
+            println!("Total tokens:       {tokens}");
+            println!("Est. cost:          ${est:.4}  (at ${rate}/M tokens; set JARVIS_COST_PER_MTOK for your model)");
+            println!("Note: covers REPL, sub-agents, eval, digest. The streaming HUD path is not yet counted.");
+            return Ok(());
+        }
         Some("serve") => {
             // Launch the futuristic web HUD (open the printed URL in a browser).
             activity::spawn(mem.clone()); // second-brain tracking
@@ -463,6 +477,7 @@ pub async fn run_subagent(
             Err(e) => return format!("ERROR: sub-agent ({role}) failed: {e}"),
         };
         messages.push(reply.message.clone());
+        mem.add_usage(provider.model(), reply.tokens).await;
         if reply.finish_reason == "tool_calls" {
             for call in reply.message.tool_calls.clone().unwrap_or_default() {
                 let name = call.function.name.clone();
@@ -737,6 +752,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     for _step in 1..=steps {
         let reply = provider.chat(messages, Some(tools::all_definitions().await)).await?;
         messages.push(reply.message.clone());
+        mem.add_usage(provider.model(), reply.tokens).await;
 
         if reply.finish_reason == "tool_calls" {
             for call in reply.message.tool_calls.clone().unwrap_or_default() {

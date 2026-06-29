@@ -601,6 +601,18 @@ open -> not; long msg -> not). `cargo test` -> 21 passed (was 20); `jarvis eval`
 unaffected (no FAST set). Conservative on purpose - downgrading a hard turn is worse
 than the saving, so the keyword guard errs toward the strong model.
 
+### 2026-06-28 - Pillar 8: token/cost accounting
+**Goal:** make spend VISIBLE (can't optimize what you can't see). **How:** parse
+`usage.total_tokens` from the API reply into Reply.tokens; new `usage` table +
+add_usage/usage_total in the memory actor; run_turn and run_subagent record tokens
+per call; new `jarvis cost` prints calls, total tokens, and an estimate (rate via
+JARVIS_COST_PER_MTOK, default $0.30/M). **Test:** ran one turn then `jarvis cost` ->
+1 call, 9303 tokens, ~$0.0028. **Insight it surfaced:** 9303 tokens for "2+2" - the
+full tool-definition list ships on EVERY call; now that it's visible, trimming/
+caching tool defs is a clear future cost win. **Honest gaps:** the streaming HUD
+path doesn't report usage yet (would need stream_options include_usage), so `cost`
+covers REPL/sub-agent/eval/digest, not the HUD - stated in the command output.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

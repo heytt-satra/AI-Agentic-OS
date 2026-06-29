@@ -38,6 +38,9 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Token usage accounting (Pillar 8).
+    AddUsage { model: String, tokens: i64 },
+    UsageTotal { reply: oneshot::Sender<(i64, i64)> }, // (calls, tokens)
     // Scheduled agents (Phase 3).
     ScheduleAdd { agent: String, every_secs: i64, reply: oneshot::Sender<i64> },
     ScheduleList { reply: oneshot::Sender<Vec<(i64, String, i64)>> },
@@ -282,6 +285,17 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── token usage accounting (Pillar 8) ───────────────────────────────────
+    pub async fn add_usage(&self, model: &str, tokens: u64) {
+        if tokens == 0 { return; }
+        let _ = self.tx.send(MemCmd::AddUsage { model: model.to_string(), tokens: tokens as i64 }).await;
+    }
+    pub async fn usage_total(&self) -> (i64, i64) {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::UsageTotal { reply }).await.is_err() { return (0, 0); }
+        rx.await.unwrap_or((0, 0))
+    }
+
     // ── scheduled agents (Phase 3) ──────────────────────────────────────────
     pub async fn schedule_add(&self, agent: &str, every_secs: i64) -> i64 {
         let (reply, rx) = oneshot::channel();
@@ -423,6 +437,10 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL
+         );
+         -- Token usage accounting (Pillar 8): one row per LLM call that reported usage.
+         CREATE TABLE IF NOT EXISTS usage (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, model TEXT NOT NULL, tokens INTEGER NOT NULL
          );
          -- Scheduled agents (Phase 3): run a saved agent every N seconds.
          CREATE TABLE IF NOT EXISTS schedules (
@@ -591,6 +609,20 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
             let _ = reply.send(n > 0);
+        }
+        MemCmd::AddUsage { model, tokens } => {
+            let _ = conn.execute(
+                "INSERT INTO usage (ts, model, tokens) VALUES (?1, ?2, ?3)",
+                params![now_secs(), model, tokens],
+            );
+        }
+        MemCmd::UsageTotal { reply } => {
+            let row = conn
+                .query_row("SELECT COUNT(*), COALESCE(SUM(tokens),0) FROM usage", [], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })
+                .unwrap_or((0, 0));
+            let _ = reply.send(row);
         }
         MemCmd::ScheduleAdd { agent, every_secs, reply } => {
             let next = now_secs() + every_secs;
