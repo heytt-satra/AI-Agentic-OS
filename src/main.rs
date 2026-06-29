@@ -451,6 +451,9 @@ pub async fn run_subagent(
         Message::system(format!("{}\n\n{brief}", system_prompt())),
         Message::user(task.to_string()),
     ];
+    // Model routing (Pillar 8): trivial tasks may use the cheap model.
+    let routed = provider.routed(task);
+    let provider = &routed;
     let steps = max_steps();
     let mut critic_done = false; // allow exactly one critic-triggered retry
     let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
@@ -727,6 +730,9 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     let mut critic_done = false; // allow exactly one critic-triggered retry
     let task = messages.iter().rev().find(|m| m.role == "user")
         .and_then(|m| m.content.clone()).unwrap_or_default();
+    // Model routing (Pillar 8): trivial turns may use the cheap model.
+    let routed = provider.routed(&task);
+    let provider = &routed;
     let steps = max_steps();
     for _step in 1..=steps {
         let reply = provider.chat(messages, Some(tools::all_definitions().await)).await?;

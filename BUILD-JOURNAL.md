@@ -589,6 +589,18 @@ contains-hit -> PASS, contains-miss -> FAIL). `cargo test` -> 20 passed (was 19)
 This is the first concrete verification primitive the critic loop can lean on;
 more (check_screen via ui_list, test-passed) can follow the same pattern.
 
+### 2026-06-28 - Pillar 8: model routing (brilliant + cheap)
+**Goal:** don't pay strong-model price for trivial turns. **How:** Provider gains an
+optional fast_model (env OPENROUTER_MODEL_FAST) and a routed(user_msg) method that
+returns a clone using the cheap model when the opening message is_trivial (short,
+no build/code/web/file/click/... keyword). run_turn and run_subagent route ONCE on
+the opening message, so a tool-heavy turn is never downgraded mid-flight. Fully
+opt-in: unset = one model for everything (default behavior unchanged). Documented in
+.env.example. **Test:** routing_triviality unit test (chat -> trivial; build/search/
+open -> not; long msg -> not). `cargo test` -> 21 passed (was 20); `jarvis eval`
+unaffected (no FAST set). Conservative on purpose - downgrading a hard turn is worse
+than the saving, so the keyword guard errs toward the strong model.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

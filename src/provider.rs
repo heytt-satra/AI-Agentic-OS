@@ -108,6 +108,7 @@ pub struct Provider {
     api_key: String,
     model: String,
     base_url: String,
+    fast_model: Option<String>, // optional cheap model for trivial turns (Pillar 8)
 }
 
 impl Provider {
@@ -122,7 +123,40 @@ impl Provider {
         // To use a LOCAL model later: set OPENROUTER_BASE_URL=http://localhost:11434/v1
         let base_url = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-        Ok(Provider { client: reqwest::Client::new(), api_key, model, base_url })
+        // Optional: a cheaper/faster model for trivial turns. Unset = routing off.
+        let fast_model = std::env::var("OPENROUTER_MODEL_FAST").ok().filter(|s| !s.trim().is_empty());
+        Ok(Provider { client: reqwest::Client::new(), api_key, model, base_url, fast_model })
+    }
+
+    // Model routing (Pillar 8): if a fast model is configured and the user's
+    // message looks trivial (short, no build/code/web/file keywords), return a
+    // clone that uses the cheap model. Default behavior is unchanged when
+    // OPENROUTER_MODEL_FAST is not set. Conservative: anything non-trivial stays
+    // on the strong model, and tool-heavy turns are never downgraded mid-flight
+    // because routing is decided once on the opening user message.
+    pub fn routed(&self, user_msg: &str) -> Provider {
+        if let Some(fast) = &self.fast_model {
+            if Self::is_trivial(user_msg) {
+                let mut p = self.clone();
+                p.model = fast.clone();
+                return p;
+            }
+        }
+        self.clone()
+    }
+
+    fn is_trivial(msg: &str) -> bool {
+        let m = msg.trim().to_lowercase();
+        if m.len() > 140 {
+            return false;
+        }
+        const HARD: &[&str] = &[
+            "build", "code", "compile", "fix", "debug", "run ", "install", "search",
+            "find", "research", "browse", "scrape", "email", "lead", "write", "create",
+            "open ", "click", "operate", "screenshot", "schedule", "agent", "file",
+            "project", "deploy", "test",
+        ];
+        !HARD.iter().any(|k| m.contains(k))
     }
 
     // In offline mode the brain must be local; refuse to call a cloud endpoint so
@@ -290,5 +324,23 @@ impl Provider {
     // Expose the model name for logging.
     pub fn model(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_triviality() {
+        // trivial chat -> eligible for the cheap model
+        assert!(Provider::is_trivial("what is 2+2?"));
+        assert!(Provider::is_trivial("hello, how are you"));
+        // anything tool/work-shaped stays on the strong model
+        assert!(!Provider::is_trivial("build a rust cli"));
+        assert!(!Provider::is_trivial("search the web for rust news"));
+        assert!(!Provider::is_trivial("open notepad and click save"));
+        // long messages are never trivial
+        assert!(!Provider::is_trivial(&"a ".repeat(100)));
     }
 }
