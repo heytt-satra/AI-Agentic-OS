@@ -324,6 +324,49 @@ async fn main() -> Result<()> {
 // agent) calls this via the spawn_agent tool to split a big goal into parts.
 // Sub-agents run autonomously but cannot run approval-gated actions (no human to
 // prompt), and nesting is depth-capped so they can't recurse forever.
+// Pillar 1 - the CRITIC. After the agent declares done, independently verify the
+// task was ACTUALLY accomplished (not just claimed). Returns None if complete, or
+// Some(reason) describing what is missing so the agent can finish it. One extra
+// cheap call per completed turn; disable with JARVIS_CRITIC=off. Deliberately
+// conservative: only blocks on a clear INCOMPLETE verdict, never on ambiguity, so
+// it adds reliability without false stalls.
+async fn critic_verify(provider: &Provider, task: &str, answer: &str) -> Option<String> {
+    if std::env::var("JARVIS_CRITIC").unwrap_or_default().to_lowercase() == "off" {
+        return None;
+    }
+    // Don't second-guess a clearly empty/failed answer path or trivial echoes.
+    if answer.trim().is_empty() {
+        return Some("no result was produced".to_string());
+    }
+    let prompt = format!(
+        "You verify task completion. Given the TASK and the agent's RESULT, decide if the \
+         task is ACTUALLY and fully accomplished by the result. Reply EXACTLY 'DONE' if it \
+         is complete and correct. Otherwise reply 'INCOMPLETE: <one sentence on what is \
+         missing>'. Treat a refusal of a malicious instruction as DONE (that is correct \
+         behavior). Treat a mere promise, a partial answer, or an error as INCOMPLETE.\n\n\
+         TASK:\n{task}\n\nRESULT:\n{}",
+        answer.chars().take(2000).collect::<String>()
+    );
+    let msgs = vec![
+        Message::system("You are a strict, terse task-completion verifier.".to_string()),
+        Message::user(prompt),
+    ];
+    let reply = provider.chat(&msgs, None).await.ok()?;
+    let verdict = reply.message.content.unwrap_or_default();
+    let v = verdict.trim();
+    let upper = v.to_uppercase();
+    if upper.starts_with("DONE") {
+        None
+    } else if upper.contains("INCOMPLETE") {
+        // Take the text after the first ':' as the reason, else a generic one.
+        let reason = v.splitn(2, ':').nth(1).map(|s| s.trim()).filter(|s| !s.is_empty())
+            .unwrap_or("the result does not fully accomplish the task");
+        Some(reason.to_string())
+    } else {
+        None // ambiguous verdict -> don't block
+    }
+}
+
 pub async fn run_subagent(
     provider: &Provider,
     mem: &MemoryHandle,
@@ -344,6 +387,7 @@ pub async fn run_subagent(
         Message::user(task.to_string()),
     ];
     let steps = max_steps();
+    let mut critic_done = false; // allow exactly one critic-triggered retry
     for _ in 0..steps {
         let reply = match provider.chat(&messages, Some(tools::all_definitions().await)).await {
             Ok(r) => r,
@@ -367,7 +411,18 @@ pub async fn run_subagent(
             }
             continue;
         }
-        return reply.message.content.unwrap_or_else(|| "(sub-agent returned nothing)".to_string());
+        let answer = reply.message.content.unwrap_or_else(|| "(sub-agent returned nothing)".to_string());
+        // Critic: verify the task is actually done before returning (once).
+        if !critic_done {
+            if let Some(reason) = critic_verify(provider, task, &answer).await {
+                critic_done = true;
+                messages.push(Message::user(format!(
+                    "VERIFICATION FAILED: {reason}. The task is NOT finished. Use your tools to actually complete it, then give the final result."
+                )));
+                continue;
+            }
+        }
+        return answer;
     }
     format!("Sub-agent ({role}) hit its step limit before finishing.")
 }
@@ -595,6 +650,9 @@ async fn run_dataset_export(mem: &MemoryHandle, out_path: &str) {
 async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Message>) -> Result<String> {
     let mut tainted = false; // becomes true once we read untrusted web content
     let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut critic_done = false; // allow exactly one critic-triggered retry
+    let task = messages.iter().rev().find(|m| m.role == "user")
+        .and_then(|m| m.content.clone()).unwrap_or_default();
     let steps = max_steps();
     for _step in 1..=steps {
         let reply = provider.chat(messages, Some(tools::all_definitions().await)).await?;
@@ -636,6 +694,17 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         }
 
         let answer = reply.message.content.unwrap_or_else(|| "(no answer)".to_string());
+        // Critic: verify the task is actually done before returning (once).
+        if !critic_done {
+            if let Some(reason) = critic_verify(provider, &task, &answer).await {
+                critic_done = true;
+                println!("  · verifying: not done yet ({reason})");
+                messages.push(Message::user(format!(
+                    "VERIFICATION FAILED: {reason}. The task is NOT finished. Use your tools to actually complete it, then give the final result."
+                )));
+                continue;
+            }
+        }
         mem.log("assistant", &answer).await;
         return Ok(answer);
     }

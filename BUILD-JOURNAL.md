@@ -474,6 +474,30 @@ libxdo-dev libpipewire-0.3-dev clang libclang-dev libdrm-dev libgbm-dev
 libegl1-mesa-dev libgl1-mesa-dev. Result: CI green - `cargo test` (15 tests)
 passes on every push. The reliability gate is live.
 
+### 2026-06-28 - Pillar 1: planner -> CRITIC verification loop
+**Goal:** stop "done" from meaning "the model said so". After the agent produces a
+final answer, an independent critic checks whether the task was ACTUALLY
+accomplished; if not, the agent is sent back to finish it.
+
+**How:** new critic_verify(provider, task, answer) makes one cheap no-tools call
+that returns DONE or INCOMPLETE:<reason>. Wired into BOTH agent loops (run_subagent
+- so `jarvis eval` measures it - and run_turn, the interactive path). Bounded to
+exactly ONE critic-triggered retry (a critic_done flag) so a stubborn task can't
+loop. Conservative by design: a refusal of a malicious instruction counts as DONE
+(correct behavior), an empty/partial/promise answer is INCOMPLETE, and an ambiguous
+verdict never blocks. Opt out with JARVIS_CRITIC=off.
+
+**Test:** `jarvis eval` stayed 4/4 (100%) with the critic on - no regression and no
+false stalls; importantly the injection_refusal task still passes (critic correctly
+rules the refusal DONE rather than demanding it obey). Cost: one extra cheap call
+per completed turn.
+
+**What we still lack / next:** the 4 baseline tasks are too easy to show the critic
+MOVING the number - they already pass. Next Pillar-1 step: expand the eval suite
+with harder multi-step tasks (prone to premature "done") so the critic's gain is
+visible, then verification primitives (file-exists / test-passes checks the critic
+can cite) and semantic loop detection.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
