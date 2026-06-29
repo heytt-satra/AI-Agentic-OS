@@ -543,6 +543,25 @@ screen center. Works.
 **Next:** Set-of-Marks (numbered overlay on the screenshot from these bounds) and
 per-window targeting, then a GUI-subset eval task.
 
+### 2026-06-28 - Pillar 2 #2: per-window targeting + verify-before-act (ui_click)
+**Problem:** ui_click matched a name across the WHOLE desktop, so it could click a
+same-named control in a background window; and it never checked the control was
+enabled, so it could "click" a greyed-out button and claim success.
+**Fix:** factored focused_top_window() (the window-finder proven by ui_list) and
+reused it - ui_click now scopes its matcher to the focused window first
+(matcher.from(window)), falls back to a desktop-wide search only if that misses,
+and checks el.is_enabled() before clicking (reports DISABLED instead of a fake
+success). Not-found message now points the agent to ui_list.
+**Test:** the not-found/fallback path returns the new guidance verbatim
+(deterministic). The success path reuses the helper validated by ui_list (32 real
+Notepad controls) + is_enabled + click.
+**Honest note:** the full open-app-then-click end-to-end test was inconclusive
+because the MODEL looped on the multi-step GUI orchestration (chose run_shell to
+launch Notepad and repeated) - the semantic loop guard caught it both times. That
+is the operate-reliability problem (next), not a ui_click bug.
+**Next:** make operate_app a11y-FIRST (feed ui_list into the loop so it clicks real
+elements instead of thrashing), then Set-of-Marks.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

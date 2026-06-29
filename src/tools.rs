@@ -1120,6 +1120,30 @@ fn is_interactive_ct(ct: &str) -> bool {
         | "Tab" | "TreeItem" | "Slider" | "Spinner" | "Document" | "Hyperlink")
 }
 
+// The top-level window that owns the currently focused element. Used to scope
+// both ui_list and ui_click to the foreground app (per-window targeting), so we
+// never act on a same-named control in some background window.
+#[cfg(windows)]
+fn focused_top_window(automation: &uiautomation::UIAutomation) -> Option<uiautomation::UIElement> {
+    let focused = automation.get_focused_element().ok()?;
+    if let (Ok(walker), Ok(root)) = (automation.get_control_view_walker(), automation.get_root_element()) {
+        let root_name = root.get_name().unwrap_or_default();
+        let mut cur = focused.clone();
+        for _ in 0..50 {
+            match walker.get_parent(&cur) {
+                Ok(p) => {
+                    if p.get_name().unwrap_or_default() == root_name {
+                        return Some(cur);
+                    }
+                    cur = p;
+                }
+                Err(_) => return Some(cur),
+            }
+        }
+    }
+    Some(focused)
+}
+
 #[cfg(windows)]
 fn ui_list_native() -> String {
     use uiautomation::types::TreeScope;
@@ -1128,31 +1152,10 @@ fn ui_list_native() -> String {
         Ok(a) => a,
         Err(e) => return format!("ERROR: UI Automation init failed: {e}"),
     };
-    // Find the top-level window that owns the focused element by climbing parents.
-    let focused = match automation.get_focused_element() {
-        Ok(f) => f,
-        Err(e) => return format!("ERROR: no focused UI element ({e}). Click the app first."),
+    let top = match focused_top_window(&automation) {
+        Some(w) => w,
+        None => return "ERROR: no focused UI element. Click the app first.".to_string(),
     };
-    let mut top = focused.clone();
-    if let (Ok(walker), Ok(root)) = (automation.get_control_view_walker(), automation.get_root_element()) {
-        let root_name = root.get_name().unwrap_or_default();
-        let mut cur = focused.clone();
-        for _ in 0..50 {
-            match walker.get_parent(&cur) {
-                Ok(p) => {
-                    if p.get_name().unwrap_or_default() == root_name {
-                        top = cur.clone();
-                        break;
-                    }
-                    cur = p;
-                }
-                Err(_) => {
-                    top = cur.clone();
-                    break;
-                }
-            }
-        }
-    }
     let cond = match automation.create_true_condition() {
         Ok(c) => c,
         Err(e) => return format!("ERROR: condition build failed: {e}"),
@@ -1207,16 +1210,31 @@ fn ui_click_native(label: &str) -> String {
         Ok(a) => a,
         Err(e) => return format!("ERROR: UI Automation init failed: {e}"),
     };
-    let matcher = automation.create_matcher().contains_name(label).timeout(3000);
-    match matcher.find_first() {
-        Ok(el) => {
-            let name = el.get_name().unwrap_or_default();
-            match el.click() {
-                Ok(_) => format!("clicked '{label}' (UI element: {name})"),
-                Err(e) => format!("ERROR: found '{name}' but could not click it: {e}. Try click_on instead."),
+    // Per-window targeting: search within the focused window first so we don't
+    // match a same-named control in a background app. Fall back to a global
+    // search only if the scoped one finds nothing.
+    let mut matcher = automation.create_matcher().contains_name(label).timeout(3000);
+    if let Some(win) = focused_top_window(&automation) {
+        matcher = matcher.from(win);
+    }
+    let el = match matcher.find_first() {
+        Ok(el) => el,
+        Err(_) => {
+            // Fall back to a desktop-wide search.
+            match automation.create_matcher().contains_name(label).timeout(1500).find_first() {
+                Ok(el) => el,
+                Err(_) => return format!("No accessible UI element named '{label}' is visible. Call ui_list to see exact names, or use click_on (vision)."),
             }
         }
-        Err(_) => format!("No accessible UI element named '{label}' is visible. Use click_on (vision) instead, or check the exact label."),
+    };
+    let name = el.get_name().unwrap_or_default();
+    // Verify-before-act: don't claim a click on a disabled control.
+    if let Ok(false) = el.is_enabled() {
+        return format!("Found '{name}' but it is DISABLED right now, so I did not click it. Check preconditions (something may need to be selected or filled first).");
+    }
+    match el.click() {
+        Ok(_) => format!("clicked '{label}' (UI element: {name})"),
+        Err(e) => format!("ERROR: found '{name}' but could not click it: {e}. Try click_on instead."),
     }
 }
 
