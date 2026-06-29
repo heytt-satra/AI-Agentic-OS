@@ -508,6 +508,23 @@ read it back, report it - a write->read->report chain). Result: `jarvis eval` no
 these; the critic is the safety net for when it stops early. Next: verification
 primitives + semantic loop detection, then Pillar 2 (computer-use accuracy).
 
+### 2026-06-28 - Pillar 1: semantic loop detection
+**Problem:** the old runaway guard compared tool+args BYTE-for-byte, so a reworded
+-but-equivalent repeat slipped through (web_search "rust news" then "news rust")
+and burned the whole step budget. Also, run_subagent had NO loop guard at all -
+the path `jarvis eval` exercises.
+
+**Fix:** normalize args (parse JSON, sort keys, lowercase strings -> cosmetic
+differences collapse) and compare token sets with Jaccard similarity; same tool +
+>=0.85 overlap counts as the same call, and the 4th near-duplicate aborts. New
+loop_hit() helper now guards BOTH run_turn and run_subagent.
+
+**Tested:** 4 new unit tests (norm_args order/case/space invariance; jaccard
+identity/disjoint; loop_hit catches reworded repeats; different tools don't
+collide). `cargo test` -> 19 passed (was 15). `jarvis eval` still 6/6. Next:
+verification primitives (file-exists / test-passes evidence the critic can cite),
+then Pillar 2 - computer-use accuracy (a11y element list + Set-of-Marks).
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

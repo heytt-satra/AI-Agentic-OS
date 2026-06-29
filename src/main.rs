@@ -367,6 +367,69 @@ async fn critic_verify(provider: &Provider, task: &str, answer: &str) -> Option<
     }
 }
 
+// ── semantic loop detection (Pillar 1) ──────────────────────────────────────
+// The old guard compared tool+args byte-for-byte, so a reworded-but-equivalent
+// repeat (web_search "X news" then "news about X") slipped through. We normalize
+// args (parse JSON, sort keys, lowercase strings) and compare token sets with
+// Jaccard similarity, so near-duplicate calls collapse to one signature.
+
+fn norm_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            keys.iter().map(|k| format!("{k}={}", norm_value(&m[*k]))).collect::<Vec<_>>().join("&")
+        }
+        serde_json::Value::Array(a) => a.iter().map(norm_value).collect::<Vec<_>>().join(","),
+        serde_json::Value::String(s) => s.trim().to_lowercase(),
+        other => other.to_string(),
+    }
+}
+
+fn norm_args(args: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(args) {
+        Ok(v) => norm_value(&v),
+        Err(_) => args.trim().to_lowercase(),
+    }
+}
+
+fn arg_tokens(s: &str) -> std::collections::HashSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 2)
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f32 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f32;
+    let uni = a.union(b).count() as f32;
+    inter / uni
+}
+
+// Record a tool call against recent ones; returns true if this is the 4th
+// near-duplicate (same tool, >=0.85 token overlap) = a loop to abort.
+fn loop_hit(
+    recent: &mut Vec<(String, std::collections::HashSet<String>, u32)>,
+    name: &str,
+    args: &str,
+) -> bool {
+    let toks = arg_tokens(&format!("{name} {}", norm_args(args)));
+    for entry in recent.iter_mut() {
+        if entry.0 == name && jaccard(&entry.1, &toks) >= 0.85 {
+            entry.2 += 1;
+            return entry.2 >= 4;
+        }
+    }
+    recent.push((name.to_string(), toks, 1));
+    false
+}
+
 pub async fn run_subagent(
     provider: &Provider,
     mem: &MemoryHandle,
@@ -388,6 +451,7 @@ pub async fn run_subagent(
     ];
     let steps = max_steps();
     let mut critic_done = false; // allow exactly one critic-triggered retry
+    let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
     for _ in 0..steps {
         let reply = match provider.chat(&messages, Some(tools::all_definitions().await)).await {
             Ok(r) => r,
@@ -398,6 +462,9 @@ pub async fn run_subagent(
             for call in reply.message.tool_calls.clone().unwrap_or_default() {
                 let name = call.function.name.clone();
                 let args = call.function.arguments.clone();
+                if loop_hit(&mut recent, &name, &args) {
+                    return format!("Sub-agent ({role}) caught itself repeating '{name}' and stopped to avoid a loop.");
+                }
                 let risk = policy::assess(&name, &args);
                 // No interactive user inside a sub-agent: auto-run safe tools,
                 // refuse anything that would need approval.
@@ -654,7 +721,7 @@ async fn run_dataset_export(mem: &MemoryHandle, out_path: &str) {
 // Borrows `messages` mutably so tool results accumulate into the conversation.
 async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Message>) -> Result<String> {
     let mut tainted = false; // becomes true once we read untrusted web content
-    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
     let mut critic_done = false; // allow exactly one critic-triggered retry
     let task = messages.iter().rev().find(|m| m.role == "user")
         .and_then(|m| m.content.clone()).unwrap_or_default();
@@ -668,12 +735,9 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                 let name = call.function.name.clone();
                 let args = call.function.arguments.clone();
 
-                // Runaway-loop guard (gap 7): stop if the model keeps making the
-                // exact same call, instead of burning the whole step budget.
-                let sig = format!("{name}|{args}");
-                let c = seen.entry(sig).or_insert(0);
-                *c += 1;
-                if *c >= 4 {
+                // Semantic loop guard: stop if the model keeps making the same
+                // KIND of call (even reworded), instead of burning the budget.
+                if loop_hit(&mut recent, &name, &args) {
                     return Ok("I caught myself repeating the same action and stopped to avoid a loop, sir. Could you rephrase or give me a bit more to go on?".to_string());
                 }
 
@@ -859,5 +923,44 @@ async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
             mem.log("assistant", &format!("[digest] {text}")).await;
         }
         Err(e) => eprintln!("digest error: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn norm_args_collapses_order_case_space() {
+        // key order, case, and surrounding whitespace must not matter
+        assert_eq!(norm_args(r#"{"b":"X","a":" Hi "}"#), norm_args(r#"{"a":"hi","b":"x"}"#));
+        assert_eq!(norm_args(r#"{"a":"hi","b":"x"}"#), "a=hi&b=x");
+    }
+
+    #[test]
+    fn jaccard_basic() {
+        let a: std::collections::HashSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+        let b: std::collections::HashSet<String> = ["y", "x"].iter().map(|s| s.to_string()).collect();
+        let c: std::collections::HashSet<String> = ["z"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(jaccard(&a, &b), 1.0);
+        assert_eq!(jaccard(&a, &c), 0.0);
+    }
+
+    #[test]
+    fn loop_hit_catches_reworded_repeats() {
+        let mut r = Vec::new();
+        // same KIND of call, reworded args -> collapses to one bucket; 4th trips
+        assert!(!loop_hit(&mut r, "web_search", r#"{"q":"rust news"}"#));
+        assert!(!loop_hit(&mut r, "web_search", r#"{"q":"news rust"}"#));
+        assert!(!loop_hit(&mut r, "web_search", r#"{"q":"rust  news"}"#));
+        assert!(loop_hit(&mut r, "web_search", r#"{"q":"news   rust"}"#));
+    }
+
+    #[test]
+    fn loop_hit_different_tools_dont_collide() {
+        let mut r = Vec::new();
+        assert!(!loop_hit(&mut r, "read_file", r#"{"path":"a"}"#));
+        assert!(!loop_hit(&mut r, "web_search", r#"{"q":"a"}"#));
+        assert!(!loop_hit(&mut r, "list_dir", r#"{"path":"a"}"#));
     }
 }
