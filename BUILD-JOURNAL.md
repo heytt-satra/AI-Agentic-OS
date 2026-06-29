@@ -525,6 +525,24 @@ collide). `cargo test` -> 19 passed (was 15). `jarvis eval` still 6/6. Next:
 verification primitives (file-exists / test-passes evidence the critic can cite),
 then Pillar 2 - computer-use accuracy (a11y element list + Set-of-Marks).
 
+### 2026-06-28 - Pillar 2 #1: ui_list (accessibility element list)
+**Goal:** stop guessing pixels. Give the model the EXACT list of clickable controls
+in the focused window so it picks a real element by name (coordinate-free).
+**How:** new ui_list tool (Windows UI Automation). Climb from the focused element
+to its top-level window via the control-view tree walker, find_all(Subtree, true),
+filter to interactive control types (Button/MenuItem/Hyperlink/Edit/CheckBox/Tab/
+ListItem/...), and print each as `[Type] "name" @ (cx,cy)`. Persona now tells the
+agent to ui_list when unsure, then ui_click by exact name.
+
+**Hurdle (live):** first test, the model tried to open Notepad with run_shell
+instead of open_app and repeated - the NEW semantic loop guard caught it and
+stopped cleanly (nice real-world validation). Re-ran with explicit "use open_app".
+**Result:** ui_list returned 32 real Notepad controls - Bold, Italic, Link, Table,
+Settings, Minimize/Maximize/Close, the System menu bar - each with type and exact
+screen center. Works.
+**Next:** Set-of-Marks (numbered overlay on the screenshot from these bounds) and
+per-window targeting, then a GUI-subset eval task.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

@@ -102,8 +102,10 @@ to review and send. After composing, mark the lead contacted with lead_update. U
 lead_list to see saved leads and resume later.\n\
 CLICKING RELIABLY: to click a button, link, menu item, tab, or checkbox that has \
 a visible text label, use ui_click FIRST - it targets the real OS control by name \
-and rarely misses. Use click_on (vision) only for elements with no text label, \
-like icons or canvas areas.\n\
+and rarely misses. If you are unsure what is on screen, or ui_click cannot find \
+the label, call ui_list to see EVERY clickable element in the focused window by \
+exact name and type, then ui_click the right one. Use click_on (vision) only for \
+elements with no accessible name, like icons or canvas areas.\n\
 MULTI-STEP GUI COMMANDS: if ONE instruction asks to open an app AND do something \
 inside it (e.g. 'open chrome and click the second profile', 'open notepad and type \
 X'), do the WHOLE thing: open_app, then wait about 2 seconds for it to appear, then \

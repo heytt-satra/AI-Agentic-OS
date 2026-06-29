@@ -39,6 +39,7 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
         f("click_on", "See the screen and click on a described UI element (e.g. 'the Save button', 'the search box'). Screenshots, locates it with vision, then clicks. Requires approval. This is the reliable way to click things.", str_prop("target", "what to click, in plain words")),
+        f("ui_list", "List the interactive UI elements (buttons, menus, links, fields, tabs, list items) in the FOCUSED window using the OS accessibility tree (Windows), each with its name, control type, and screen-center coordinates. Call this BEFORE clicking when unsure what is on screen - then click the exact element by name with ui_click. Coordinate-free and reliable; beats guessing pixels.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("ui_click", "Click a UI element by its visible NAME using the OS accessibility tree (Windows). FAR more reliable than click_on because it targets the real control, not a guessed pixel. Use this FIRST for buttons, links, menu items, tabs, checkboxes that have a text label. Fall back to click_on only for elements with no accessible name (icons, canvas).", str_prop("label", "the visible text/name of the element")),
         f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks prefer ui_click, then click_on.", str_prop("goal", "what to accomplish on screen, in plain words")),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
@@ -151,6 +152,7 @@ pub async fn execute(
         "mouse_click" => mouse_click(args_json),
         "see_screen" => see_screen(args_json).await,
         "click_on" => click_on(args_json).await,
+        "ui_list" => ui_list(),
         "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
         "browse_url" => browse_url(args_json).await,
@@ -1100,6 +1102,94 @@ async fn click_on(args: &str) -> String {
 // Click a real UI control by name instead of a guessed pixel. On Windows this
 // uses UI Automation's invoke pattern, which is how a screen reader clicks - it
 // targets the actual element, so it doesn't miss like vision-guided clicks.
+// Pillar 2: enumerate the focused window's interactive controls from the
+// accessibility tree, so the model picks a real element by name (coordinate-free)
+// instead of guessing pixels.
+fn ui_list() -> String {
+    #[cfg(windows)]
+    { ui_list_native() }
+    #[cfg(not(windows))]
+    { "ui_list is Windows-only for now; use see_screen + click_on elsewhere.".to_string() }
+}
+
+#[cfg(windows)]
+fn is_interactive_ct(ct: &str) -> bool {
+    matches!(ct,
+        "Button" | "MenuItem" | "Hyperlink" | "CheckBox" | "RadioButton" | "Edit"
+        | "ComboBox" | "ListItem" | "TabItem" | "SplitButton" | "MenuBar" | "Menu"
+        | "Tab" | "TreeItem" | "Slider" | "Spinner" | "Document" | "Hyperlink")
+}
+
+#[cfg(windows)]
+fn ui_list_native() -> String {
+    use uiautomation::types::TreeScope;
+    use uiautomation::UIAutomation;
+    let automation = match UIAutomation::new() {
+        Ok(a) => a,
+        Err(e) => return format!("ERROR: UI Automation init failed: {e}"),
+    };
+    // Find the top-level window that owns the focused element by climbing parents.
+    let focused = match automation.get_focused_element() {
+        Ok(f) => f,
+        Err(e) => return format!("ERROR: no focused UI element ({e}). Click the app first."),
+    };
+    let mut top = focused.clone();
+    if let (Ok(walker), Ok(root)) = (automation.get_control_view_walker(), automation.get_root_element()) {
+        let root_name = root.get_name().unwrap_or_default();
+        let mut cur = focused.clone();
+        for _ in 0..50 {
+            match walker.get_parent(&cur) {
+                Ok(p) => {
+                    if p.get_name().unwrap_or_default() == root_name {
+                        top = cur.clone();
+                        break;
+                    }
+                    cur = p;
+                }
+                Err(_) => {
+                    top = cur.clone();
+                    break;
+                }
+            }
+        }
+    }
+    let cond = match automation.create_true_condition() {
+        Ok(c) => c,
+        Err(e) => return format!("ERROR: condition build failed: {e}"),
+    };
+    let elems = match top.find_all(TreeScope::Subtree, &cond) {
+        Ok(v) => v,
+        Err(e) => return format!("ERROR: could not enumerate elements: {e}"),
+    };
+    let win = top.get_name().unwrap_or_default();
+    let mut out = format!("Interactive elements in window \"{win}\":\n");
+    let mut n = 0;
+    for el in elems.iter() {
+        let name = el.get_name().unwrap_or_default();
+        if name.trim().is_empty() {
+            continue;
+        }
+        let ct = el.get_control_type().map(|c| format!("{c:?}")).unwrap_or_default();
+        if !is_interactive_ct(&ct) {
+            continue;
+        }
+        let (cx, cy) = match el.get_bounding_rectangle() {
+            Ok(r) => ((r.get_left() + r.get_right()) / 2, (r.get_top() + r.get_bottom()) / 2),
+            Err(_) => (0, 0),
+        };
+        n += 1;
+        out.push_str(&format!("{n}. [{ct}] \"{}\" @ ({cx},{cy})\n", name.chars().take(80).collect::<String>()));
+        if n >= 80 {
+            out.push_str("(truncated at 80)\n");
+            break;
+        }
+    }
+    if n == 0 {
+        out.push_str("(no named interactive elements found - try see_screen + click_on)\n");
+    }
+    out
+}
+
 fn ui_click(args: &str) -> String {
     #[derive(Deserialize)]
     struct LabelArg { label: String }
