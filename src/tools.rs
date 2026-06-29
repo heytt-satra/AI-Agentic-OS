@@ -39,6 +39,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]})),
         f("see_screen", "Take a screenshot and analyze it with a vision model — lets you SEE what's on screen (read content, find UI elements, get click coordinates). Requires approval (sends your screen to a vision model).", str_prop("question", "what to look for, e.g. 'where is the Save button? give x,y'")),
         f("click_on", "See the screen and click on a described UI element (e.g. 'the Save button', 'the search box'). Screenshots, locates it with vision, then clicks. Requires approval. This is the reliable way to click things.", str_prop("target", "what to click, in plain words")),
+        f("check_screen", "Verify that expected text or a named control is actually visible in the focused window right now (via the accessibility tree). Use this to PROVE a GUI step worked, e.g. after opening a dialog or navigating. Returns PASS or FAIL with what was found.",
+          serde_json::json!({"type":"object","properties":{"contains":{"type":"string","description":"text or control name that should be on screen"}},"required":["contains"]})),
         f("check_file", "Verify a file exists and, optionally, that it contains an expected substring. Use this to PROVE a file-writing or code task actually worked - the result is hard evidence (the verifier can cite it). Returns PASS or FAIL with details.",
           serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"file path (natural locations like desktop/notes.txt are resolved)"},"contains":{"type":"string","description":"optional substring that must be present"}},"required":["path"]})),
         f("ui_list", "List the interactive UI elements (buttons, menus, links, fields, tabs, list items) in the FOCUSED window using the OS accessibility tree (Windows), each with its name, control type, and screen-center coordinates. Call this BEFORE clicking when unsure what is on screen - then click the exact element by name with ui_click. Coordinate-free and reliable; beats guessing pixels.", serde_json::json!({"type":"object","properties":{},"required":[]})),
@@ -155,6 +157,7 @@ pub async fn execute(
         "see_screen" => see_screen(args_json).await,
         "click_on" => click_on(args_json).await,
         "check_file" => check_file(args_json),
+        "check_screen" => check_screen(args_json),
         "ui_list" => ui_list(),
         "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
@@ -1130,6 +1133,29 @@ fn check_file(args: &str) -> String {
     let path = resolve_path(&a.path);
     let content = std::fs::read_to_string(&path).ok();
     file_verdict(&path, content.as_deref(), a.contains.as_deref())
+}
+
+// Pillar 1/2 verification primitive: is the expected text/control on screen now?
+// Reuses the accessibility element list (proven by ui_list) so the critic can cite
+// GUI evidence instead of trusting the model's claim.
+fn check_screen(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { contains: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    #[cfg(windows)]
+    {
+        let listing = ui_list_native();
+        if listing.starts_with("ERROR") {
+            return format!("FAIL: could not read the screen ({}).", listing.chars().take(80).collect::<String>());
+        }
+        if listing.to_lowercase().contains(&a.contains.to_lowercase()) {
+            format!("PASS: \"{}\" is visible in the focused window.", a.contains)
+        } else {
+            format!("FAIL: \"{}\" is NOT visible in the focused window right now.", a.contains)
+        }
+    }
+    #[cfg(not(windows))]
+    { format!("check_screen is Windows-only for now (wanted \"{}\").", a.contains) }
 }
 
 // Pillar 2: enumerate the focused window's interactive controls from the

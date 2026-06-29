@@ -623,6 +623,16 @@ some chunk contains BOTH A and B (proving the boundary is captured). `cargo test
 -> 21 passed. Cheap, pure, no new deps. Next scale step (heavier): an ANN/HNSW index
 to replace brute-force cosine, + memory consolidation.
 
+### 2026-06-28 - Pillar 1/2: check_screen verification primitive
+**Goal:** GUI counterpart to check_file - prove a GUI step worked (a dialog opened,
+a control appeared) with hard evidence the critic can cite, not the model's claim.
+**How:** check_screen(contains) reuses ui_list_native() and case-insensitively
+checks whether the text/control name is present in the focused window; returns
+PASS/FAIL. **Test:** the FAIL path is deterministic - check_screen for a string not
+on screen returned `FAIL: "..." is NOT visible`. The PASS path rides on ui_list,
+already proven (32 real Notepad controls). Pairs with check_file to give the critic
+both file and screen evidence.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
