@@ -692,6 +692,26 @@ safely. **Honest scope:** hot-loading new COMPILED Rust tools isn't feasible
 in-binary; scriptable shell skills are the pragmatic, real self-extension, and the
 capability-token gate keeps it safe.
 
+### 2026-06-29 - Pillar 7: routine-mining proactivity
+**Goal:** turn the second brain from a passive log into ANTICIPATION - spot the
+patterns in how you work and offer to prepare them. **How:** new proactivity.rs with
+a PURE mine_routines() (rows -> routines) that buckets window-focus history by
+(app, hour-of-day), counts distinct days, and returns the habits seen on >= N days,
+ranked. `jarvis suggest` reads the last 7 days via activity_since, mines, and prints
+your routines + suggestions (read-only v1; the trigger engine that acts on them with
+approval is the next step). Pure miner = unit-tested (recurring detected, one-offs
+and non-window rows skipped; tz/DST-robust assertions).
+**Hurdle (classic trap, re-encountered + documented):** `jarvis suggest` seemed to
+HANG. Real cause: I'd run `cargo test` (which builds the TEST binary) but not
+`cargo build`, so target/debug/jarvis.exe was STALE and didn't know the new
+`suggest` subcommand - it fell through to the interactive REPL and blocked on stdin.
+The empty piped output was the tell (block-buffered stdout never flushes if the
+process never exits). Fix: rebuild with `cargo build`, then suggest worked.
+**Result:** on real data it surfaced "Claude around 19:00 - 2 days, 40 times",
+"Google Chrome around 19:00", etc., with bundle-into-a-morning-agent suggestions.
+**Next:** a trigger engine (time/context) that proposes these for one-tap approval,
+and feeding routines into the heartbeat.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").

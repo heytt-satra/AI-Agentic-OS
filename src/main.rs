@@ -12,6 +12,7 @@ mod embeddings;
 mod mcp;
 mod memory;
 mod policy;
+mod proactivity;
 mod provider;
 mod server;
 mod tools;
@@ -252,6 +253,11 @@ async fn main() -> Result<()> {
                 }
                 _ => println!("usage: jarvis grant <capability-or-tool> <minutes>\n  e.g. jarvis grant run_shell 30"),
             }
+            return Ok(());
+        }
+        Some("suggest") => {
+            // Pillar 7: mine the activity log for routines and surface suggestions.
+            run_suggest(&mem).await;
             return Ok(());
         }
         Some("grants") => {
@@ -671,6 +677,34 @@ fn upsert_env(content: &str, key: &str, value: &str) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+// Pillar 7 - proactivity. Mine the second-brain activity log for routines and
+// surface anticipatory suggestions. Read-only in v1 (the trigger engine that acts
+// on these, with approval, is the next step).
+async fn run_suggest(mem: &MemoryHandle) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let since = now - 7 * 86_400;
+    let rows = mem.activity_since(since, None).await;
+    let routines = proactivity::mine_routines(&rows, 2, 8);
+    if routines.is_empty() {
+        println!("\nNot enough activity history yet to spot routines. Keep Jarvis running (jarvis serve + autostart) and check back in a few days.");
+        return;
+    }
+    println!("\nYour routines (last 7 days)\n===========================");
+    for r in &routines {
+        println!("  {} around {:02}:00  -  {} day(s), {} times", r.app, r.hour, r.days, r.hits);
+    }
+    let top = &routines[0];
+    println!("\nSuggestions:");
+    println!("  - You regularly use {} around {:02}:00. I can prepare it for you: create an agent for what you do there, then `jarvis grant` + schedule it so it's ready before you sit down.", top.app, top.hour);
+    if routines.len() > 1 {
+        println!("  - Bundle your {} and {} routines into one morning agent that sets them all up at once.", routines[0].app, routines[1].app);
+    }
+    println!("\n(These are observations from your own on-device activity log. Nothing was sent anywhere.)");
 }
 
 // Pillar 1 - the reliability instrument. Runs a suite of scored agent tasks
