@@ -235,6 +235,32 @@ async fn main() -> Result<()> {
             println!("Note: covers REPL, sub-agents, eval, digest. The streaming HUD path is not yet counted.");
             return Ok(());
         }
+        Some("grant") => {
+            // Capability token: pre-authorize an otherwise-gated tool/category for
+            // a time window, so Jarvis auto-approves it (on clean turns) until then.
+            let cap = std::env::args().nth(2);
+            let mins = std::env::args().nth(3).and_then(|v| v.parse::<i64>().ok());
+            match (cap, mins) {
+                (Some(c), Some(m)) => {
+                    mem.grant_add(&c, m).await;
+                    println!("Granted '{c}' for {m} minutes. Jarvis will auto-approve it on clean (non-web-tainted) turns until it expires.");
+                }
+                _ => println!("usage: jarvis grant <capability-or-tool> <minutes>\n  e.g. jarvis grant run_shell 30"),
+            }
+            return Ok(());
+        }
+        Some("grants") => {
+            let g = mem.grants_list().await;
+            if g.is_empty() {
+                println!("No active capability grants.");
+            } else {
+                println!("Active capability grants:");
+                for (c, secs) in g {
+                    println!("  {c} - {} min left", (secs / 60).max(1));
+                }
+            }
+            return Ok(());
+        }
         Some("serve") => {
             // Launch the futuristic web HUD (open the printed URL in a browser).
             activity::spawn(mem.clone()); // second-brain tracking
@@ -840,6 +866,12 @@ async fn decide_console(
             Some(true) => return ("auto-allowed".to_string(), true),
             Some(false) => return ("auto-denied".to_string(), false),
             None => {}
+        }
+        // Capability token: a time-boxed, user-authorized grant for this tool
+        // auto-approves it until it expires (only relaxes, never tightens).
+        if mem.grant_active(tool).await {
+            println!("  (granted by an active capability token)");
+            return ("granted".to_string(), true);
         }
     }
     println!("\n  \u{26a0}  Jarvis wants to: {}", risk.label);

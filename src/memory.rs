@@ -38,6 +38,10 @@ enum MemCmd {
     TaskAdd { title: String, reply: oneshot::Sender<i64> },
     TaskList { reply: oneshot::Sender<Vec<(i64, String, String)>> },
     TaskSetStatus { id: i64, status: String, reply: oneshot::Sender<bool> },
+    // Capability tokens (security).
+    GrantAdd { capability: String, expires_at: i64, reply: oneshot::Sender<()> },
+    GrantActive { capability: String, reply: oneshot::Sender<bool> },
+    GrantsList { reply: oneshot::Sender<Vec<(String, i64)>> }, // (capability, secs_remaining)
     // Token usage accounting (Pillar 8).
     AddUsage { model: String, tokens: i64 },
     UsageTotal { reply: oneshot::Sender<(i64, i64)> }, // (calls, tokens)
@@ -285,6 +289,24 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── capability tokens (security) ─────────────────────────────────────────
+    pub async fn grant_add(&self, capability: &str, minutes: i64) {
+        let expires_at = now_secs() + minutes.max(1) * 60;
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GrantAdd { capability: capability.to_string(), expires_at, reply }).await.is_err() { return; }
+        let _ = rx.await; // wait for the write so a CLI caller doesn't exit first
+    }
+    pub async fn grant_active(&self, capability: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GrantActive { capability: capability.to_string(), reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+    pub async fn grants_list(&self) -> Vec<(String, i64)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GrantsList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+
     // ── token usage accounting (Pillar 8) ───────────────────────────────────
     pub async fn add_usage(&self, model: &str, tokens: u64) {
         if tokens == 0 { return; }
@@ -437,6 +459,11 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL
+         );
+         -- Capability tokens (security): time-boxed, user-authorized grants that
+         -- auto-approve an otherwise-gated tool/category until they expire.
+         CREATE TABLE IF NOT EXISTS grants (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, capability TEXT NOT NULL, expires_at INTEGER NOT NULL
          );
          -- Token usage accounting (Pillar 8): one row per LLM call that reported usage.
          CREATE TABLE IF NOT EXISTS usage (
@@ -609,6 +636,34 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, cmd: MemCmd) {
                 .execute("UPDATE tasks SET status=?2 WHERE id=?1", params![id, status])
                 .unwrap_or(0);
             let _ = reply.send(n > 0);
+        }
+        MemCmd::GrantAdd { capability, expires_at, reply } => {
+            let _ = conn.execute(
+                "INSERT INTO grants (ts, capability, expires_at) VALUES (?1, ?2, ?3)",
+                params![now_secs(), capability, expires_at],
+            );
+            let _ = reply.send(());
+        }
+        MemCmd::GrantActive { capability, reply } => {
+            let now = now_secs();
+            let active: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM grants WHERE capability=?1 AND expires_at > ?2",
+                    params![capability, now],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            let _ = reply.send(active);
+        }
+        MemCmd::GrantsList { reply } => {
+            let now = now_secs();
+            let rows = (|| -> Result<Vec<(String, i64)>> {
+                let mut stmt = conn.prepare("SELECT capability, expires_at FROM grants WHERE expires_at > ?1 ORDER BY expires_at DESC")?;
+                let r = stmt.query_map(params![now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? - now)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
         }
         MemCmd::AddUsage { model, tokens } => {
             let _ = conn.execute(

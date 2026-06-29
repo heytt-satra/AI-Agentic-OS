@@ -656,6 +656,24 @@ verify) + a11y-first operate_app + Set-of-Marks. **Minor note:** the agent flagg
 a resolve_path quirk when check_file was given the returned absolute OneDrive path -
 cosmetic, logged for later.
 
+### 2026-06-28 - Security: capability tokens (time-boxed grants)
+**Goal:** the last security gap before safe self-healing - move from a coarse
+auto/ask gate toward fine-grained, time-boxed, USER-authorized permissions, so you
+can pre-authorize a category for a window ("let it run shell for 30 min") instead
+of approving each call. **How (additive, only RELAXES):** new `grants` table +
+grant_add/grant_active/grants_list in the actor; `jarvis grant <cap> <minutes>` and
+`jarvis grants` CLI; decide_console now checks for an active grant on the tool name
+AFTER remembered permissions and ONLY on clean (non-web-tainted) turns - it can
+auto-approve a gated tool but never tightens, and tainted (web-touched) turns still
+always re-prompt. Agents cannot self-grant (CLI/user only).
+**Hurdle (real bug, fixed):** first test - `grant run_shell 30` printed success but
+`grants` showed none. Cause: grant_add was fire-and-forget, so the CLI process
+EXITED before the actor thread committed the INSERT (same premature-exit class as
+the encryption test). Fix: grant_add now awaits a oneshot reply from the actor, so
+the write lands before the command returns. Re-test: `grant deploy 15` -> `grants`
+shows "deploy - 14 min left". Passed. Next: map tools to coarse categories (shell/
+install/spend/files) so one grant covers a group, and surface grants in `privacy`.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
