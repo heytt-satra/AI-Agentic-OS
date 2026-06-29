@@ -1274,11 +1274,27 @@ async fn operate_app(args: &str) -> String {
             Err(e) => return format!("operate stopped at step {step}: {e}\nactions: {}", history.join("; ")),
         };
         let hist = if history.is_empty() { "(none yet)".to_string() } else { history.join("; ") };
+        // a11y-first grounding: give the model the REAL element list (exact names
+        // + center coords) so it clicks listed targets instead of guessing pixels.
+        #[cfg(windows)]
+        let elements = ui_list_native();
+        #[cfg(not(windows))]
+        let elements = String::new();
+        let elem_block = if elements.trim().is_empty() || elements.starts_with("ERROR") || elements.starts_with("(no") {
+            String::new()
+        } else {
+            format!(
+                "ACCESSIBLE ELEMENTS in the focused window (exact name + center x,y). \
+                 STRONGLY PREFER clicking one of these at its listed center over guessing a pixel:\n{}\n",
+                elements.chars().take(2500).collect::<String>()
+            )
+        };
         let prompt = format!(
             "You are operating a desktop to accomplish a GOAL by choosing ONE action at a time.\n\
              The screenshot is {w}x{h} pixels, origin top-left.\n\
              GOAL: {}\n\
              ACTIONS SO FAR: {hist}\n\
+             {elem_block}\
              Reply with ONLY one JSON object, no prose, exactly one of:\n\
              {{\"action\":\"click\",\"x\":INT,\"y\":INT,\"why\":STR}}\n\
              {{\"action\":\"type\",\"text\":STR,\"why\":STR}}\n\

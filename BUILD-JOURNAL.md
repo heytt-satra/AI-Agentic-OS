@@ -562,6 +562,22 @@ is the operate-reliability problem (next), not a ui_click bug.
 **Next:** make operate_app a11y-FIRST (feed ui_list into the loop so it clicks real
 elements instead of thrashing), then Set-of-Marks.
 
+### 2026-06-28 - Pillar 2 #3: a11y-first operate_app
+**Goal:** the autonomous operate loop was pure vision (guess a pixel from the
+screenshot), which is what made it thrash. Ground it in the REAL element list.
+**How:** each operate step now also calls ui_list_native() and injects the result
+(exact element names + center x,y, capped ~2500 chars) into the vision prompt, with
+"STRONGLY PREFER clicking one of these at its listed center over guessing a pixel".
+Purely additive: the block is empty on non-Windows or on any a11y error, so the
+existing vision behavior is the fallback, never broken.
+**Verification:** compiles clean; the injected data source (ui_list) is already
+proven (32 real Notepad controls with centers). HONEST limit: a full operate E2E is
+non-deterministic in this piped test harness - launching jarvis holds terminal
+focus, and the model can still mis-orchestrate (the loop guard catches it) - so
+this ships as low-risk additive grounding, to be exercised in real interactive use.
+**Next:** Set-of-Marks (numbered overlay on the screenshot) for elements the a11y
+tree can't name (icons/canvas), then a verification primitives helper.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
