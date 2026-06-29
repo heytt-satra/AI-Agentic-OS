@@ -1981,12 +1981,18 @@ fn collect_text_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, 
 fn chunk_text(text: &str, size: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
+    // Overlap each window by ~1/8 of its size so a fact split across a boundary
+    // still appears whole in at least one chunk (better RAG recall). Step forward
+    // by size-overlap; guard step>0.
+    let overlap = (size / 8).max(1);
+    let step = size.saturating_sub(overlap).max(1);
     let mut i = 0;
     while i < chars.len() {
         let end = (i + size).min(chars.len());
         let chunk: String = chars[i..end].iter().collect();
         if chunk.trim().len() > 20 { out.push(chunk.trim().to_string()); }
-        i = end;
+        if end >= chars.len() { break; }
+        i += step;
     }
     out
 }
@@ -2091,9 +2097,12 @@ mod tests {
     }
 
     #[test]
-    fn chunking() {
-        let c = chunk_text(&"a".repeat(2000), 800);
-        assert_eq!(c.len(), 3); // 800 + 800 + 400
+    fn chunking_overlaps_boundaries() {
+        // A fact split across a chunk boundary must still appear whole somewhere.
+        let text = format!("{}{}", "A".repeat(800), "B".repeat(800)); // 1600 chars
+        let c = chunk_text(&text, 800);
+        assert!(c.len() >= 2);
+        assert!(c.iter().any(|ch| ch.contains('A') && ch.contains('B')), "no chunk straddled the boundary");
     }
 
     #[test]

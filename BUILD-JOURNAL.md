@@ -613,6 +613,16 @@ caching tool defs is a clear future cost win. **Honest gaps:** the streaming HUD
 path doesn't report usage yet (would need stream_options include_usage), so `cost`
 covers REPL/sub-agent/eval/digest, not the HUD - stated in the command output.
 
+### 2026-06-28 - Pillar 3: RAG chunk overlap
+**Problem:** chunk_text split documents into back-to-back windows with NO overlap,
+so a fact spanning a boundary was halved across two chunks and could be missed by
+semantic recall. **Fix:** each window now overlaps the previous by ~1/8 its size
+(step = size - overlap), so any boundary-spanning span appears whole in at least one
+chunk. **Test:** chunking_overlaps_boundaries builds "A"x800 + "B"x800 and asserts
+some chunk contains BOTH A and B (proving the boundary is captured). `cargo test`
+-> 21 passed. Cheap, pure, no new deps. Next scale step (heavier): an ANN/HNSW index
+to replace brute-force cosine, + memory consolidation.
+
 ### 2026-06-28 - Phase 3: scheduling engine (always-on workforce)
 **Goal:** saved agents that run on a cadence - with autostart, the leap from tool
 to always-on workforce ("every morning find leads and draft outreach").
