@@ -295,8 +295,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     --bg:#04060a; --surface:#0a0f15; --surface2:#0c131c;
     --amber:#ffb000; --amber-soft:#ffd98a; --amber-dim:#bb8c30;
     --cyan:#3ad8c4; --red:#ff5c5c;
-    --ink:#dbe3ea; --muted:#8290a0; --faint:#5b6775;
-    --line:rgba(255,176,0,.16); --line2:rgba(255,255,255,.06);
+    --ink:#dbe3ea; --muted:#93a1b1; --faint:#727f8e;
+    --line:rgba(255,176,0,.16); --line2:rgba(255,255,255,.07);
     --mono:'SF Mono','JetBrains Mono','Cascadia Code','Cascadia Mono',Consolas,ui-monospace,monospace;
   }
   *{box-sizing:border-box}
@@ -353,13 +353,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
     color:var(--amber-soft); margin-bottom:10px}
   #empty .sub{font-size:12.5px; line-height:1.85; color:var(--faint)}
   .msg{width:100%; max-width:760px; font-size:14.5px; line-height:1.62;
-    white-space:pre-wrap; word-wrap:break-word; animation:rise .4s ease-out both}
+    white-space:pre-wrap; word-wrap:break-word; padding-left:16px;
+    border-left:2px solid var(--line2); animation:rise .4s ease-out both}
   @keyframes rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
-  .msg .who{font-size:9.5px; letter-spacing:.24em; text-transform:uppercase;
-    color:var(--faint); display:block; margin-bottom:6px}
+  .msg .who{font-size:10px; letter-spacing:.22em; text-transform:uppercase;
+    color:var(--muted); display:block; margin-bottom:7px}
+  /* speaker distinction: a colored left rule per role, so the dialogue scans */
+  .user{border-left-color:rgba(219,227,234,.22)}
   .user .body{color:var(--ink)}
+  .jarvis{border-left-color:var(--amber)}
   .jarvis .who{color:var(--amber)}
   .jarvis .body{color:var(--amber-soft)}
+  .err{border-left-color:var(--red)}
   .err .who{color:var(--red)}
   .err .body{color:var(--red)}
 
