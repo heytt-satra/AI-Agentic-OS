@@ -810,3 +810,30 @@ audio, chunked ~15s to a cloud transcription API (Groq whisper-turbo) behind a
 provider-style env seam, feeding HEAR lines into the same buffer. Then Stage 3: a HUD
 toggle + inject watch context into the serve path too (Stage 1 injects on the REPL
 path). This opens Pillar 6 (perception): Jarvis now SEES continuously, not on demand.
+
+### 2026-06-30 - Pillar 6: tune the eyes (scene-change detection + HUD path)
+**Owner's call:** before building the harder audio half, sharpen Stage 1 on real
+use. Two improvements, both verified together.
+**1) Scene-change detection (the cost + responsiveness win).** The v1 loop captioned
+every 6s blindly - it paid the vision model even for a paused video or a static
+slide, and could lag a cut by up to 6s. Now the loop SAMPLES cheaply (a screenshot +
+a tiny 64x64 grayscale fingerprint) every WATCH_INTERVAL_SECS (default 3) but only
+pays for a vision caption when the frame has actually CHANGED from the last captioned
+one (mean-pixel diff >= WATCH_CHANGE_THRESHOLD, default 6.0) AND at least
+WATCH_MIN_CAPTION_SECS (default 5) have passed. Result: a static/paused screen costs
+~nothing, a slide deck captions on each slide change, and a fast-cut video is
+rate-limited to one caption per ~5s instead of an unbounded blind cadence. New
+tools::screenshot_with_fingerprint captures ONCE and returns both the PNG (for the
+model) and the fingerprint (for the diff), so there's no double capture. The diff
+core (fp_diff) is pure and unit-tested (identical->0, uniform +40->40, length
+mismatch/empty->255 "fully changed"). Sharpened the caption prompt to read subtitles/
+captions verbatim. cargo test -> 26 passed.
+**2) HUD path wired.** Stage 1 injected the live watch context only on the terminal
+REPL turn; the serve/HUD turn handler (server.rs) now injects the same
+watch::context_snapshot() before the user message, so watching works in the web HUD
+too, not just the REPL.
+**Honest note:** scene-gating is core-tested (fp_diff) and compiles clean, but its
+real feel (threshold tuning on actual video vs slides) is the owner's interactive
+validation - the defaults are conservative starting points and fully env-tunable.
+**Next:** Stage 2, the ears (WASAPI loopback -> Groq whisper), once the eyes are
+validated on a real video.

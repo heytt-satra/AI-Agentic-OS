@@ -1102,6 +1102,33 @@ pub(crate) fn screenshot_data_url() -> Result<(String, u32, u32), String> {
     Ok((url, w, h))
 }
 
+// Capture the screen ONCE and return (png_data_url, luma_fingerprint, w, h). The
+// fingerprint is a tiny 64x64 grayscale used for cheap scene-change detection in
+// the watch loop, so we only pay for a vision caption when the screen actually
+// changes (a paused video or static slide costs nothing). Sync + !Send-contained
+// like screenshot_data_url.
+pub(crate) fn screenshot_with_fingerprint() -> Result<(String, Vec<u8>, u32, u32), String> {
+    use base64::Engine as _;
+    let monitors = xcap::Monitor::all().map_err(|e| format!("ERROR: screen capture: {e}"))?;
+    let monitor = monitors.into_iter().next().ok_or("ERROR: no monitor found")?;
+    let img = monitor.capture_image().map_err(|e| format!("ERROR capturing screen: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    let dynimg = xcap::image::DynamicImage::ImageRgba8(img);
+    // tiny grayscale fingerprint for change detection
+    let fp = dynimg
+        .resize_exact(64, 64, xcap::image::imageops::FilterType::Triangle)
+        .to_luma8()
+        .into_raw();
+    // full PNG for the vision model
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    dynimg
+        .write_to(&mut cursor, xcap::image::ImageFormat::Png)
+        .map_err(|e| format!("ERROR encoding screenshot: {e}"))?;
+    let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+    Ok((url, fp, w, h))
+}
+
 // Reusable: ask a vision model a question about an image (returns text or ERROR).
 pub(crate) async fn vision_ask(data_url: &str, prompt: &str) -> String {
     let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();

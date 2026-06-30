@@ -119,6 +119,15 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                 .join("\n");
             messages.push(Message::system(format!("Possibly relevant memory:\n{ctx}")));
         }
+        // Live watch-along: hand the agent everything it is currently seeing/
+        // hearing on screen, so the user can ask about a playing video (same as
+        // the REPL path).
+        if crate::watch::is_active() {
+            let live = crate::watch::context_snapshot();
+            if !live.is_empty() {
+                messages.push(Message::system(live));
+            }
+        }
         messages.push(Message::user(&user_text));
         st.mem.log("user", &user_text).await;
 

@@ -101,10 +101,11 @@ pub fn start() -> String {
         s.notes.clear();
     }
     spawn_visual_loop();
-    let secs = env_u64("WATCH_INTERVAL_SECS", 6);
+    let secs = env_u64("WATCH_INTERVAL_SECS", 3);
     format!(
-        "Watching your screen now (a glance every {secs}s). Play the video, then ask me \
-         anything about it — what was said, what's shown, or help with a step."
+        "Watching your screen now (checking every {secs}s, captioning only when the picture \
+         changes). Play the video, then ask me anything about it — what's shown, what's on \
+         screen, or help with a step."
     )
 }
 
@@ -173,36 +174,86 @@ pub fn context_snapshot() -> String {
     )
 }
 
-// The visual sampling loop: every WATCH_INTERVAL_SECS, screenshot the screen and
-// caption it with the vision model, until watch mode is turned off. Capture is
-// done on a blocking thread because xcap's types are !Send.
+const CAPTION_PROMPT: &str =
+    "You are watching a video on the user's screen, frame by frame. In ONE or TWO short \
+     sentences describe what is happening RIGHT NOW, and read out VERBATIM any important \
+     on-screen text: titles, slide bullets, code, captions or subtitles. Be concrete and \
+     brief — this line is appended to a running log of the video. If the screen is just a \
+     static desktop or page, say so in a few words.";
+
+// Mean absolute difference between two equal-length grayscale fingerprints, in
+// 0..=255 units. Large for full-motion video / scene cuts, ~0 for a static or
+// paused screen. A mismatched/empty pair counts as "fully changed".
+fn fp_diff(a: &[u8], b: &[u8]) -> f64 {
+    if a.is_empty() || a.len() != b.len() {
+        return 255.0;
+    }
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64)
+        .sum();
+    sum as f64 / a.len() as f64
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).filter(|n: &f64| *n >= 0.0).unwrap_or(default)
+}
+
+// The visual loop: sample the screen cheaply every WATCH_INTERVAL_SECS, but only
+// pay for a vision caption when the frame has CHANGED from the last captioned one
+// (>= WATCH_CHANGE_THRESHOLD mean-pixel diff) AND at least WATCH_MIN_CAPTION_SECS
+// have passed — so a static slide/paused video costs nothing and a fast-cut video
+// is rate-limited instead of blindly captioned. Capture runs on a blocking thread
+// (xcap types are !Send). Loop exits when watch mode is turned off.
 fn spawn_visual_loop() {
     tokio::spawn(async move {
-        let secs = env_u64("WATCH_INTERVAL_SECS", 6);
+        let sample_secs = env_u64("WATCH_INTERVAL_SECS", 3);
+        let min_caption_secs = env_u64("WATCH_MIN_CAPTION_SECS", 5);
+        let threshold = env_f64("WATCH_CHANGE_THRESHOLD", 6.0);
+        let mut last_fp: Vec<u8> = Vec::new();
+        let mut last_caption_ts: u64 = 0;
+        let mut first = true;
         loop {
             if !is_active() {
                 break;
             }
-            let shot = tokio::task::spawn_blocking(crate::tools::screenshot_data_url).await;
-            if let Ok(Ok((data_url, _w, _h))) = shot {
-                let caption = crate::tools::vision_ask(
-                    &data_url,
-                    "You are watching a video on the user's screen in real time. In ONE or TWO \
-                     short sentences describe what is happening RIGHT NOW: the scene/action, and \
-                     read out any important on-screen text, titles, captions, code, or slides \
-                     verbatim. Be concrete and brief — this line is stitched into a running log. \
-                     If the screen is not a video (just a desktop or static page), say so in a \
-                     few words.",
-                )
-                .await;
-                if !caption.starts_with("ERROR") {
-                    push_see(caption);
-                } else {
-                    eprintln!("[watch] vision error: {caption}");
+            let shot = tokio::task::spawn_blocking(crate::tools::screenshot_with_fingerprint).await;
+            if let Ok(Ok((data_url, fp, _w, _h))) = shot {
+                let changed = first || fp_diff(&last_fp, &fp) >= threshold;
+                let cooled = now().saturating_sub(last_caption_ts) >= min_caption_secs;
+                if changed && cooled {
+                    let caption = crate::tools::vision_ask(&data_url, CAPTION_PROMPT).await;
+                    if !caption.starts_with("ERROR") {
+                        push_see(caption);
+                        last_fp = fp;
+                        last_caption_ts = now();
+                        first = false;
+                    } else {
+                        eprintln!("[watch] vision error: {caption}");
+                    }
                 }
             }
-            tokio::time::sleep(Duration::from_secs(secs)).await;
+            tokio::time::sleep(Duration::from_secs(sample_secs)).await;
         }
         eprintln!("[watch] visual loop stopped");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fp_diff;
+
+    #[test]
+    fn fp_diff_detects_change() {
+        let a = vec![100u8; 4096];
+        // identical frames -> no change
+        assert_eq!(fp_diff(&a, &a), 0.0);
+        // a uniformly brighter frame -> diff equals the brightness delta
+        let b = vec![140u8; 4096];
+        assert!((fp_diff(&a, &b) - 40.0).abs() < 1e-9);
+        // length mismatch or empty -> treated as fully changed
+        assert_eq!(fp_diff(&a, &[1, 2, 3]), 255.0);
+        assert_eq!(fp_diff(&[], &[]), 255.0);
+    }
 }
