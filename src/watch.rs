@@ -101,6 +101,11 @@ pub fn start() -> String {
         s.notes.clear();
     }
     spawn_visual_loop();
+    // The ears (Windows): capture + transcribe system audio into the same buffer.
+    // No-ops with a hint if no transcription key is set, so watching still works
+    // visually everywhere.
+    #[cfg(windows)]
+    crate::hearing::spawn_audio_loop();
     let secs = env_u64("WATCH_INTERVAL_SECS", 3);
     format!(
         "Watching your screen now (checking every {secs}s, captioning only when the picture \

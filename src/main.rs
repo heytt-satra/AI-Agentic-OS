@@ -18,6 +18,8 @@ mod provider;
 mod server;
 mod tools;
 mod watch;
+#[cfg(windows)]
+mod hearing;
 
 use anyhow::Result;
 use memory::MemoryHandle;
@@ -269,6 +271,30 @@ async fn main() -> Result<()> {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
             let (pruned, summaries) = mem.consolidate_activity(now - days * 86_400).await;
             println!("Consolidated activity older than {days} days: pruned {pruned} raw rows into {summaries} daily summaries. Recent activity is untouched; the DB stays lean.");
+            return Ok(());
+        }
+        Some("hear-test") => {
+            // Prove WASAPI loopback capture works (no transcription key needed):
+            // capture a few seconds of system audio and report level. Play audio
+            // first. Windows-only.
+            #[cfg(windows)]
+            {
+                let secs = std::env::args().nth(2).and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(3);
+                println!("Capturing {secs}s of system audio (make sure something is playing)...");
+                match hearing::selftest_capture(secs) {
+                    Ok((samples, rms)) => {
+                        println!("Captured {samples} samples (16kHz mono). RMS level: {rms:.1}");
+                        if rms < 30.0 {
+                            println!("That's near-silent - is audio actually playing through your speakers/default device?");
+                        } else {
+                            println!("Audio captured successfully - the ears work. Set GROQ_API_KEY to transcribe.");
+                        }
+                    }
+                    Err(e) => println!("Capture failed: {e}"),
+                }
+            }
+            #[cfg(not(windows))]
+            println!("hear-test is Windows-only (WASAPI loopback).");
             return Ok(());
         }
         Some("grants") => {

@@ -22,7 +22,7 @@ futures-util = "0.3.32"
 headless_chrome = "1.0.22"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
 pdf-extract = "0.7"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream", "multipart"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -34,8 +34,12 @@ xcap = "0.9.6"
 
 # Windows UI Automation: lets us click real UI elements by name (accessibility
 # tree) instead of guessing pixel coordinates - the key to reliable computer-use.
+# wasapi: WASAPI loopback capture of system audio (what's playing through the
+# speakers) - the "ears" for live video watch-along. Both are Windows-only and
+# gated here so macOS/Linux still build clean.
 [target.'cfg(windows)'.dependencies]
 uiautomation = "0.16"
+wasapi = "0.23"
 
 # Release builds: optimized + self-contained, but NOT max-LTO (that made builds
 # take ~7 min). "thin" LTO is ~as fast at runtime and links much quicker.

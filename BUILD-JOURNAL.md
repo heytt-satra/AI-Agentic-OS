@@ -837,3 +837,35 @@ real feel (threshold tuning on actual video vs slides) is the owner's interactiv
 validation - the defaults are conservative starting points and fully env-tunable.
 **Next:** Stage 2, the ears (WASAPI loopback -> Groq whisper), once the eyes are
 validated on a real video.
+
+### 2026-06-30 - Pillar 6: the ears - Stage 2 (WASAPI loopback -> cloud whisper)
+**Validated first:** owner ran the tuned eyes on a real YouTube video and Jarvis
+correctly described the speaker, the topic (how to make 1 Crore/yr freelancing),
+and read the title off-screen. Eyes confirmed on real video -> built the ears.
+**What shipped:** new `hearing` module (Windows-only, gated cfg(windows) like
+uiautomation + the new wasapi dep, so mac/Linux still build clean and CI needs no
+new system libs). It captures the audio playing through the speakers via WASAPI
+LOOPBACK, chunks it (~12s, HEAR_CHUNK_SECS), skips near-silent chunks, and POSTs
+each chunk to an OpenAI-compatible transcription endpoint (Groq whisper-large-v3-
+turbo by default) behind a provider-style env seam (TRANSCRIBE_API_KEY/GROQ_API_KEY,
+TRANSCRIBE_BASE_URL, TRANSCRIBE_MODEL). Transcribed text feeds watch::push_hear, so
+the SAME live buffer now carries SEE (frames) + HEAR (speech). watch_start spawns it
+on Windows; it no-ops with a hint if no key is set, so visual watching always works.
+**Getting the COM API right (the disciplined part):** I could not be sure of the
+wasapi 0.23 loopback API from web summaries, so I let the compiler + the crate's
+real source be the oracle. First check: one error - get_default_device isn't a free
+function. Read the actual crate source in the cargo cache: it's a method on
+DeviceEnumerator, and crucially initialize_client's match arm
+(Direction::Render, Direction::Capture, ShareMode::Shared) => AUDCLNT_STREAMFLAGS_
+LOOPBACK confirmed my approach is exactly correct: take the default OUTPUT device,
+open it for CAPTURE, and the crate sets the loopback flag itself. Requested 16kHz
+mono i16 with autoconvert:true so chunks go straight to whisper with no resampling.
+WAV is wrapped with a hand-written 44-byte header (no new crate, stays zero-install).
+Fixed a must_use HRESULT warning (initialize_mta returns HRESULT, not an RAII guard,
+so COM stays initialized for the thread - bound with let _ =).
+**Verifiable WITHOUT a key:** added a `jarvis hear-test [secs]` subcommand that
+captures a few seconds of loopback and prints sample count + RMS level, so capture
+itself is provable on the machine (audio playing -> RMS up) before wiring any key.
+**Honest status:** capture is machine-verifiable (hear-test); end-to-end transcription
+needs the owner's free Groq key + audio playing - that's their hands-on validation.
+multipart added to reqwest features for the upload.
