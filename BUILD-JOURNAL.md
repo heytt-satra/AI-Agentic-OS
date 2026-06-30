@@ -781,3 +781,32 @@ exists, then cleaned up. Recent activity untouched. (Re-applied the stale-binary
 lesson: ran `cargo build` before testing the new subcommand, not just `cargo test`.)
 **Pillar 3 now COMPLETE:** chunk overlap + HNSW index + consolidation. Could later
 auto-run consolidation periodically in serve; the command is the safe v1.
+
+### 2026-06-30 - Pillar 6 (perception): live video watch-along, Stage 1 (the eyes)
+**Goal (owner):** "since its an ai agentic os i want it to watch videos and hear it
+and get the whole context and help me with anything in the video." Chosen mode:
+LIVE watch-along (understand a video AS it plays on screen), cloud processing.
+**What shipped:** a new `watch` module + three tools (watch_start/watch_stop/
+watch_status). watch_start spawns a background loop that every WATCH_INTERVAL_SECS
+(default 6) screenshots the screen and captions the frame with the EXISTING vision
+seam, pushing each observation into one rolling, timestamped, bounded buffer
+(VecDeque, capped 300 notes / last 15 min). The REPL injects that buffer as a system
+message every turn while watching, so the user can just ask about the video and
+Jarvis already has the running context (SEE lines now; HEAR lines arrive in Stage 2).
+State is a single process-global (OnceLock<Mutex<..>>) so the loop, the tools, and
+the context builder share it without threading a handle through every signature.
+**Reuse, not reinvent:** captioning = the same vision_ask that powers see_screen;
+the loop is modeled on activity.rs (capture on a blocking thread - xcap is !Send).
+Made screenshot_data_url + vision_ask pub(crate).
+**Safety:** per policy.rs posture (only gate OS-damage/data-loss), continuous screen
+capture runs without a prompt, same class as see_screen, and the user invokes it
+explicitly. JARVIS_OFFLINE still hard-blocks it (vision is a network tool).
+**Test:** built release; piped REPL ran status(off) -> start -> status -> stop.
+status after start returned "Watching for 0m10s - 1 things seen, 0 things heard" -
+the loop had already captured AND captioned one REAL screen frame via the vision
+model on its first immediate tick, proving the eyes work end-to-end, not just the
+wiring. **Next (Stage 2 - the ears):** Windows WASAPI loopback capture of system
+audio, chunked ~15s to a cloud transcription API (Groq whisper-turbo) behind a
+provider-style env seam, feeding HEAR lines into the same buffer. Then Stage 3: a HUD
+toggle + inject watch context into the serve path too (Stage 1 injects on the REPL
+path). This opens Pillar 6 (perception): Jarvis now SEES continuously, not on demand.

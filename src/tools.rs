@@ -47,6 +47,9 @@ pub fn definitions() -> Vec<Tool> {
         f("ui_marks", "Set-of-Marks: screenshot the screen with a numbered green box drawn on every interactive element, save the annotated image, and return a numbered legend (number -> name -> center). Use when you must visually identify what to click (icons, ambiguous controls) - read the saved image, pick a number, then click that element's center with click_on, or click it by name with ui_click.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("ui_click", "Click a UI element by its visible NAME using the OS accessibility tree (Windows). FAR more reliable than click_on because it targets the real control, not a guessed pixel. Use this FIRST for buttons, links, menu items, tabs, checkboxes that have a text label. Fall back to click_on only for elements with no accessible name (icons, canvas).", str_prop("label", "the visible text/name of the element")),
         f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks prefer ui_click, then click_on.", str_prop("goal", "what to accomplish on screen, in plain words")),
+        f("watch_start", "Start WATCHING a video the user is playing on screen: Jarvis samples the screen every few seconds, captions each frame, and keeps a running log of what is happening. Use this when the user says to watch/follow along with a video, lecture, tutorial, or anything playing on screen. After this, the user can just ask about the video and you will have the live context. Runs in the background until watch_stop.", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("watch_stop", "Stop watching the screen (ends the background watch loop started by watch_start).", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("watch_status", "Report whether Jarvis is currently watching the screen and how much it has seen/heard so far.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
         f("browse_js", "Open a URL in a headless browser and run a JavaScript snippet on the page (click, fill forms, extract data). Requires approval. Return value is sent back.",
           serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"script":{"type":"string","description":"JS to evaluate, e.g. document.querySelector('#x').click()"}},"required":["url","script"]})),
@@ -173,6 +176,9 @@ pub async fn execute(
         "ui_marks" => ui_marks(),
         "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
+        "watch_start" => crate::watch::start(),
+        "watch_stop" => crate::watch::stop(),
+        "watch_status" => crate::watch::status(),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1080,7 +1086,7 @@ struct VisionArg { question: String }
 // Sync helper: capture + encode the screen to a base64 data URL. ALL the
 // non-Send types (Monitor, image) live and die here, so the async caller's
 // future stays Send (required by spawned tasks).
-fn screenshot_data_url() -> Result<(String, u32, u32), String> {
+pub(crate) fn screenshot_data_url() -> Result<(String, u32, u32), String> {
     use base64::Engine as _;
     let monitors = xcap::Monitor::all().map_err(|e| format!("ERROR: screen capture: {e}"))?;
     let monitor = monitors.into_iter().next().ok_or("ERROR: no monitor found")?;
@@ -1097,7 +1103,7 @@ fn screenshot_data_url() -> Result<(String, u32, u32), String> {
 }
 
 // Reusable: ask a vision model a question about an image (returns text or ERROR).
-async fn vision_ask(data_url: &str, prompt: &str) -> String {
+pub(crate) async fn vision_ask(data_url: &str, prompt: &str) -> String {
     let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
     if key.is_empty() {
         return "ERROR: OPENROUTER_API_KEY not set".into();

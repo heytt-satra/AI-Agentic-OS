@@ -17,6 +17,7 @@ mod proactivity;
 mod provider;
 mod server;
 mod tools;
+mod watch;
 
 use anyhow::Result;
 use memory::MemoryHandle;
@@ -366,6 +367,15 @@ async fn main() -> Result<()> {
                 .join("\n");
             messages.push(Message::system(format!("Possibly relevant memory:\n{ctx}")));
             tracing::info!(hits = relevant.len(), "relevance recall");
+        }
+
+        // Live watch-along: if Jarvis is currently watching a video on screen,
+        // hand it everything seen/heard so far so the user can ask naturally.
+        if watch::is_active() {
+            let live = watch::context_snapshot();
+            if !live.is_empty() {
+                messages.push(Message::system(live));
+            }
         }
 
         messages.push(Message::user(input));
