@@ -869,3 +869,20 @@ itself is provable on the machine (audio playing -> RMS up) before wiring any ke
 **Honest status:** capture is machine-verifiable (hear-test); end-to-end transcription
 needs the owner's free Groq key + audio playing - that's their hands-on validation.
 multipart added to reqwest features for the upload.
+
+### 2026-06-30 - Pillar 6: the ears VERIFIED end-to-end (eyes + ears both live)
+Owner provided a Groq key. Verified the whole pipeline on-device in three layers:
+(1) Capture: `hear-test` while a system sound played -> 64129 samples @16kHz, RMS 4048
+(loopback grabs real audio). (2) Transcription seam in isolation: Windows TTS spoke
+"the arc reactor is online and the freelancer earns one crore per year" to a WAV;
+curl to the SAME Groq endpoint/model/response_format the module uses returned that
+sentence verbatim (key + endpoint + model + text format all correct). (3) Full
+integration in the real binary: with watch mode on and a spoken paragraph playing
+through the speakers, watch_status reported "1 things seen, 1 things heard" - the
+audio loop captured, WAV-wrapped, transcribed via Groq, and push_hear landed a HEAR
+line in the live buffer, all in-process. Eyes (Stage 1+tune) and ears (Stage 2) are
+now both validated on real input. Pillar 6 (perception) is live: Jarvis sees AND
+hears a playing video and answers from the fused SEE/HEAR timeline. (.env holds the
+key, gitignored; owner advised to rotate it since it was shared in plain chat.)
+**Next depth (not foundations):** speaker-aware HEAR lines, an explicit HUD watch
+toggle/button, and per-window/region capture instead of full screen.
