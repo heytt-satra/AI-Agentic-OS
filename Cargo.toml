@@ -41,6 +41,9 @@ xcap = "0.9.6"
 [target.'cfg(windows)'.dependencies]
 uiautomation = "0.16"
 wasapi = "0.23"
+# global summon hotkey (RegisterHotKey + message loop); version matches the copy
+# already pulled in transitively so we don't add a second `windows` build.
+windows = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 # Release builds: optimized + self-contained, but NOT max-LTO (that made builds
 # take ~7 min). "thin" LTO is ~as fast at runtime and links much quicker.

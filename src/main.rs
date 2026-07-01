@@ -21,6 +21,8 @@ mod tools;
 mod watch;
 #[cfg(windows)]
 mod hearing;
+#[cfg(windows)]
+mod hotkey;
 
 use anyhow::Result;
 use memory::MemoryHandle;

@@ -964,3 +964,22 @@ showed (Default) REG_SZ `"...\jarvis.exe" ask "%1"`; `jarvis integrate off` -> k
 (clean removal). Reversible and admin-free, as designed.
 **Next shell-hook piece (deferred to its own commit):** a global hotkey to summon Jarvis
 from anywhere (needs a Win32 RegisterHotKey + message-loop thread; harder to auto-verify).
+
+### 2026-06-30 - Deep OS integration, rung 2 (cont.): global summon hotkey
+**What shipped:** new `hotkey` module - a system-wide Ctrl+Alt+J that opens/focuses the
+HUD from ANY app, so Jarvis is summonable without hunting for the window. Windows-only.
+Added the `windows` crate as a DIRECT dep pinned to 0.59 (the exact version already
+pulled transitively by wasapi, so no second `windows` build - release relink was fast).
+Read the real signatures from the crate source first: RegisterHotKey(hwnd: Option<HWND>,
+...) and GetMessageW(..., hwnd: Option<HWND>, ...), so pass None for the null window.
+RegisterHotKey with a null window posts WM_HOTKEY to the REGISTERING thread's queue, so
+registration + the GetMessage loop live together on one dedicated std::thread; on
+WM_HOTKEY it launches `cmd /C start "" <hud-url>` (same open mechanism as open_browser).
+Spawned from server::serve after bind. Off via JARVIS_HOTKEY=off; degrades gracefully
+with a log line if the combo is already taken.
+**Verified:** serve start logged "[hotkey] press Ctrl+Alt+J anywhere to summon Jarvis"
+(RegisterHotKey succeeded, no conflict) alongside "[fswatch] watching 4 folder(s)". The
+keypress -> HUD-opens is the owner's hands-on test (simulating a global hotkey headlessly
+is not trustworthy). **Rung 2 (shell hooks) now COMPLETE:** right-click "Ask Jarvis" +
+global summon hotkey. Deep-integration track: rung 1 (fs awareness) + rung 2 (shell hooks)
+done; rung 3 (privileged background presence) remains, with the session-0/GUI caveat.

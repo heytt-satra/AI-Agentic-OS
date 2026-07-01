@@ -47,6 +47,9 @@ pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let url = format!("http://{addr}");
     println!("\n  Jarvis HUD online -> {url}\n  (opening your browser; Ctrl-C to stop)\n");
+    // Global summon hotkey (Ctrl+Alt+J) opens/focuses the HUD from anywhere.
+    #[cfg(windows)]
+    crate::hotkey::spawn(url.clone());
     open_browser(&url);
     axum::serve(listener, app).await?;
     Ok(())

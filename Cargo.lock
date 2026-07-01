@@ -2515,6 +2515,7 @@ dependencies = [
  "tracing-subscriber",
  "uiautomation",
  "wasapi",
+ "windows 0.59.0",
  "xcap",
 ]
 
