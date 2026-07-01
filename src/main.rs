@@ -10,6 +10,7 @@ mod coder;
 mod crypto;
 mod dataset;
 mod embeddings;
+mod fswatch;
 mod mcp;
 mod memory;
 mod policy;
@@ -312,6 +313,7 @@ async fn main() -> Result<()> {
         Some("serve") => {
             // Launch the futuristic web HUD (open the printed URL in a browser).
             activity::spawn(mem.clone()); // second-brain tracking
+            fswatch::spawn(mem.clone()); // OS-level filesystem awareness
             server::serve(provider, mem).await?;
             return Ok(());
         }
@@ -342,6 +344,7 @@ async fn main() -> Result<()> {
 
     // Second-brain: track what you're doing in the background.
     activity::spawn(mem.clone());
+    fswatch::spawn(mem.clone()); // OS-level filesystem awareness
 
     println!("Jarvis online ({}).", provider.model());
     println!(

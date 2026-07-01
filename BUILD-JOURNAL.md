@@ -916,3 +916,30 @@ everything, watch_start (no args) -> status "Watching the auto-detected playing 
 Freelancer? | The Ultimate Blueprint for Freelancing". It picked the right window across
 the clutter and captured it while occluded. (0 heard because the video was paused; the
 title signal carried it - audio signal kicks in when it's actually playing.)
+
+### 2026-06-30 - Deep OS integration, rung 1: filesystem awareness (event-level)
+**Context:** owner wants to move from "puppeteering" (clicking Explorer like a human)
+toward being baked into the OS. Held the line on the trap rung - a kernel minifilter
+driver (signed driver, BSOD risk, kills zero-install) is off the table and not worth
+it. The right first rung is consuming real OS filesystem EVENTS, not screenshots.
+**What shipped:** new `fswatch` module using the `notify` crate (ReadDirectoryChangesW
+on Windows, inotify on Linux, FSEvents on macOS - cross-platform with NO new CI system
+libs; notify's Linux backend is pure inotify). It watches Desktop, Downloads, Documents,
+and the cwd recursively; on create/modify/delete it logs a "file" activity row (verb +
+path) into the SAME encrypted second-brain log as window/clipboard history. Dedup (same
+verb+path within 3s, since editors fire many events per save) + a noise filter (skips
+AppData/.git/node_modules/target/temp/$Recycle.Bin/our own db+key). Off with
+JARVIS_FSWATCH=off; folders overridable via JARVIS_FSWATCH_DIRS. Spawned in both serve
+and REPL alongside activity::spawn; events bridge to the async memory actor via a tokio
+Handle::block_on from notify's std thread (same pattern as the audio loop).
+**Why this rung, not puppeteering:** it's an event CONSUMER at the OS level - the OS
+pushes changes to Jarvis - and it's the substrate the future sensing/proactive layer
+needs (real disk signal, continuously). Fits the existing activity-watcher architecture.
+**Verified live:** started serve ("[fswatch] watching 4 folder(s)"), created+modified a
+probe file on the Desktop, and the activity table's kind='file' rows went 0 -> 2 (create
++ modify) - the OS event reached the encrypted store end to end. Now "what files did I
+change in the last hour?" has a real answer, watched continuously.
+**Next rungs (deferred):** shell hooks (global hotkey to summon Jarvis + a registry-based
+"Ask Jarvis" right-click entry, no COM DLL), then a privileged background presence (honest
+caveat: a session-0 Windows Service can't drive the GUI, so it would fight the computer-use
+features - keep the user-session model and add OS-event integration).
