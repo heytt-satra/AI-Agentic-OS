@@ -387,7 +387,19 @@ pub async fn execute(
     // operations on the real system), with their observed outcome + success, so
     // Jarvis learns what actually causes what on THIS machine and can predict.
     if is_intervention(name) {
-        let success = !(out.starts_with("ERROR") || out.starts_with("BLOCKED") || out.starts_with("(error"));
+        let mut success = !(out.starts_with("ERROR") || out.starts_with("BLOCKED") || out.starts_with("(error"));
+        // Sharpen: for shell/code, a NON-ZERO exit code is a real failure even
+        // though the tool itself ran fine (the command didn't). This makes the
+        // causal model reflect what actually happened, not just that we ran it.
+        if success && matches!(name, "run_shell" | "code_exec") {
+            if let Some(rest) = out.split("exit code:").nth(1) {
+                if let Some(code) = rest.trim().split_whitespace().next() {
+                    if code.parse::<i32>().map(|c| c != 0).unwrap_or(false) {
+                        success = false;
+                    }
+                }
+            }
+        }
         mem.causal_log(name, args_json, "", &out, success).await;
     }
     // Safety (gap 7): if this tool brought in untrusted outside content, flag any

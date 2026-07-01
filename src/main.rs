@@ -213,7 +213,8 @@ fn integrate_shell(off: bool) {
     let _ = run(&["add", key, "/v", "Icon", "/t", "REG_SZ", "/d", exe.as_str(), "/f"]);
     let ok_cmd = run(&["add", cmdkey, "/ve", "/t", "REG_SZ", "/d", value.as_str(), "/f"]);
     if ok_label && ok_cmd {
-        println!("Installed. Right-click any file -> 'Ask Jarvis about this file'. Remove it anytime with `jarvis integrate off`.");
+        println!("Installed. Right-click any file -> 'Ask Jarvis about this file'.");
+        println!("On Windows 11 the classic menu is hidden: right-click -> 'Show more options' (or press Shift+F10) to see it. Remove anytime with `jarvis integrate off`.");
     } else {
         println!("Install may have failed (is reg.exe available?). Nothing system-wide was changed.");
     }

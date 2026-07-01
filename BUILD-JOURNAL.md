@@ -1197,3 +1197,19 @@ drivable by talking - no terminal needed.
 learning + (no goals/causal yet); "reflect on our conversation now" -> agent ran self_reflect.
 Natural language -> the right introspection tool. Watch prompt changes ship (accuracy is felt on
 a real video with a good vision model; can't unit-test model faithfulness).
+
+### 2026-06-30 - Fixes from live HUD testing (causal accuracy + Win11 menu)
+**Owner tested in the HUD and surfaced two real things.** (1) CAUSAL success was COARSE: a
+run_shell that returned a non-zero exit code (e.g. a `cd ... &&` path-with-space error, or
+`cmd /c exit 7`) was logged as SUCCESS because the flag only checked the TOOL ran, not the
+COMMAND. The answering model actually read the outcome text and called it a failure correctly,
+but `jarvis causal`/predict_outcome disagreed. Fix: for run_shell/code_exec, parse the exit
+code from the outcome ("exit code: N") - non-zero => failure. Verified: echo (exit 0) = ok,
+`cmd /c exit 7` = FAIL, run_shell now 1/2 (50%). Cleared the old mis-flagged rows so it rebuilds
+accurately. (This is the "sharpen success" refinement deferred in causal commit 2, now done
+because real testing made it matter.) (2) The "Ask Jarvis" right-click entry IS installed (HKCU
+key confirmed) but Windows 11 hides classic shell verbs under "Show more options"/Shift+F10 -
+not a bug; putting it in the Win11 top-level menu needs a packaged IExplorerCommand COM handler
+(MSIX), which breaks zero-install. Updated the integrate message to tell the user where to find it.
+**Lesson reinforced:** ship, then let real use sharpen it - the exit-code fix and the Win11 menu
+gotcha only showed up under actual HUD dogfooding, exactly as intended.
