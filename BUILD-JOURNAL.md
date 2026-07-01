@@ -1175,3 +1175,25 @@ governance (AIOS6), which needs a LOCAL model, so it rides on the local-model tr
 **AGI-list #2 (causal reasoning) now addressed the only honest way it can be:** not by
 claiming the LLM understands causation, but by giving Jarvis a real, self-built causal model
 of its own actions' effects. 7 of 7 AGI-list items now closed or genuinely underway.
+
+### 2026-06-30 - Operate-from-HUD + watch accuracy (owner feedback)
+**Owner feedback:** (1) watch-along answers weren't accurate enough - on-screen text misread
+(e.g. "Lensr" -> "Lenser") and spoken content came back DRAMATIZED rather than quoted; (2) wants
+to operate/test EVERYTHING from the HUD by talking, not terminal subcommands.
+**Accuracy fixes (prompts, cheap + real):** CAPTION_PROMPT now demands EXACT character-for-
+character transcription of on-screen text (never fix/guess names/numbers), describe only what's
+literally visible, and mark unreadable text '(text unclear)' instead of inventing. The LIVE WATCH
+context preamble now enforces: answer ONLY from the log, quote HEAR lines close to VERBATIM, no
+paraphrasing/embellishing/backstory, admit "I only caught part of that" when unclear. (Also told
+owner the real OCR lever is OPENROUTER_VISION_MODEL - default gpt-4o-mini misreads small text;
+set a stronger vision model for sharp reading.)
+**HUD-operable:** refactored run_reflect/run_proact/run_pursue to RETURN a summary string (CLI
+arms now print it; heartbeat still calls them). Exposed the previously CLI-only capabilities as
+TOOLS so they work by plain language in the HUD: self_report (inner state: learnings + goals +
+causal record + pending nudges), self_reflect, proact_check, pursue_goal. Together with the
+already-tool'd learn/goal_update/predict_outcome/watch_*/recall_activity, the whole system is now
+drivable by talking - no terminal needed.
+**Verified:** "show me everything you know" -> agent called self_report and listed the Lensr
+learning + (no goals/causal yet); "reflect on our conversation now" -> agent ran self_reflect.
+Natural language -> the right introspection tool. Watch prompt changes ship (accuracy is felt on
+a real video with a good vision model; can't unit-test model faithfulness).

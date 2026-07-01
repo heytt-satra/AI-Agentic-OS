@@ -77,6 +77,10 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer","description":"the #id of the hypothesis/goal"},"status":{"type":"string","description":"confirmed | done | dropped"},"note":{"type":"string"}},"required":["id","status"]})),
         f("predict_outcome", "BEFORE a consequential or risky action (running a command, deleting or overwriting, installing, an irreversible click), check what this action actually CAUSED the last times you did it on THIS machine. Returns the real past outcomes + success rate so you can predict and adapt instead of guessing. Pass the tool name (e.g. 'run_shell') and optionally 'like' (a key part of the argument, e.g. the command) to match similar past actions. Use this whenever you are unsure or the action is hard to undo.",
           serde_json::json!({"type":"object","properties":{"tool":{"type":"string","description":"the tool you are about to use, e.g. run_shell"},"like":{"type":"string","description":"optional: key part of the argument to match similar past actions, e.g. the command"}},"required":["tool"]})),
+        f("self_report", "Report your current INNER STATE to the user: what you've learned about them, your own hypotheses and goals, your causal track record (what your actions cause on this machine), and any pending nudges. Use when the user asks 'what do you know about me', 'what have you learned', 'what are you thinking', 'what are your goals', 'what have you learned your actions cause', or wants to inspect your mind.", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("self_reflect", "Reflect NOW on the recent conversation and activity: distill durable learnings about the user and form your own hypotheses/goals. Use when the user asks you to 'reflect', 'learn from this', or 'think about what you've learned'. Returns a short summary of what you learned/formed.", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("proact_check", "Proactively check NOW whether there is anything useful to raise, from recent activity + what you know. Use when the user asks 'anything I should know', 'check on things', or 'be proactive'. Returns what you decided.", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("pursue_goal", "Advance one of your own open hypotheses/goals now (raise it). Use when the user says 'pursue your goals', 'what are you curious about', or 'test one of your hunches'.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("recall_activity", "The user's SECOND BRAIN: a detailed timeline of EVERYTHING they did on the computer (every app they focused, every window title, things they copied), with clock times and per-app time totals. ALWAYS use this for 'what did I do', 'what was I working on', 'what apps did I use', 'how long in X', or any question about a past time window. Set 'minutes' to the look-back window (e.g. 60 for the last hour, 480 for the workday). Optional 'query' filters by app or keyword. Report what it returns in detail; do NOT summarize from the chat.",
           serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"how far back to look, in minutes (default 180)"},"query":{"type":"string","description":"optional app/keyword filter"}},"required":[]})),
 
@@ -193,6 +197,10 @@ pub async fn execute(
                 Err(e) => format!("ERROR: bad args: {e}"),
             }
         }
+        "self_report" => self_report(mem).await,
+        "self_reflect" => crate::run_reflect(provider, mem).await,
+        "proact_check" => crate::run_proact(provider, mem).await,
+        "pursue_goal" => crate::run_pursue(mem).await,
         "read_file" => read_file(args_json),
         "write_file" => write_file(args_json),
         "list_dir" => list_dir(args_json),
@@ -385,6 +393,48 @@ pub async fn execute(
     // Safety (gap 7): if this tool brought in untrusted outside content, flag any
     // embedded instructions so the model treats the result as DATA, not commands.
     guard_untrusted(name, out)
+}
+
+// Jarvis's inner state, so the user can inspect everything from the HUD by asking:
+// what it has learned, its own goals/hypotheses, its causal track record, pending nudges.
+async fn self_report(mem: &crate::memory::MemoryHandle) -> String {
+    let mut s = String::new();
+    let learns = mem.top_learnings(12).await;
+    s.push_str("WHAT I'VE LEARNED ABOUT YOU:\n");
+    if learns.is_empty() {
+        s.push_str("  (nothing yet - I learn as we work)\n");
+    } else {
+        for (k, t, c) in &learns {
+            s.push_str(&format!("  - [{k}] {t} (confidence {c:.2})\n"));
+        }
+    }
+    let goals = mem.goals_list().await;
+    s.push_str("\nMY OWN HYPOTHESES & GOALS:\n");
+    if goals.is_empty() {
+        s.push_str("  (none yet)\n");
+    } else {
+        for (id, k, t, st) in goals.iter().take(10) {
+            s.push_str(&format!("  #{id} [{k}/{st}] {t}\n"));
+        }
+    }
+    let cstats = mem.causal_stats().await;
+    s.push_str("\nCAUSAL TRACK RECORD (what my actions cause on this machine):\n");
+    if cstats.is_empty() {
+        s.push_str("  (no interventions recorded yet)\n");
+    } else {
+        for (tool, total, succ) in cstats.iter().take(12) {
+            let rate = if *total > 0 { 100 * succ / total } else { 0 };
+            s.push_str(&format!("  {tool}: {succ}/{total} succeeded ({rate}%)\n"));
+        }
+    }
+    let pending: Vec<_> = mem.nudges_list().await.into_iter().filter(|(_, _, shown)| !*shown).collect();
+    if !pending.is_empty() {
+        s.push_str("\nPENDING NUDGES:\n");
+        for (_, t, _) in pending.iter().take(5) {
+            s.push_str(&format!("  - {t}\n"));
+        }
+    }
+    s
 }
 
 // Causal look-ahead: what did this action CAUSE the last times we did it? Queries

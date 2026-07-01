@@ -410,18 +410,18 @@ async fn main() -> Result<()> {
         Some("reflect") => {
             // Continuous-learning spine, Stage 2: distill durable learnings from
             // recent conversation + activity, on demand (also runs on the heartbeat).
-            run_reflect(&provider, &mem).await;
+            println!("[reflect] {}", run_reflect(&provider, &mem).await);
             return Ok(());
         }
         Some("proact") => {
             // Proactive sensing loop: look at recent activity + learnings and queue
             // a nudge if something is worth raising (also runs while serving).
-            run_proact(&provider, &mem).await;
+            println!("[proact] {}", run_proact(&provider, &mem).await);
             return Ok(());
         }
         Some("pursue") => {
             // Self-direction: advance one open hypothesis/goal (also runs on the heartbeat).
-            run_pursue(&mem).await;
+            println!("[pursue] {}", run_pursue(&mem).await);
             return Ok(());
         }
         Some("causal") => {
@@ -1379,7 +1379,7 @@ async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
 // or `jarvis reflect`), review recent conversation + activity and distill NEW
 // durable learnings without being told, then decay stale beliefs. This is the
 // "learn from experience between conversations" mechanism.
-async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
+pub(crate) async fn run_reflect(provider: &Provider, mem: &MemoryHandle) -> String {
     let dialog = mem.recent_dialog(24).await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1387,8 +1387,7 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
         .unwrap_or(0);
     let activity = mem.activity_since(now - 3600, None).await;
     if dialog.is_empty() && activity.is_empty() {
-        println!("[reflect] nothing recent to reflect on yet.");
-        return;
+        return "Nothing recent to reflect on yet.".to_string();
     }
     let dialog_txt = dialog
         .iter()
@@ -1429,8 +1428,7 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
     let text = match provider.chat(&messages, None).await {
         Ok(r) => r.message.content.unwrap_or_default(),
         Err(e) => {
-            eprintln!("[reflect] model error: {e}");
-            return;
+            return format!("Reflection failed: {e}");
         }
     };
     // Pull the JSON object out of any prose/fences the model may have added.
@@ -1480,18 +1478,17 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
         }
     }
     let pruned = mem.decay_learnings(14 * 86_400, 0.15).await;
-    println!("[reflect] distilled {n} new learning(s), formed {g} hypothesis/goal(s); pruned {pruned} stale.");
+    format!("Reflected: distilled {n} new learning(s), formed {g} hypothesis/goal(s), pruned {pruned} stale.")
 }
 
 // Self-direction: advance ONE open hypothesis/goal by raising it with the user (as
 // a proactive nudge) and marking it 'testing'. Runs on the heartbeat and via
 // `jarvis pursue`. This is curiosity in action - Jarvis tests what it suspects and
 // pursues what it decided would help, instead of only reacting.
-pub(crate) async fn run_pursue(mem: &MemoryHandle) {
+pub(crate) async fn run_pursue(mem: &MemoryHandle) -> String {
     let open = mem.goals_open(1).await;
     let Some((id, kind, text)) = open.into_iter().next() else {
-        println!("[pursue] no open hypotheses or goals.");
-        return;
+        return "No open hypotheses or goals to pursue right now.".to_string();
     };
     let nudge = if kind == "hypothesis" {
         format!("I've been wondering about something: {text} Is that right?")
@@ -1500,7 +1497,7 @@ pub(crate) async fn run_pursue(mem: &MemoryHandle) {
     };
     mem.nudge_add(&nudge).await;
     mem.goal_set_status(id, "testing", "raised with the user").await;
-    println!("[pursue] raising {kind} #{id}: {text}");
+    format!("Pursuing {kind} #{id}: {text}")
 }
 
 // Proactive sensing loop: look at what the user is doing right now (recent activity
@@ -1508,15 +1505,14 @@ pub(crate) async fn run_pursue(mem: &MemoryHandle) {
 // - very conservatively - whether there's ONE useful thing to raise. If so, queue a
 // nudge that surfaces in the next session. It PROPOSES; it never auto-acts on
 // anything risky (the approval gate still governs any action the user then asks for).
-pub(crate) async fn run_proact(provider: &Provider, mem: &MemoryHandle) {
+pub(crate) async fn run_proact(provider: &Provider, mem: &MemoryHandle) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let activity = mem.activity_since(now - 1800, None).await; // last 30 min
     if activity.is_empty() {
-        println!("[proact] no recent activity to act on.");
-        return;
+        return "No recent activity to act on.".to_string();
     }
     let act_txt = activity
         .iter()
@@ -1545,21 +1541,19 @@ pub(crate) async fn run_proact(provider: &Provider, mem: &MemoryHandle) {
     let text = match provider.chat(&messages, None).await {
         Ok(r) => r.message.content.unwrap_or_default(),
         Err(e) => {
-            eprintln!("[proact] model error: {e}");
-            return;
+            return format!("Proactive check failed: {e}");
         }
     };
     let t = text.trim().trim_matches('"').trim();
     let up = t.to_uppercase();
     if t.len() < 8 || up == "NOTHING" || up.starts_with("NOTHING") {
-        println!("[proact] nothing worth raising right now.");
-        return;
+        return "Nothing worth raising right now.".to_string();
     }
     let t = plainify(t);
     if mem.nudge_add(&t).await {
-        println!("[proact] nudge queued: {t}");
+        format!("Queued a proactive nudge: {t}")
     } else {
-        println!("[proact] (already queued) {t}");
+        format!("(Already queued) {t}")
     }
 }
 

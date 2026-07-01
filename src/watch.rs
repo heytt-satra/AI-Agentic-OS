@@ -186,21 +186,25 @@ pub fn context_snapshot() -> String {
             .into();
     }
     format!(
-        "LIVE WATCH CONTEXT — this is what you are CURRENTLY seeing (SEE) and hearing (HEAR) on \
-         the user's screen as a video plays, oldest first, newest last. Timestamps are mm:ss \
-         since watching began. Answer the user's questions about the video from THIS log. If \
-         they ask about something not in the log yet, say it hasn't appeared on screen yet \
-         rather than guessing.\n{}",
+        "LIVE WATCH CONTEXT — what you are CURRENTLY seeing (SEE) and hearing (HEAR) on the \
+         user's screen as a video plays, oldest first, newest last (mm:ss since watching began). \
+         ACCURACY RULES: answer ONLY from this log. Quote the HEAR (spoken) lines close to \
+         VERBATIM - do NOT paraphrase dramatically, embellish, add backstory, or invent any \
+         detail. Preserve names/numbers/spellings exactly as logged. If the log is unclear, \
+         partial, or does not contain the answer, say so plainly instead of guessing or \
+         filling gaps. Better to say 'I only caught part of that' than to make it up.\n{}",
         lines.join("\n")
     )
 }
 
 const CAPTION_PROMPT: &str =
-    "You are watching a video on the user's screen, frame by frame. In ONE or TWO short \
-     sentences describe what is happening RIGHT NOW, and read out VERBATIM any important \
-     on-screen text: titles, slide bullets, code, captions or subtitles. Be concrete and \
-     brief — this line is appended to a running log of the video. If the screen is just a \
-     static desktop or page, say so in a few words.";
+    "You are watching a video on the user's screen, frame by frame, to build an ACCURATE log. \
+     Rules: (1) Transcribe any on-screen text EXACTLY as written, character for character - do \
+     NOT fix, guess, or normalise spellings, names, or numbers (e.g. write 'Lensr' if that is \
+     what it says, never 'Lenser'). (2) Describe ONLY what is literally visible right now - no \
+     interpretation, no backstory, no guessing what it means. (3) If text is too small or blurry \
+     to read with confidence, say '(text unclear)' rather than inventing it. Keep it to one or \
+     two short factual lines. If the screen is a static desktop or page, say so briefly.";
 
 // Mean absolute difference between two equal-length grayscale fingerprints, in
 // 0..=255 units. Large for full-motion video / scene cuts, ~0 for a static or
