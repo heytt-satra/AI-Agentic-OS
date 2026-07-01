@@ -73,6 +73,8 @@ pub fn definitions() -> Vec<Tool> {
         f("search_docs", "Semantically search the files you have ingested with ingest_path and return the most relevant chunks with their source. Use to answer questions from the user's own documents/code.", str_prop("query", "what to look for")),
         f("learn", "Save a DURABLE thing you have learned about the user or their work, so you REMEMBER it in future sessions (not just this chat). Call this whenever the user states a lasting preference, fact, or correction, or when you notice a stable pattern - e.g. 'prefers concise answers', 'their company is Lensr', 'dislikes em dashes', 'deploys on Fridays'. Write ONE clear sentence. Do NOT save one-off or transient details. If it is similar to something already learned, it is reinforced automatically.",
           serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"the durable learning, one clear sentence"},"kind":{"type":"string","description":"preference | fact | heuristic (default fact)"}},"required":["text"]})),
+        f("goal_update", "Resolve one of YOUR OWN hypotheses/goals (the ones shown to you under 'Your OWN current hypotheses/goals') once the user responds to it. status: 'confirmed' if the user agreed a hypothesis is true (ALSO call learn to remember the confirmed fact), 'done' if you completed a goal, or 'dropped' if the user said no or it is not useful.",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer","description":"the #id of the hypothesis/goal"},"status":{"type":"string","description":"confirmed | done | dropped"},"note":{"type":"string"}},"required":["id","status"]})),
         f("recall_activity", "The user's SECOND BRAIN: a detailed timeline of EVERYTHING they did on the computer (every app they focused, every window title, things they copied), with clock times and per-app time totals. ALWAYS use this for 'what did I do', 'what was I working on', 'what apps did I use', 'how long in X', or any question about a past time window. Set 'minutes' to the look-back window (e.g. 60 for the last hour, 480 for the workday). Optional 'query' filters by app or keyword. Report what it returns in detail; do NOT summarize from the chat.",
           serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"how far back to look, in minutes (default 180)"},"query":{"type":"string","description":"optional app/keyword filter"}},"required":[]})),
 
@@ -166,6 +168,17 @@ pub async fn execute(
                     let kind = a.kind.unwrap_or_else(|| "fact".into());
                     let r = mem.learn(&a.text, &kind, "agent").await;
                     format!("Learned ({r}): {}", a.text)
+                }
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "goal_update" => {
+            #[derive(Deserialize)]
+            struct GoalArg { id: i64, status: String, note: Option<String> }
+            match serde_json::from_str::<GoalArg>(args_json) {
+                Ok(a) => {
+                    let ok = mem.goal_set_status(a.id, &a.status, a.note.as_deref().unwrap_or("")).await;
+                    if ok { format!("Updated goal #{} -> {}", a.id, a.status) } else { format!("No goal #{} to update", a.id) }
                 }
                 Err(e) => format!("ERROR: bad args: {e}"),
             }

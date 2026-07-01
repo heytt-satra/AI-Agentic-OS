@@ -1083,3 +1083,33 @@ store+surface path proven end-to-end (queued -> injected -> raised naturally -> 
 Test-seeded nudges cleaned from the DB afterward. **The AGI list is now closed or well
 underway on 6 of 7** (only real causal reasoning stays out of reach): learning (mention +
 reflection), always-on (daemon), deep OS integration, embodied presence, and now proactivity.
+
+### 2026-06-30 - Self-direction & curiosity: Jarvis forms and tests its own goals
+**Context:** owner had me read 7 AIOS papers (Rutgers AIOS canon + ProbeLogits kernel
+governance + Planet-as-Brain). Key honest finding: NONE solve causal reasoning (all
+"causal/world-model" hits are citations); AIOS3 itself quotes the field admitting LLMs
+are "far from acceptable planning/reasoning". Jarvis already implements AIOS3's
+"Self-Improving" (Reflexion-style reflection + fine-tune export) and most AIOS1 kernel
+modules (LLM core, tool/memory/storage/access managers) - it lacks the multi-agent
+SCHEDULER + CONTEXT MANAGER, which are server/throughput concerns orthogonal to a
+private personal AIOS. Direction set: build self-direction now, then an OBSERVATIONAL/
+INTERVENTIONAL causal world-model (grounded in Jarvis's own tool-call outcomes - the
+RAP idea but from real interventions, not LLM priors) = the genuine first-of-its-kind.
+**What shipped (self-direction):** new `goals` table (kind=hypothesis|goal, status=
+open|testing|confirmed|done|dropped). Reflection now returns a JSON OBJECT and, beside
+learnings, forms up to 2 HYPOTHESES (things it suspects about the user, to verify) and 1
+GOAL (something proactive to do) -> stored as open goals. `run_pursue` (on every heartbeat
+and via `jarvis pursue`) takes one open item, RAISES it with the user as a proactive nudge,
+and marks it 'testing' - curiosity in action. The loop closes: active goals are injected
+into each session (REPL+HUD) with their ids, and a `goal_update` tool lets Jarvis resolve
+them (confirmed -> also learn the fact / done / dropped) when the user responds; persona
+teaches the flow. `jarvis goals` lists them. It PROPOSES; the approval gate still governs
+any action.
+**Verified live (full chain):** `jarvis reflect` -> "distilled 4 learnings, formed 3
+hypothesis/goal(s)"; `jarvis goals` showed a self-set GOAL (recommend a coding schedule)
++ 2 HYPOTHESES (favors distraction-free env; prefers minimalist high-efficiency tools);
+`jarvis pursue` -> "raising hypothesis #1", and `goals` then showed #1 as 'testing' with
+the matching nudge queued ("I've been wondering... is that right?"). Form -> pursue ->
+surface -> (resolve) proven. Test-derived goals/nudges cleaned from the DB afterward.
+**AGI-list #3 (self-direction) now substantially closed.** Next: the observational-causal
+world model (#2) - the out-of-the-box differentiator, honestly scoped.

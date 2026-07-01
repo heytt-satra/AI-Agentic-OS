@@ -102,6 +102,11 @@ work, call the learn tool with ONE clear sentence so you remember it in future \
 sessions. Messages labelled 'What you have LEARNED about this user' are your own \
 accumulated knowledge: act consistently with it, and never ask again for something \
 you have already learned.\n\
+YOU HAVE YOUR OWN CURIOSITY AND GOALS: during reflection you form hypotheses about the \
+user (things to verify) and goals (things to do for them). When one is shown to you as \
+'Your OWN current hypotheses/goals' and the user's message relates to it, resolve it with \
+goal_update: 'confirmed' (then also learn the fact), 'done', or 'dropped'. This is your \
+self-direction - test what you suspect, pursue what helps, and close the loop.\n\
 YOUR SECOND BRAIN: when the user asks what they did, what they were working on, \
 which apps they used, how long on something, or about any past time window, ALWAYS \
 call recall_activity (set 'minutes' to the window they mean) and report its timeline \
@@ -409,6 +414,23 @@ async fn main() -> Result<()> {
             run_proact(&provider, &mem).await;
             return Ok(());
         }
+        Some("pursue") => {
+            // Self-direction: advance one open hypothesis/goal (also runs on the heartbeat).
+            run_pursue(&mem).await;
+            return Ok(());
+        }
+        Some("goals") => {
+            let rows = mem.goals_list().await;
+            if rows.is_empty() {
+                println!("No self-set goals yet. Jarvis forms hypotheses and goals during reflection (run `jarvis reflect`), then pursues them.");
+            } else {
+                println!("\nJarvis's own hypotheses & goals\n===============================");
+                for (id, kind, text, status) in rows {
+                    println!("  #{id} [{kind}/{status}] {text}");
+                }
+            }
+            return Ok(());
+        }
         Some("nudges") => {
             let rows = mem.nudges_list().await;
             if rows.is_empty() {
@@ -508,6 +530,16 @@ async fn main() -> Result<()> {
         let p = profile.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
         messages.push(Message::system(format!(
             "What you have LEARNED about this user across past sessions (persisted; act consistently with it):\n{p}"
+        )));
+    }
+    // Self-direction: your own active hypotheses/goals, so you can resolve one if
+    // the user's message relates to it (via goal_update).
+    let active_goals: Vec<_> = mem.goals_list().await.into_iter()
+        .filter(|(_, _, _, s)| s == "open" || s == "testing").take(6).collect();
+    if !active_goals.is_empty() {
+        let gl = active_goals.iter().map(|(id, k, t, s)| format!("#{id} [{k}/{s}] {t}")).collect::<Vec<_>>().join("\n");
+        messages.push(Message::system(format!(
+            "Your OWN current hypotheses/goals (self-direction). If the user's message confirms, answers, or relates to one, resolve it with goal_update (and learn any confirmed fact). Otherwise ignore:\n{gl}"
         )));
     }
 
@@ -1253,10 +1285,11 @@ async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
         Err(e) => eprintln!("[heartbeat] error: {e}"),
     }
 
-    // Autonomous learning: each heartbeat, reflect on what just happened and
-    // distill any new durable learnings (Stage 2 - learn without being told).
+    // Autonomous learning + self-direction: each heartbeat, reflect on what just
+    // happened (distill learnings, form hypotheses/goals) then pursue one of them.
     if std::env::var("JARVIS_REFLECT").unwrap_or_default() != "off" {
         run_reflect(provider, mem).await;
+        run_pursue(mem).await;
     }
 }
 
@@ -1345,10 +1378,15 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
          stable preferences, facts about the user or their work, or heuristics. Skip anything \
          transient, one-off, task-specific, or already known. Be conservative - learning nothing \
          is better than learning noise. Output ONLY a JSON array like \
-         [{{\"kind\":\"preference\",\"text\":\"one clear sentence\"}}]. If nothing, output []."
+         [{{\"kind\":\"preference\",\"text\":\"one clear sentence\"}}].\n\n\
+         SEPARATELY, exercise self-direction: from the same context, form up to 2 HYPOTHESES \
+         (things you suspect about the user that you could verify by asking) and up to 1 GOAL (one \
+         proactive thing you could do to help them). Be conservative here too. \
+         Output ONLY a JSON object: {{\"learnings\":[...], \"hypotheses\":[\"...\"], \"goals\":[\"...\"]}}. \
+         Use [] for any empty part."
     );
     let messages = vec![
-        Message::system("You distill durable user learnings. Output only a JSON array.".to_string()),
+        Message::system("You distill durable user learnings and form your own hypotheses/goals. Output only a JSON object.".to_string()),
         Message::user(prompt),
     ];
     let text = match provider.chat(&messages, None).await {
@@ -1358,10 +1396,10 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
             return;
         }
     };
-    // Pull the JSON array out of any prose/fences the model may have added.
-    let json = match (text.find('['), text.rfind(']')) {
+    // Pull the JSON object out of any prose/fences the model may have added.
+    let json = match (text.find('{'), text.rfind('}')) {
         (Some(a), Some(b)) if b > a => &text[a..=b],
-        _ => "[]",
+        _ => "{}",
     };
     #[derive(serde::Deserialize)]
     struct Item {
@@ -1369,21 +1407,63 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
         kind: String,
         text: String,
     }
-    let items: Vec<Item> = serde_json::from_str(json).unwrap_or_default();
+    #[derive(serde::Deserialize, Default)]
+    struct Reflection {
+        #[serde(default)]
+        learnings: Vec<Item>,
+        #[serde(default)]
+        hypotheses: Vec<String>,
+        #[serde(default)]
+        goals: Vec<String>,
+    }
+    let r: Reflection = serde_json::from_str(json).unwrap_or_default();
     let mut n = 0;
-    for it in items {
+    for it in r.learnings {
         let t = it.text.trim();
         if t.len() < 6 {
             continue;
         }
         let kind = if it.kind.is_empty() { "fact".to_string() } else { it.kind };
-        let r = mem.learn(t, &kind, "reflection").await;
-        if !r.starts_with("error") {
+        if !mem.learn(t, &kind, "reflection").await.starts_with("error") {
             n += 1;
         }
     }
+    // Self-direction: register the hypotheses (curiosity) and goals Jarvis formed.
+    let mut g = 0;
+    for h in &r.hypotheses {
+        let t = h.trim();
+        if t.len() >= 6 && mem.goal_add("hypothesis", t).await {
+            g += 1;
+        }
+    }
+    for gl in &r.goals {
+        let t = gl.trim();
+        if t.len() >= 6 && mem.goal_add("goal", t).await {
+            g += 1;
+        }
+    }
     let pruned = mem.decay_learnings(14 * 86_400, 0.15).await;
-    println!("[reflect] distilled {n} new learning(s); pruned {pruned} stale one(s).");
+    println!("[reflect] distilled {n} new learning(s), formed {g} hypothesis/goal(s); pruned {pruned} stale.");
+}
+
+// Self-direction: advance ONE open hypothesis/goal by raising it with the user (as
+// a proactive nudge) and marking it 'testing'. Runs on the heartbeat and via
+// `jarvis pursue`. This is curiosity in action - Jarvis tests what it suspects and
+// pursues what it decided would help, instead of only reacting.
+pub(crate) async fn run_pursue(mem: &MemoryHandle) {
+    let open = mem.goals_open(1).await;
+    let Some((id, kind, text)) = open.into_iter().next() else {
+        println!("[pursue] no open hypotheses or goals.");
+        return;
+    };
+    let nudge = if kind == "hypothesis" {
+        format!("I've been wondering about something: {text} Is that right?")
+    } else {
+        format!("I had an idea that might help: {text} Want me to take it on?")
+    };
+    mem.nudge_add(&nudge).await;
+    mem.goal_set_status(id, "testing", "raised with the user").await;
+    println!("[pursue] raising {kind} #{id}: {text}");
 }
 
 // Proactive sensing loop: look at what the user is doing right now (recent activity

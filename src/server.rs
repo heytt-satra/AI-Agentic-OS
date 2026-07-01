@@ -119,6 +119,15 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             "What you have LEARNED about this user across past sessions (persisted; act consistently with it):\n{p}"
         )));
     }
+    // Self-direction: Jarvis's own active hypotheses/goals (resolve via goal_update).
+    let active_goals: Vec<_> = st.mem.goals_list().await.into_iter()
+        .filter(|(_, _, _, s)| s == "open" || s == "testing").take(6).collect();
+    if !active_goals.is_empty() {
+        let gl = active_goals.iter().map(|(id, k, t, s)| format!("#{id} [{k}/{s}] {t}")).collect::<Vec<_>>().join("\n");
+        messages.push(Message::system(format!(
+            "Your OWN current hypotheses/goals (self-direction). If the user's message confirms, answers, or relates to one, resolve it with goal_update (and learn any confirmed fact). Otherwise ignore:\n{gl}"
+        )));
+    }
 
     while let Some(Ok(msg)) = socket.recv().await {
         let text = match msg {

@@ -78,6 +78,12 @@ enum MemCmd {
     NudgeAdd { text: String, reply: oneshot::Sender<bool> }, // false if a duplicate unshown nudge exists
     NudgeTake { reply: oneshot::Sender<Option<String>> },    // newest unshown nudge, marked shown
     NudgeList { reply: oneshot::Sender<Vec<(i64, String, bool)>> },
+
+    // Self-direction: hypotheses + goals Jarvis forms and pursues on its own.
+    GoalAdd { kind: String, text: String, reply: oneshot::Sender<bool> }, // false if duplicate open goal
+    GoalOpen { k: i64, reply: oneshot::Sender<Vec<(i64, String, String)>> }, // (id, kind, text), oldest open first
+    GoalSetStatus { id: i64, status: String, note: String, reply: oneshot::Sender<bool> },
+    GoalList { reply: oneshot::Sender<Vec<(i64, String, String, String)>> }, // (id, kind, text, status)
     // Leads / outreach engine.
     LeadAdd { lead: Lead, reply: oneshot::Sender<i64> },
     LeadList { reply: oneshot::Sender<Vec<(i64, Lead)>> },
@@ -513,6 +519,40 @@ impl MemoryHandle {
         rx.await.unwrap_or_default()
     }
 
+    // ── self-direction: hypotheses + goals ──────────────────────────────────
+    /// Add a hypothesis or goal Jarvis set for itself. False if an open duplicate exists.
+    pub async fn goal_add(&self, kind: &str, text: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GoalAdd { kind: kind.to_string(), text: text.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+    /// Oldest open goals/hypotheses (id, kind, text) - the queue Jarvis pursues.
+    pub async fn goals_open(&self, k: i64) -> Vec<(i64, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GoalOpen { k, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// Update a goal's status (open|testing|confirmed|done|dropped) + a note.
+    pub async fn goal_set_status(&self, id: i64, status: &str, note: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GoalSetStatus { id, status: status.to_string(), note: note.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+    /// All goals (id, kind, text, status) for `jarvis goals`.
+    pub async fn goals_list(&self) -> Vec<(i64, String, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::GoalList { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     // ── leads / outreach engine ─────────────────────────────────────────────
     pub async fn lead_add(&self, lead: Lead) -> i64 {
         let (reply, rx) = oneshot::channel();
@@ -621,6 +661,13 @@ fn open_db(path: &str) -> Result<Connection> {
          -- to raise with the user. shown=0 until surfaced in a session.
          CREATE TABLE IF NOT EXISTS nudges (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, text TEXT NOT NULL, shown INTEGER NOT NULL DEFAULT 0
+         );
+         -- Self-direction: hypotheses Jarvis forms about the user (curiosity) and
+         -- goals it sets for itself, which it then tests/pursues on its own.
+         -- kind = hypothesis | goal ; status = open | testing | confirmed | done | dropped.
+         CREATE TABLE IF NOT EXISTS goals (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'goal',
+            text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', note TEXT NOT NULL DEFAULT ''
          );
          -- Leads / contacts for the research+outreach engine.
          -- status = new | contacted | replied | dropped.
@@ -1137,6 +1184,53 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
             if let Ok(mut stmt) = conn.prepare("SELECT id, text, shown FROM nudges ORDER BY id DESC LIMIT 30") {
                 if let Ok(rows) = stmt.query_map([], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
+                }) {
+                    for row in rows.filter_map(|x| x.ok()) {
+                        out.push(row);
+                    }
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::GoalAdd { kind, text, reply } => {
+            let dup: i64 = conn
+                .query_row("SELECT COUNT(*) FROM goals WHERE status='open' AND text=?1", params![text], |r| r.get(0))
+                .unwrap_or(0);
+            let added = if dup == 0 {
+                conn.execute(
+                    "INSERT INTO goals (ts, kind, text, status, note) VALUES (?1, ?2, ?3, 'open', '')",
+                    params![now_secs(), kind, text],
+                ).is_ok()
+            } else {
+                false
+            };
+            let _ = reply.send(added);
+        }
+        MemCmd::GoalOpen { k, reply } => {
+            let mut out: Vec<(i64, String, String)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT id, kind, text FROM goals WHERE status='open' ORDER BY id ASC LIMIT ?1") {
+                if let Ok(rows) = stmt.query_map(params![k.max(1)], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                }) {
+                    for row in rows.filter_map(|x| x.ok()) {
+                        out.push(row);
+                    }
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::GoalSetStatus { id, status, note, reply } => {
+            let ok = conn
+                .execute("UPDATE goals SET status=?1, note=?2 WHERE id=?3", params![status, note, id])
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            let _ = reply.send(ok);
+        }
+        MemCmd::GoalList { reply } => {
+            let mut out: Vec<(i64, String, String, String)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT id, kind, text, status FROM goals ORDER BY id DESC LIMIT 40") {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
                 }) {
                     for row in rows.filter_map(|x| x.ok()) {
                         out.push(row);
