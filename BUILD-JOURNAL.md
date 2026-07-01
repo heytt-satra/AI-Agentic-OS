@@ -1113,3 +1113,21 @@ the matching nudge queued ("I've been wondering... is that right?"). Form -> pur
 surface -> (resolve) proven. Test-derived goals/nudges cleaned from the DB afterward.
 **AGI-list #3 (self-direction) now substantially closed.** Next: the observational-causal
 world model (#2) - the out-of-the-box differentiator, honestly scoped.
+
+### 2026-06-30 - Causal world model, commit 1: the interventional log
+**The idea (the honest path to "causal reasoning"):** we can't make the LLM understand
+causation, but every consequential TOOL CALL Jarvis makes is a do() intervention on the
+real system - the gold standard for causal inference. So record action -> observed outcome
+-> success and Jarvis learns what actually causes what on THIS machine (not LLM priors).
+No paper in the 7-paper corpus does this.
+**What shipped:** new `causal_events` table (tool, args, context, outcome, success) + memory
+actor cmds CausalLog (fire-and-forget so it never slows the tool path) / CausalForTool /
+CausalStats / CausalRecent. tools::execute now logs every INTERVENTION (is_intervention:
+write_file/run_shell/delete_path/open_app/click/code_exec/skill_run/mcp__* etc. - reads and
+searches are observations, excluded) with success = not(ERROR|BLOCKED). New `jarvis causal`
+prints per-action success rates + recent interventions.
+**Verified live:** a session ran `echo CAUSALTEST-OK` (run_shell) and wrote desktop/
+causal_probe.txt (write_file); `jarvis causal` then showed "write_file 1/1 (100%), run_shell
+1/1 (100%)" with each action's args -> real outcome, both ok. The do() dataset is accruing.
+**Next (commit 2):** predict-before-act - before a consequential action, recall its past
+outcomes and state an explicit prediction; after, compare predicted vs actual and surface it.

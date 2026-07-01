@@ -79,6 +79,12 @@ enum MemCmd {
     NudgeTake { reply: oneshot::Sender<Option<String>> },    // newest unshown nudge, marked shown
     NudgeList { reply: oneshot::Sender<Vec<(i64, String, bool)>> },
 
+    // Causal world model (interventional log).
+    CausalLog { tool: String, args: String, context: String, outcome: String, success: bool }, // fire-and-forget
+    CausalForTool { tool: String, k: i64, reply: oneshot::Sender<Vec<(String, String, bool)>> }, // (args, outcome, success)
+    CausalStats { reply: oneshot::Sender<Vec<(String, i64, i64)>> }, // (tool, total, successes)
+    CausalRecent { n: i64, reply: oneshot::Sender<Vec<(String, String, String, bool)>> }, // (tool, args, outcome, success)
+
     // Self-direction: hypotheses + goals Jarvis forms and pursues on its own.
     GoalAdd { kind: String, text: String, reply: oneshot::Sender<bool> }, // false if duplicate open goal
     GoalOpen { k: i64, reply: oneshot::Sender<Vec<(i64, String, String)>> }, // (id, kind, text), oldest open first
@@ -519,6 +525,43 @@ impl MemoryHandle {
         rx.await.unwrap_or_default()
     }
 
+    // ── causal world model (interventions) ──────────────────────────────────
+    /// Record one intervention (a consequential tool call and its real outcome).
+    /// Fire-and-forget so it never slows the tool path.
+    pub async fn causal_log(&self, tool: &str, args: &str, context: &str, outcome: &str, success: bool) {
+        let _ = self.tx.send(MemCmd::CausalLog {
+            tool: tool.to_string(),
+            args: args.chars().take(300).collect(),
+            context: context.chars().take(200).collect(),
+            outcome: outcome.chars().take(300).collect(),
+            success,
+        }).await;
+    }
+    /// Past outcomes of a given action (args, outcome, success), newest first.
+    pub async fn causal_for_tool(&self, tool: &str, k: i64) -> Vec<(String, String, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::CausalForTool { tool: tool.to_string(), k, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// Per-tool (total, successes) tally for `jarvis causal`.
+    pub async fn causal_stats(&self) -> Vec<(String, i64, i64)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::CausalStats { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// Recent interventions (tool, args, outcome, success).
+    pub async fn causal_recent(&self, n: i64) -> Vec<(String, String, String, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::CausalRecent { n, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     // ── self-direction: hypotheses + goals ──────────────────────────────────
     /// Add a hypothesis or goal Jarvis set for itself. False if an open duplicate exists.
     pub async fn goal_add(&self, kind: &str, text: &str) -> bool {
@@ -668,6 +711,15 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS goals (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'goal',
             text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', note TEXT NOT NULL DEFAULT ''
+         );
+         -- Causal world model: every consequential tool call is a do() intervention
+         -- on the real system. We record action -> observed outcome -> success so
+         -- Jarvis can learn what actually causes what on THIS machine and predict
+         -- before acting. context = a short signature of the situation at the time.
+         CREATE TABLE IF NOT EXISTS causal_events (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, tool TEXT NOT NULL,
+            args TEXT NOT NULL DEFAULT '', context TEXT NOT NULL DEFAULT '',
+            outcome TEXT NOT NULL DEFAULT '', success INTEGER NOT NULL DEFAULT 1
          );
          -- Leads / contacts for the research+outreach engine.
          -- status = new | contacted | replied | dropped.
@@ -1184,6 +1236,53 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
             if let Ok(mut stmt) = conn.prepare("SELECT id, text, shown FROM nudges ORDER BY id DESC LIMIT 30") {
                 if let Ok(rows) = stmt.query_map([], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
+                }) {
+                    for row in rows.filter_map(|x| x.ok()) {
+                        out.push(row);
+                    }
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::CausalLog { tool, args, context, outcome, success } => {
+            let _ = conn.execute(
+                "INSERT INTO causal_events (ts, tool, args, context, outcome, success) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![now_secs(), tool, args, context, outcome, success as i64],
+            );
+        }
+        MemCmd::CausalForTool { tool, k, reply } => {
+            let mut out: Vec<(String, String, bool)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT args, outcome, success FROM causal_events WHERE tool=?1 ORDER BY id DESC LIMIT ?2") {
+                if let Ok(rows) = stmt.query_map(params![tool, k.max(1)], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
+                }) {
+                    for row in rows.filter_map(|x| x.ok()) {
+                        out.push(row);
+                    }
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::CausalStats { reply } => {
+            let mut out: Vec<(String, i64, i64)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT tool, COUNT(*), SUM(success) FROM causal_events GROUP BY tool ORDER BY COUNT(*) DESC",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+                }) {
+                    for row in rows.filter_map(|x| x.ok()) {
+                        out.push(row);
+                    }
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::CausalRecent { n, reply } => {
+            let mut out: Vec<(String, String, String, bool)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT tool, args, outcome, success FROM causal_events ORDER BY id DESC LIMIT ?1") {
+                if let Ok(rows) = stmt.query_map(params![n.max(1)], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)? != 0))
                 }) {
                     for row in rows.filter_map(|x| x.ok()) {
                         out.push(row);

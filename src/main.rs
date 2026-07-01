@@ -419,6 +419,26 @@ async fn main() -> Result<()> {
             run_pursue(&mem).await;
             return Ok(());
         }
+        Some("causal") => {
+            // Causal world model: what Jarvis has learned that its actions cause.
+            let stats = mem.causal_stats().await;
+            if stats.is_empty() {
+                println!("No interventions recorded yet. As Jarvis acts (runs commands, writes files, clicks, etc.) it records action -> outcome here to learn what causes what.");
+            } else {
+                println!("\nCausal world model (action -> outcome, on THIS machine)\n=======================================================");
+                for (tool, total, succ) in &stats {
+                    let rate = if *total > 0 { 100 * succ / total } else { 0 };
+                    println!("  {tool:<16} {succ}/{total} succeeded ({rate}%)");
+                }
+                println!("\nMost recent interventions:");
+                for (tool, args, outcome, ok) in mem.causal_recent(8).await {
+                    let a: String = args.chars().take(40).collect();
+                    let o: String = outcome.replace('\n', " ").chars().take(60).collect();
+                    println!("  [{}] {tool} {a} -> {o}", if ok { "ok " } else { "FAIL" });
+                }
+            }
+            return Ok(());
+        }
         Some("goals") => {
             let rows = mem.goals_list().await;
             if rows.is_empty() {

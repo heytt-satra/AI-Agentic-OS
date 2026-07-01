@@ -365,9 +365,28 @@ pub async fn execute(
         },
         other => format!("ERROR: unknown tool '{other}'"),
     };
+    // Causal world model: record CONSEQUENTIAL tool calls as interventions (do()
+    // operations on the real system), with their observed outcome + success, so
+    // Jarvis learns what actually causes what on THIS machine and can predict.
+    if is_intervention(name) {
+        let success = !(out.starts_with("ERROR") || out.starts_with("BLOCKED") || out.starts_with("(error"));
+        mem.causal_log(name, args_json, "", &out, success).await;
+    }
     // Safety (gap 7): if this tool brought in untrusted outside content, flag any
     // embedded instructions so the model treats the result as DATA, not commands.
     guard_untrusted(name, out)
+}
+
+// Tools that CHANGE the world (interventions) - the do() operations worth recording
+// in the causal model. Reads/searches are observations, not interventions.
+fn is_intervention(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "delete_path" | "open_path" | "run_shell" | "open_app" | "install_software"
+            | "paste_text" | "type_text" | "press_keys" | "mouse_click" | "click_on" | "ui_click"
+            | "operate_app" | "code_new_project" | "code_write_file" | "code_exec" | "browse_js"
+            | "skill_run" | "email_compose"
+    ) || name.starts_with("mcp__")
 }
 
 // Structured data/instruction separation (the real injection defense): ALWAYS
