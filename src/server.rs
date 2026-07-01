@@ -284,6 +284,11 @@ async fn send(socket: &mut WebSocket, v: serde_json::Value) -> Result<()> {
 }
 
 fn open_browser(url: &str) {
+    // Under the supervisor (`jarvis daemon`), don't reopen the browser on every
+    // restart - the user summons the HUD with the hotkey or the URL instead.
+    if std::env::var("JARVIS_NO_BROWSER").is_ok() {
+        return;
+    }
     let _ = if cfg!(windows) {
         std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn()
     } else if cfg!(target_os = "macos") {

@@ -983,3 +983,24 @@ keypress -> HUD-opens is the owner's hands-on test (simulating a global hotkey h
 is not trustworthy). **Rung 2 (shell hooks) now COMPLETE:** right-click "Ask Jarvis" +
 global summon hotkey. Deep-integration track: rung 1 (fs awareness) + rung 2 (shell hooks)
 done; rung 3 (privileged background presence) remains, with the session-0/GUI caveat.
+
+### 2026-06-30 - Deep OS integration, rung 3: supervised background presence (TRACK COMPLETE)
+**The honest version:** NOT a session-0 Windows Service (which cannot touch the GUI, so it
+would break the watch/click/computer-use tools). Instead a supervisor that keeps Jarvis
+alive in the USER session. New `jarvis daemon` subcommand: a thin loop that spawns `serve`
+as a child and relaunches it whenever it exits, with backoff (2s, growing on rapid
+failures, capped 30s; resets after a healthy >30s run; gives up after 20 immediate crashes
+so a real bug doesn't spin forever). Children are spawned HIDDEN on Windows
+(CREATE_NO_WINDOW) and with JARVIS_NO_BROWSER=1 so restarts don't reopen the browser
+(open_browser now early-returns on that env). The daemon runs before the DB opens (it owns
+no state; the child serve owns memory). `jarvis autostart` now installs the daemon HIDDEN
+via a Startup .vbs (WScript.Shell .Run window-style 0), superseding the old JarvisOS.cmd
+serve launcher - so login gives a windowless, self-healing Jarvis.
+**Verified live (the right test):** started `jarvis daemon` -> serve child PID 26632, port
+7878 up. Killed 26632 (simulated crash). ~9s later a FRESH serve child PID 5092 was running
+with the port back up. Different PID == the supervisor respawned it. Self-healing confirmed.
+**Deep OS integration TRACK COMPLETE:** rung 1 filesystem awareness (fswatch) + rung 2 shell
+hooks (Ask-Jarvis menu + Ctrl+Alt+J summon) + rung 3 supervised background presence. Jarvis
+now SENSES the filesystem, is REACHABLE from the shell, and STAYS UP on its own - genuine OS
+integration, no kernel driver, GUI/computer-use intact. The big remaining lever from the
+owner's AGI list is the continuous-learning spine (self-updating beliefs + reflection loop).

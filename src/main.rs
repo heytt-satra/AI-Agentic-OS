@@ -232,6 +232,14 @@ async fn main() -> Result<()> {
         let off = std::env::args().nth(2).as_deref() == Some("off");
         return run_autostart(!off);
     }
+    // `jarvis daemon` is the supervised background PRESENCE (deep-integration rung
+    // 3): a thin supervisor that keeps `serve` alive, relaunching it if it ever
+    // exits. It deliberately runs `serve` in the user session (not a session-0
+    // Windows Service) so the GUI + computer-use tools keep working. It doesn't
+    // touch the DB itself, so we handle it before opening memory.
+    if std::env::args().nth(1).as_deref() == Some("daemon") {
+        return run_daemon();
+    }
     // `jarvis privacy` prints exactly what is stored and what (if anything) leaves
     // the device - the auditable core of the "provably private" positioning.
     if std::env::args().nth(1).as_deref() == Some("privacy") {
@@ -698,25 +706,78 @@ pub async fn run_subagent(
 
 // Register (or remove) a login auto-start so `jarvis serve` runs from boot and
 // the second brain captures the whole day without the user thinking about it.
+// Deep OS integration, rung 3: the supervised background presence. Repeatedly
+// launches `serve` as a child and relaunches it if it exits, so a crash never
+// leaves the user without Jarvis. Children are spawned hidden (no console window)
+// and told not to reopen the browser on restart. Backs off on rapid failures and
+// gives up only after many quick crashes (a real bug, not a transient blip).
+fn run_daemon() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    eprintln!("[daemon] Jarvis background presence up; supervising `serve` (Ctrl-C to stop).");
+    let mut fails: u64 = 0;
+    loop {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("serve").env("JARVIS_NO_BROWSER", "1");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let started = std::time::Instant::now();
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let status = child.wait();
+                let ran = started.elapsed().as_secs();
+                eprintln!("[daemon] serve exited ({status:?}) after {ran}s; relaunching.");
+                if ran > 30 {
+                    fails = 0; // it ran fine for a while; a fresh crash, not a loop
+                } else {
+                    fails += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("[daemon] could not launch serve: {e}");
+                fails += 1;
+            }
+        }
+        if fails > 20 {
+            eprintln!("[daemon] serve keeps crashing immediately; giving up. Run `jarvis serve` to see the error.");
+            return Ok(());
+        }
+        let backoff = std::cmp::min(2 * (1 + fails), 30);
+        std::thread::sleep(std::time::Duration::from_secs(backoff));
+    }
+}
+
 fn run_autostart(enable: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     if cfg!(windows) {
-        // Use the per-user Startup folder (no admin needed, unlike schtasks).
+        // Per-user Startup folder (no admin, unlike schtasks). We launch the
+        // supervised `daemon` hidden (VBScript window style 0) so the background
+        // presence has no console window and survives crashes.
         let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let cmd_path = format!("{appdata}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\JarvisOS.cmd");
+        let startup = format!("{appdata}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
+        let vbs_path = format!("{startup}\\JarvisOS.vbs");
+        let old_cmd = format!("{startup}\\JarvisOS.cmd"); // legacy serve launcher
         if enable {
-            let body = format!("@echo off\r\nstart \"\" /min \"{}\" serve\r\n", exe.display());
-            std::fs::write(&cmd_path, body)?;
-            println!("Auto-start ON. Jarvis will run `serve` (HUD + second-brain tracking) every time you log in.");
+            let body = format!(
+                "Set s = CreateObject(\"WScript.Shell\")\r\ns.Run \"\"\"{}\"\" daemon\", 0, False\r\n",
+                exe.display()
+            );
+            std::fs::write(&vbs_path, body)?;
+            let _ = std::fs::remove_file(&old_cmd); // supersede the old `serve` launcher
+            println!("Auto-start ON. Jarvis runs its supervised background presence (`daemon`), hidden, at every login - and relaunches itself if it ever crashes.");
             println!("Turn it off with:  jarvis autostart off");
         } else {
-            let _ = std::fs::remove_file(&cmd_path);
+            let _ = std::fs::remove_file(&vbs_path);
+            let _ = std::fs::remove_file(&old_cmd);
             println!("Auto-start OFF. Jarvis will no longer launch at login.");
         }
     } else if cfg!(target_os = "macos") {
-        println!("On macOS, add a Login Item or a launchd agent that runs:\n  {} serve", exe.display());
+        println!("On macOS, add a Login Item or a launchd agent that runs:\n  {} daemon", exe.display());
     } else {
-        println!("On Linux, add a systemd user service or ~/.config/autostart entry that runs:\n  {} serve", exe.display());
+        println!("On Linux, add a systemd user service or ~/.config/autostart entry that runs:\n  {} daemon", exe.display());
     }
     Ok(())
 }
