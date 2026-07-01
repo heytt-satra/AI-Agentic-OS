@@ -72,6 +72,7 @@ enum MemCmd {
     LearnRecall { query: String, k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> }, // (kind, text, confidence)
     LearnTop { k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> }, // highest-confidence profile
     LearnList { reply: oneshot::Sender<Vec<(i64, String, String, f32, i64)>> }, // (id, kind, text, confidence, reinforced)
+    LearnDecay { idle_secs: i64, floor: f64, reply: oneshot::Sender<usize> }, // fade stale beliefs, prune below floor
     // Leads / outreach engine.
     LeadAdd { lead: Lead, reply: oneshot::Sender<i64> },
     LeadList { reply: oneshot::Sender<Vec<(i64, Lead)>> },
@@ -471,6 +472,14 @@ impl MemoryHandle {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+    /// Fade learnings not seen in `idle_secs`, prune below `floor`. Returns pruned count.
+    pub async fn decay_learnings(&self, idle_secs: i64, floor: f64) -> usize {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LearnDecay { idle_secs, floor, reply }).await.is_err() {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
     }
 
     // ── leads / outreach engine ─────────────────────────────────────────────
@@ -1051,6 +1060,19 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 }
             }
             let _ = reply.send(out);
+        }
+        MemCmd::LearnDecay { idle_secs, floor, reply } => {
+            // Beliefs fade if never reconfirmed: drop the confidence of learnings
+            // not seen recently, then prune any that fell below the floor.
+            let cutoff = now_secs() - idle_secs;
+            let _ = conn.execute(
+                "UPDATE learnings SET confidence = confidence - 0.05 WHERE last_seen < ?1",
+                params![cutoff],
+            );
+            let pruned = conn
+                .execute("DELETE FROM learnings WHERE confidence < ?1", params![floor])
+                .unwrap_or(0);
+            let _ = reply.send(pruned);
         }
         MemCmd::LeadAdd { lead, reply } => {
             // Dedupe: if a lead with the same email or phone already exists,

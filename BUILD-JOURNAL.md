@@ -1035,3 +1035,26 @@ mechanism level.
 learnings from conversation + activity (learn WITHOUT being told), plus confidence decay for
 stale unconfirmed beliefs and a hypotheses kind the proactive layer can test. Stage 1 is the
 store + recall + explicit/on-mention learning; Stage 2 makes it autonomous.
+
+### 2026-06-30 - Continuous-learning spine, Stage 2: reflection (learn without being told)
+**What shipped:** `run_reflect` - on its own, review recent conversation (recent_dialog) +
+activity (activity_since, last hour), and ask the model (conservatively, "learning nothing
+is better than noise", and given the ALREADY-known learnings so it won't repeat) to distill
+0-4 NEW durable learnings as a JSON array, then store each via mem.learn (which dedups/
+reinforces). Plus confidence DECAY: new MemCmd LearnDecay drops confidence of learnings not
+seen in 14 days and prunes below a 0.15 floor, so unconfirmed beliefs fade instead of
+accreting. Runs two ways: `jarvis reflect` on demand, AND automatically at the end of every
+heartbeat tick (JARVIS_REFLECT=off to disable) - so with autostart/daemon, Jarvis reflects
+on its own on a cadence. Built on the Stage 1 store; no new deps.
+**Verified live (isolated the reflection path):** first run confirmed dedup - after a chat
+where the agent proactively called learn (persona-driven) for "deep work 11pm-3am" and
+"builds in Rust", `reflect` correctly distilled 0 NEW (already known). Then the clean test:
+a session that FORBADE tools (agent replied only "ok", so the turn learned nothing) stating
+"I am vegetarian and never schedule meetings on Mondays" -> `jarvis reflect` -> "distilled 3
+new learning(s)"; `jarvis learnings` then showed #5 vegetarian, #6 no-Monday-meetings (both
+distilled autonomously from the dialog), plus #7 it inferred "developing an AI agentic OS in
+Rust" from broader context. Learned from experience, unprompted. Decay ran (pruned 0, correct).
+**AGI-list #1 now fully closed:** the spine stores, recalls into every session, learns on
+mention AND on reflection without being told, reinforces confirmed beliefs, and decays stale
+ones. Remaining big lever: the proactive sensing loop (act on sensing + learnings, with
+approval) - and a `hypotheses` kind for reflection to propose and the proactive layer to test.

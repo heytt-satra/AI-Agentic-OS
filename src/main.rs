@@ -397,6 +397,12 @@ async fn main() -> Result<()> {
             println!("hear-test is Windows-only (WASAPI loopback).");
             return Ok(());
         }
+        Some("reflect") => {
+            // Continuous-learning spine, Stage 2: distill durable learnings from
+            // recent conversation + activity, on demand (also runs on the heartbeat).
+            run_reflect(&provider, &mem).await;
+            return Ok(());
+        }
         Some("learnings") => {
             // Continuous-learning spine: show what Jarvis has learned (transparency).
             let rows = mem.learnings_list().await;
@@ -1219,6 +1225,12 @@ async fn run_heartbeat(provider: &Provider, mem: &MemoryHandle) {
         Ok(answer) => println!("\n[heartbeat] {answer}\n"),
         Err(e) => eprintln!("[heartbeat] error: {e}"),
     }
+
+    // Autonomous learning: each heartbeat, reflect on what just happened and
+    // distill any new durable learnings (Stage 2 - learn without being told).
+    if std::env::var("JARVIS_REFLECT").unwrap_or_default() != "off" {
+        run_reflect(provider, mem).await;
+    }
 }
 
 // Daily digest: summarize recent activity + tool feedback into a short briefing.
@@ -1264,6 +1276,87 @@ async fn run_digest(provider: &Provider, mem: &MemoryHandle) {
         }
         Err(e) => eprintln!("digest error: {e}"),
     }
+}
+
+// Continuous-learning spine, Stage 2: REFLECTION. On its own (from the heartbeat
+// or `jarvis reflect`), review recent conversation + activity and distill NEW
+// durable learnings without being told, then decay stale beliefs. This is the
+// "learn from experience between conversations" mechanism.
+async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
+    let dialog = mem.recent_dialog(24).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let activity = mem.activity_since(now - 3600, None).await;
+    if dialog.is_empty() && activity.is_empty() {
+        println!("[reflect] nothing recent to reflect on yet.");
+        return;
+    }
+    let dialog_txt = dialog
+        .iter()
+        .map(|(r, c)| format!("{r}: {}", c.chars().take(300).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let activity_txt = activity
+        .iter()
+        .map(|(_t, k, a, d)| format!("[{k}] {a} {}", d.chars().take(50).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let existing = mem.top_learnings(30).await;
+    let existing_txt = existing
+        .iter()
+        .map(|(_, t, _)| format!("- {t}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "You are reviewing a user's recent interaction to LEARN durable things about them or \
+         their work, on your OWN initiative. You ALREADY know these - do NOT repeat or restate \
+         them:\n{existing_txt}\n\nRECENT CONVERSATION:\n{dialog_txt}\n\nRECENT ACTIVITY:\n{activity_txt}\n\n\
+         Extract 0 to 4 NEW, DURABLE, generalizable things worth remembering in FUTURE sessions: \
+         stable preferences, facts about the user or their work, or heuristics. Skip anything \
+         transient, one-off, task-specific, or already known. Be conservative - learning nothing \
+         is better than learning noise. Output ONLY a JSON array like \
+         [{{\"kind\":\"preference\",\"text\":\"one clear sentence\"}}]. If nothing, output []."
+    );
+    let messages = vec![
+        Message::system("You distill durable user learnings. Output only a JSON array.".to_string()),
+        Message::user(prompt),
+    ];
+    let text = match provider.chat(&messages, None).await {
+        Ok(r) => r.message.content.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[reflect] model error: {e}");
+            return;
+        }
+    };
+    // Pull the JSON array out of any prose/fences the model may have added.
+    let json = match (text.find('['), text.rfind(']')) {
+        (Some(a), Some(b)) if b > a => &text[a..=b],
+        _ => "[]",
+    };
+    #[derive(serde::Deserialize)]
+    struct Item {
+        #[serde(default)]
+        kind: String,
+        text: String,
+    }
+    let items: Vec<Item> = serde_json::from_str(json).unwrap_or_default();
+    let mut n = 0;
+    for it in items {
+        let t = it.text.trim();
+        if t.len() < 6 {
+            continue;
+        }
+        let kind = if it.kind.is_empty() { "fact".to_string() } else { it.kind };
+        let r = mem.learn(t, &kind, "reflection").await;
+        if !r.starts_with("error") {
+            n += 1;
+        }
+    }
+    let pruned = mem.decay_learnings(14 * 86_400, 0.15).await;
+    println!("[reflect] distilled {n} new learning(s); pruned {pruned} stale one(s).");
 }
 
 #[cfg(test)]
