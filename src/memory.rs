@@ -73,6 +73,11 @@ enum MemCmd {
     LearnTop { k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> }, // highest-confidence profile
     LearnList { reply: oneshot::Sender<Vec<(i64, String, String, f32, i64)>> }, // (id, kind, text, confidence, reinforced)
     LearnDecay { idle_secs: i64, floor: f64, reply: oneshot::Sender<usize> }, // fade stale beliefs, prune below floor
+
+    // Proactive nudges.
+    NudgeAdd { text: String, reply: oneshot::Sender<bool> }, // false if a duplicate unshown nudge exists
+    NudgeTake { reply: oneshot::Sender<Option<String>> },    // newest unshown nudge, marked shown
+    NudgeList { reply: oneshot::Sender<Vec<(i64, String, bool)>> },
     // Leads / outreach engine.
     LeadAdd { lead: Lead, reply: oneshot::Sender<i64> },
     LeadList { reply: oneshot::Sender<Vec<(i64, Lead)>> },
@@ -482,6 +487,32 @@ impl MemoryHandle {
         rx.await.unwrap_or(0)
     }
 
+    // ── proactive nudges ────────────────────────────────────────────────────
+    /// Queue a proactive nudge. Returns false if an identical unshown one exists.
+    pub async fn nudge_add(&self, text: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::NudgeAdd { text: text.to_string(), reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+    /// Take the newest un-surfaced nudge (marks it shown). None if the queue is empty.
+    pub async fn nudge_take(&self) -> Option<String> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::NudgeTake { reply }).await.is_err() {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+    /// Recent nudges (id, text, shown) for `jarvis nudges`.
+    pub async fn nudges_list(&self) -> Vec<(i64, String, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::NudgeList { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     // ── leads / outreach engine ─────────────────────────────────────────────
     pub async fn lead_add(&self, lead: Lead) -> i64 {
         let (reply, rx) = oneshot::channel();
@@ -585,6 +616,11 @@ fn open_db(path: &str) -> Result<Connection> {
             kind TEXT NOT NULL DEFAULT 'fact', text TEXT NOT NULL,
             source TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0.6,
             reinforced INTEGER NOT NULL DEFAULT 0, vec BLOB NOT NULL
+         );
+         -- Proactive nudges: things the background sensing loop noticed and wants
+         -- to raise with the user. shown=0 until surfaced in a session.
+         CREATE TABLE IF NOT EXISTS nudges (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, text TEXT NOT NULL, shown INTEGER NOT NULL DEFAULT 0
          );
          -- Leads / contacts for the research+outreach engine.
          -- status = new | contacted | replied | dropped.
@@ -1073,6 +1109,41 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 .execute("DELETE FROM learnings WHERE confidence < ?1", params![floor])
                 .unwrap_or(0);
             let _ = reply.send(pruned);
+        }
+        MemCmd::NudgeAdd { text, reply } => {
+            // Don't queue the same nudge twice while it's still unshown.
+            let dup: i64 = conn
+                .query_row("SELECT COUNT(*) FROM nudges WHERE shown=0 AND text=?1", params![text], |r| r.get(0))
+                .unwrap_or(0);
+            let added = if dup == 0 {
+                conn.execute("INSERT INTO nudges (ts, text, shown) VALUES (?1, ?2, 0)", params![now_secs(), text]).is_ok()
+            } else {
+                false
+            };
+            let _ = reply.send(added);
+        }
+        MemCmd::NudgeTake { reply } => {
+            let row: Option<(i64, String)> = conn
+                .query_row("SELECT id, text FROM nudges WHERE shown=0 ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+                .ok();
+            let text = row.map(|(id, t)| {
+                let _ = conn.execute("UPDATE nudges SET shown=1 WHERE id=?1", params![id]);
+                t
+            });
+            let _ = reply.send(text);
+        }
+        MemCmd::NudgeList { reply } => {
+            let mut out: Vec<(i64, String, bool)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT id, text, shown FROM nudges ORDER BY id DESC LIMIT 30") {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
+                }) {
+                    for row in rows.filter_map(|x| x.ok()) {
+                        out.push(row);
+                    }
+                }
+            }
+            let _ = reply.send(out);
         }
         MemCmd::LeadAdd { lead, reply } => {
             // Dedupe: if a lead with the same email or phone already exists,

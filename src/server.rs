@@ -37,6 +37,21 @@ struct AppState {
 pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
     // Scheduler: while the HUD is up, run any due scheduled agents (Phase 3).
     spawn_scheduler(provider.clone(), mem.clone());
+    // Proactive sensing loop: periodically review recent activity + learnings and
+    // queue a nudge if something is worth raising. Off with JARVIS_PROACT=off.
+    if std::env::var("JARVIS_PROACT").unwrap_or_default() != "off" {
+        let p = provider.clone();
+        let m = mem.clone();
+        tokio::spawn(async move {
+            let secs: u64 = std::env::var("PROACT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs.max(60)));
+            tick.tick().await; // skip the immediate first tick
+            loop {
+                tick.tick().await;
+                crate::run_proact(&p, &m).await;
+            }
+        });
+    }
     let state = AppState { provider, mem };
     let app = Router::new()
         .route("/", get(index))
@@ -137,6 +152,13 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
         if !learned.is_empty() {
             let l = learned.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
             messages.push(Message::system(format!("Relevant things you've learned about this user:\n{l}")));
+        }
+        // Proactive: surface a queued background nudge as gentle context (not an
+        // imperative, which derails weaker models into just acknowledging it).
+        if let Some(nudge) = st.mem.nudge_take().await {
+            messages.push(Message::system(format!(
+                "(Background observation from your own sensing - mention it to the user only if it is relevant or helpful right now, otherwise ignore it: {nudge})"
+            )));
         }
         // Live watch-along: hand the agent everything it is currently seeing/
         // hearing on screen, so the user can ask about a playing video (same as

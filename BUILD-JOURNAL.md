@@ -1058,3 +1058,28 @@ Rust" from broader context. Learned from experience, unprompted. Decay ran (prun
 mention AND on reflection without being told, reinforces confirmed beliefs, and decays stale
 ones. Remaining big lever: the proactive sensing loop (act on sensing + learnings, with
 approval) - and a `hypotheses` kind for reflection to propose and the proactive layer to test.
+
+### 2026-06-30 - Proactive sensing loop: Jarvis raises things on its own
+**What shipped:** the last big lever from the owner's AGI list - reactive -> agentic. New
+`run_proact`: reviews the last 30 min of sensing (window/file/clipboard activity) + the
+learnings, and asks the model - STRONGLY biased to NOTHING (don't nag) - whether ONE
+specific, timely thing is worth raising. If so, it queues a nudge in a new `nudges` table
+(dedup on identical unshown text). Surfacing: nudge_take pulls the newest unshown nudge and
+marks it shown; it's injected into the user's next turn (REPL + HUD) so Jarvis raises it
+naturally. It PROPOSES, never auto-acts - any resulting action still hits the approval gate.
+Autonomous: runs in serve on a cadence (PROACT_SECS default 900; JARVIS_PROACT=off) and on
+demand via `jarvis proact`; `jarvis nudges` lists them.
+**Bug found + fixed during verification (good catch):** the first surface test returned a
+degenerate "Jarvis: ok" - the model acknowledged instead of answering. Baseline (no nudge)
+answered "4" fine, so the INJECTION was the cause: an IMPERATIVE system message ("bring it
+up... then continue") makes weaker models (DeepSeek) just acknowledge it. Fix: reworded the
+nudge injection as gentle CONTEXT - "(Background observation... mention it only if relevant,
+otherwise ignore it: X)". Re-test: asked "stepping away for lunch, anything to handle first?"
+-> "A few things, sir: Uncommitted changes in your jarvis-os repo - src/main.rs, memory.rs,
+server.rs..." - answered normally AND raised the nudge, even enriching it with the real
+changed files. Lesson (again): mid-conversation system messages should be data, not commands.
+**Verified:** generation loop runs and conservatively returns NOTHING on thin signal (correct);
+store+surface path proven end-to-end (queued -> injected -> raised naturally -> marked seen).
+Test-seeded nudges cleaned from the DB afterward. **The AGI list is now closed or well
+underway on 6 of 7** (only real causal reasoning stays out of reach): learning (mention +
+reflection), always-on (daemon), deep OS integration, embodied presence, and now proactivity.

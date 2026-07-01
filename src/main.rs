@@ -403,6 +403,24 @@ async fn main() -> Result<()> {
             run_reflect(&provider, &mem).await;
             return Ok(());
         }
+        Some("proact") => {
+            // Proactive sensing loop: look at recent activity + learnings and queue
+            // a nudge if something is worth raising (also runs while serving).
+            run_proact(&provider, &mem).await;
+            return Ok(());
+        }
+        Some("nudges") => {
+            let rows = mem.nudges_list().await;
+            if rows.is_empty() {
+                println!("No proactive nudges yet. Jarvis raises them from background sensing (run `jarvis proact`, or it happens automatically while serving).");
+            } else {
+                println!("\nProactive nudges\n================");
+                for (id, text, shown) in rows {
+                    println!("  #{id} [{}] {text}", if shown { "seen" } else { "pending" });
+                }
+            }
+            return Ok(());
+        }
         Some("learnings") => {
             // Continuous-learning spine: show what Jarvis has learned (transparency).
             let rows = mem.learnings_list().await;
@@ -540,6 +558,15 @@ async fn main() -> Result<()> {
         if !learned.is_empty() {
             let l = learned.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
             messages.push(Message::system(format!("Relevant things you've learned about this user:\n{l}")));
+        }
+
+        // Proactive: if the background sensing loop queued a nudge, add it as
+        // gentle CONTEXT (not an imperative - a directive derails weaker models
+        // into just acknowledging it). Jarvis mentions it if it fits.
+        if let Some(nudge) = mem.nudge_take().await {
+            messages.push(Message::system(format!(
+                "(Background observation from your own sensing - mention it to the user only if it is relevant or helpful right now, otherwise ignore it: {nudge})"
+            )));
         }
 
         // Live watch-along: if Jarvis is currently watching a video on screen,
@@ -1357,6 +1384,66 @@ async fn run_reflect(provider: &Provider, mem: &MemoryHandle) {
     }
     let pruned = mem.decay_learnings(14 * 86_400, 0.15).await;
     println!("[reflect] distilled {n} new learning(s); pruned {pruned} stale one(s).");
+}
+
+// Proactive sensing loop: look at what the user is doing right now (recent activity
+// from the window/file/clipboard sensors) plus what Jarvis has learned, and decide
+// - very conservatively - whether there's ONE useful thing to raise. If so, queue a
+// nudge that surfaces in the next session. It PROPOSES; it never auto-acts on
+// anything risky (the approval gate still governs any action the user then asks for).
+pub(crate) async fn run_proact(provider: &Provider, mem: &MemoryHandle) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let activity = mem.activity_since(now - 1800, None).await; // last 30 min
+    if activity.is_empty() {
+        println!("[proact] no recent activity to act on.");
+        return;
+    }
+    let act_txt = activity
+        .iter()
+        .rev()
+        .take(40)
+        .map(|(_t, k, a, d)| format!("[{k}] {a} {}", d.chars().take(50).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let learnings = mem.top_learnings(20).await;
+    let learn_txt = learnings.iter().map(|(_, t, _)| format!("- {t}")).collect::<Vec<_>>().join("\n");
+
+    let prompt = format!(
+        "You are Jarvis running in the BACKGROUND. Based on what the user is doing right now and \
+         what you know about them, is there ONE genuinely useful, specific, timely thing to \
+         proactively point out or offer to do? Be VERY conservative: usually the right answer is \
+         NOTHING - do not be annoying, do not state the obvious, do not nag. Only speak up for \
+         something clearly worth their attention.\n\nWHAT YOU KNOW ABOUT THEM:\n{learn_txt}\n\n\
+         WHAT THEY ARE DOING NOW (recent activity, newest last):\n{act_txt}\n\n\
+         Reply with ONE short, specific sentence addressed to the user if something is worth \
+         raising, or EXACTLY the single word NOTHING."
+    );
+    let messages = vec![
+        Message::system("You decide whether a proactive nudge is warranted. Strongly default to NOTHING.".to_string()),
+        Message::user(prompt),
+    ];
+    let text = match provider.chat(&messages, None).await {
+        Ok(r) => r.message.content.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[proact] model error: {e}");
+            return;
+        }
+    };
+    let t = text.trim().trim_matches('"').trim();
+    let up = t.to_uppercase();
+    if t.len() < 8 || up == "NOTHING" || up.starts_with("NOTHING") {
+        println!("[proact] nothing worth raising right now.");
+        return;
+    }
+    let t = plainify(t);
+    if mem.nudge_add(&t).await {
+        println!("[proact] nudge queued: {t}");
+    } else {
+        println!("[proact] (already queued) {t}");
+    }
 }
 
 #[cfg(test)]
