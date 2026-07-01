@@ -165,6 +165,47 @@ pub fn system_prompt() -> String {
     format!("{PERSONA}\n\n{OUTREACH_GUIDE}")
 }
 
+// Deep OS integration, rung 2: install/remove the "Ask Jarvis" right-click menu
+// entry for files. Uses reg.exe on HKCU (no admin, fully reversible) so we add no
+// new dependency. `%1` is stored literally; Explorer substitutes the file path when
+// the verb is invoked, launching `jarvis ask "<file>"`.
+#[cfg(windows)]
+fn integrate_shell(off: bool) {
+    use std::process::Command;
+    let key = r"HKCU\Software\Classes\*\shell\AskJarvis";
+    let cmdkey = r"HKCU\Software\Classes\*\shell\AskJarvis\command";
+    if off {
+        match Command::new("reg").args(["delete", key, "/f"]).output() {
+            Ok(o) if o.status.success() => println!("Removed the 'Ask Jarvis' right-click menu entry."),
+            Ok(_) => println!("Nothing to remove (it was not installed)."),
+            Err(e) => println!("Failed to run reg.exe: {e}"),
+        }
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            println!("Cannot resolve my own path: {e}");
+            return;
+        }
+    };
+    let value = format!("\"{exe}\" ask \"%1\"");
+    let run = |args: &[&str]| Command::new("reg").args(args).output().map(|o| o.status.success()).unwrap_or(false);
+    let ok_label = run(&["add", key, "/ve", "/t", "REG_SZ", "/d", "Ask Jarvis about this file", "/f"]);
+    let _ = run(&["add", key, "/v", "Icon", "/t", "REG_SZ", "/d", exe.as_str(), "/f"]);
+    let ok_cmd = run(&["add", cmdkey, "/ve", "/t", "REG_SZ", "/d", value.as_str(), "/f"]);
+    if ok_label && ok_cmd {
+        println!("Installed. Right-click any file -> 'Ask Jarvis about this file'. Remove it anytime with `jarvis integrate off`.");
+    } else {
+        println!("Install may have failed (is reg.exe available?). Nothing system-wide was changed.");
+    }
+}
+
+#[cfg(not(windows))]
+fn integrate_shell(_off: bool) {
+    println!("Shell integration is Windows-only for now (registry context menu). A Linux .desktop / macOS Services entry is a future step.");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -201,6 +242,10 @@ async fn main() -> Result<()> {
     // Connect any MCP servers configured in mcp.json (gap 5). No-op if absent.
     mcp::init();
 
+    // Shell integration: `jarvis ask <file>` (from the right-click menu) seeds the
+    // REPL with a file's contents. Set here, injected into the REPL below.
+    let mut ask_seed: Option<String> = None;
+
     // Sub-commands that run once and exit (cron-friendly):
     //   jarvis once    -> a single heartbeat tick
     //   jarvis digest  -> review recent activity, write a daily digest
@@ -208,6 +253,44 @@ async fn main() -> Result<()> {
         Some("once") => {
             run_heartbeat(&provider, &mem).await;
             return Ok(());
+        }
+        Some("integrate") => {
+            // Deep OS integration, rung 2: install (or remove with `integrate off`)
+            // the "Ask Jarvis" right-click menu entry for files and folders.
+            let off = std::env::args().nth(2).as_deref() == Some("off");
+            integrate_shell(off);
+            return Ok(());
+        }
+        Some("ask") => {
+            // Invoked by the shell context menu: `jarvis ask "<file>" [question]`.
+            // Read the file, then either answer a one-shot question or drop into
+            // the REPL seeded with the file so the user can ask about it.
+            let path = std::env::args().nth(2).unwrap_or_default();
+            if path.trim().is_empty() {
+                println!("usage: jarvis ask <file> [question]");
+                return Ok(());
+            }
+            let text = tools::read_doc_text(std::path::Path::new(&path))
+                .unwrap_or_else(|| format!("(could not read {path})"));
+            let snippet: String = text.chars().take(8000).collect();
+            let seed = format!(
+                "The user opened this file to ask about it: {path}\n\n--- FILE CONTENT (start) ---\n{snippet}\n--- FILE CONTENT (end) ---"
+            );
+            let question: String = std::env::args().skip(3).collect::<Vec<_>>().join(" ");
+            if !question.trim().is_empty() {
+                let mut messages = vec![
+                    Message::system(system_prompt()),
+                    Message::system(seed),
+                    Message::user(&question),
+                ];
+                match run_turn(&provider, &mem, &mut messages).await {
+                    Ok(a) => println!("{}", plainify(&a)),
+                    Err(e) => println!("(error: {e})"),
+                }
+                return Ok(());
+            }
+            println!("Loaded {path}. Ask me anything about it.\n");
+            ask_seed = Some(seed); // fall through to the REPL, seeded
         }
         Some("digest") => {
             run_digest(&provider, &mem).await;
@@ -355,6 +438,12 @@ async fn main() -> Result<()> {
 
     // The live conversation for THIS session, seeded with the persona...
     let mut messages: Vec<Message> = vec![Message::system(system_prompt())];
+
+    // If launched via the "Ask Jarvis" shell menu, seed the file content so the
+    // very first question already has the file in context.
+    if let Some(seed) = ask_seed.take() {
+        messages.push(Message::system(seed));
+    }
 
     // ...and with the last few turns for short-term continuity. (Relevance
     // recall, below, pulls in older relevant facts per-question.)

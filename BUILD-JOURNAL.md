@@ -943,3 +943,24 @@ change in the last hour?" has a real answer, watched continuously.
 "Ask Jarvis" right-click entry, no COM DLL), then a privileged background presence (honest
 caveat: a session-0 Windows Service can't drive the GUI, so it would fight the computer-use
 features - keep the user-session model and add OS-event integration).
+
+### 2026-06-30 - Deep OS integration, rung 2: shell hooks ("Ask Jarvis" menu)
+**What shipped:** two dep-free pieces that make Jarvis reachable from the shell.
+(1) `jarvis ask "<file>" [question]` - reads the file (text or PDF via the existing
+read_doc_text, now pub(crate)), caps ~8k chars, and either answers a one-shot question
+(seed + question -> run_turn -> print) or falls through to the REPL SEEDED with the file
+so the first question already has it in context (ask_seed threaded into the REPL's
+messages). (2) `jarvis integrate` / `integrate off` - installs/removes an "Ask Jarvis
+about this file" entry on the right-click menu of any file, by writing HKCU registry keys
+(HKCU\Software\Classes\*\shell\AskJarvis[\command]) via reg.exe - no admin, no COM DLL, no
+new dependency, fully reversible. The command value is "<exe>" ask "%1"; Explorer
+substitutes the file path. Windows-only (cfg); non-Windows prints a "future step" note.
+**Why this rung:** genuine shell/window-manager integration (right-click any file ->
+Jarvis opens already knowing it) without the kernel-driver risk. Pairs with rung 1
+(fswatch): Jarvis both SENSES file changes and is INVOKABLE on any file.
+**Verified live (all three):** `jarvis ask <probe> "codename + launch date?"` -> correctly
+answered "BLUEBIRD ... March 3rd ... 12 lakh" from the file; `jarvis integrate` -> reg query
+showed (Default) REG_SZ `"...\jarvis.exe" ask "%1"`; `jarvis integrate off` -> key NOT FOUND
+(clean removal). Reversible and admin-free, as designed.
+**Next shell-hook piece (deferred to its own commit):** a global hotkey to summon Jarvis
+from anywhere (needs a Win32 RegisterHotKey + message-loop thread; harder to auto-verify).

@@ -2328,7 +2328,7 @@ fn is_text_file(p: &std::path::Path) -> bool {
 }
 
 // Read a document's text: plain read for text/code, extraction for PDFs.
-fn read_doc_text(p: &std::path::Path) -> Option<String> {
+pub(crate) fn read_doc_text(p: &std::path::Path) -> Option<String> {
     if p.extension().and_then(|e| e.to_str()).map(|s| s.eq_ignore_ascii_case("pdf")).unwrap_or(false) {
         pdf_extract::extract_text(p).ok().filter(|t| !t.trim().is_empty())
     } else {
