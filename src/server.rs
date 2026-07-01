@@ -128,6 +128,17 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             "Your OWN current hypotheses/goals (self-direction). If the user's message confirms, answers, or relates to one, resolve it with goal_update (and learn any confirmed fact). Otherwise ignore:\n{gl}"
         )));
     }
+    // Causal world model: standing foresight - actions that have FAILED on this machine.
+    let failed: Vec<String> = st.mem.causal_stats().await.into_iter()
+        .filter(|(_, t, s)| s < t)
+        .map(|(tool, t, s)| format!("- {tool}: only {s}/{t} succeeded"))
+        .collect();
+    if !failed.is_empty() {
+        messages.push(Message::system(format!(
+            "Your CAUSAL track record on this machine - actions that have FAILED here before. Before repeating one, call predict_outcome and adapt:\n{}",
+            failed.join("\n")
+        )));
+    }
 
     while let Some(Ok(msg)) = socket.recv().await {
         let text = match msg {

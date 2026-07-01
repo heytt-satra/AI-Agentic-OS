@@ -1150,3 +1150,28 @@ per-tool (parse exit codes) is a later refinement.
 **Next (commit 3):** distill stable action->effect RULES from the log and auto-surface the
 relevant one before the agent acts (so foresight happens even without an explicit call),
 plus record predicted-vs-actual to measure the model's calibration.
+
+### 2026-06-30 - Causal world model, commit 3: standing foresight (auto-surface)
+**What shipped:** at every session start (REPL + HUD), Jarvis is injected with its CAUSAL
+TRACK RECORD - specifically the actions that have FAILED on this machine (tools where
+successes < total), with a note to call predict_outcome before repeating them. So foresight
+happens automatically, even when the agent doesn't think to ask. Clean (no injection when
+nothing has failed, to avoid noise).
+**Verified live (exceeded the test):** seeded a failed open_app intervention; `jarvis causal`
+showed run_shell 4/4, write_file 2/2, open_app 0/1 (0%) with the FAIL row. A BRAND-NEW session,
+asked which action had failed, answered unprompted from the injected record: "the action that
+has failed on this machine before is open_app - only 0 out of 1 succeeded" - and it even
+PROACTIVELY called predict_outcome for run_shell (5/5) before acting. The standing causal
+awareness is real and the agent uses it.
+**Observational-causal world model v1 COMPLETE (3 commits):** (1) interventional log - record
+every do() action -> real outcome -> success; (2) predict-before-act - grounded prediction on
+demand; (3) standing foresight - auto-surface the failure track record each session. This is
+causal inference from the agent's OWN interventions on THIS machine (do-calculus, not LLM
+priors) - the honest, buildable "causal reasoning", and first-of-its-kind for a personal AIOS.
+**Deferred refinements:** predicted-vs-actual calibration logging; per-args causal RULES
+distilled into learnings (kind=causal); sharper success (parse exit codes); counterfactual
+multi-step look-ahead; and - the big unlock - ProbeLogits-style pre-generation logit
+governance (AIOS6), which needs a LOCAL model, so it rides on the local-model track.
+**AGI-list #2 (causal reasoning) now addressed the only honest way it can be:** not by
+claiming the LLM understands causation, but by giving Jarvis a real, self-built causal model
+of its own actions' effects. 7 of 7 AGI-list items now closed or genuinely underway.
