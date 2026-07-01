@@ -886,3 +886,33 @@ hears a playing video and answers from the fused SEE/HEAR timeline. (.env holds 
 key, gitignored; owner advised to rotate it since it was shared in plain chat.)
 **Next depth (not foundations):** speaker-aware HEAR lines, an explicit HUD watch
 toggle/button, and per-window/region capture instead of full screen.
+
+### 2026-06-30 - Pillar 6: watch the RIGHT window (auto-detect the playing video)
+**Owner's problem:** watching the full screen meant Jarvis captured whatever was in
+FRONT - which is the HUD they type into, not the video. To see the video they had to
+switch tabs, but then they couldn't type. And hardcoding a browser name is brittle
+("what if i use different browsers for different things"). So: identify which window
+is actually playing, across any browser, automatically.
+**Fix, two layers:**
+(1) Window-targeted capture: new tools::screenshot_window_with_fingerprint(hint)
+captures a SPECIFIC window by title/app substring, even when it's behind the HUD -
+xcap uses PrintWindow(PW_RENDERFULLCONTENT), which renders occluded + DirectComposition
+(Chrome/Edge) content. Audio is already system-wide, so only vision needed targeting.
+(2) AUTO-DETECT (the real answer): screenshot_auto_window_with_fingerprint scores every
+visible window by three fused signals and captures the best - no name needed:
+  - active audio sessions (wasapi IAudioSessionManager2: get_count/get_session/get_state
+    ==Active/get_process_id) -> the process EMITTING sound now (+100; nails VLC and other
+    single-process players exactly, matched to a window via xcap Window::pid()),
+  - a media-like title (+40 each: youtube/netflix/twitch/vlc/.mp4/... - catches browser
+    video even though Chrome plays audio from a SEPARATE service process so its pid won't
+    match the window), and
+  - a small browser nudge while any audio plays (+20).
+watch_start now auto-detects by default (no args); an optional 'window' forces one. The
+loop re-detects each tick so it follows if you switch videos; on Windows it falls back to
+full screen if nothing is identified. Non-Windows keeps full-screen (all gated cfg(windows)).
+**Verified live:** with the terminal in front, Notepad open, and the YouTube video BEHIND
+everything, watch_start (no args) -> status "Watching the auto-detected playing window ...
+1 things seen" and Jarvis read the exact occluded title "How to make 1 Crore/yr as a
+Freelancer? | The Ultimate Blueprint for Freelancing". It picked the right window across
+the clutter and captured it while occluded. (0 heard because the video was paused; the
+title signal carried it - audio signal kicks in when it's actually playing.)

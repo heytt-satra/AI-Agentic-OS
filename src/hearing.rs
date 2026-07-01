@@ -27,6 +27,43 @@ fn transcribe_key() -> String {
         .unwrap_or_default()
 }
 
+/// Process IDs that are CURRENTLY playing audio (active render sessions on the
+/// default output device). This is the truest "what is playing" signal - whatever
+/// app is making sound is almost certainly the video - and it works across any
+/// browser or player. Returns empty if nothing is playing or on any error.
+pub fn active_audio_pids() -> Vec<u32> {
+    let _ = wasapi::initialize_mta();
+    let mut pids = Vec::new();
+    let en = match wasapi::DeviceEnumerator::new() {
+        Ok(e) => e,
+        Err(_) => return pids,
+    };
+    let dev = match en.get_default_device(&Direction::Render) {
+        Ok(d) => d,
+        Err(_) => return pids,
+    };
+    let mgr = match dev.get_iaudiosessionmanager() {
+        Ok(m) => m,
+        Err(_) => return pids,
+    };
+    let sessions = match mgr.get_audiosessionenumerator() {
+        Ok(s) => s,
+        Err(_) => return pids,
+    };
+    for i in 0..sessions.get_count().unwrap_or(0) {
+        if let Ok(ctrl) = sessions.get_session(i) {
+            if matches!(ctrl.get_state(), Ok(wasapi::SessionState::Active)) {
+                if let Ok(pid) = ctrl.get_process_id() {
+                    if pid != 0 && !pids.contains(&pid) {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    pids
+}
+
 /// Start the background audio loop. No-op (with a hint) if no transcription key
 /// is set, so watching still works visually. Spawns a dedicated OS thread because
 /// WASAPI wants its own COM-initialized thread with blocking reads.

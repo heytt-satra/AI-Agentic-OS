@@ -34,12 +34,14 @@ struct Note {
 struct WatchState {
     active: bool,
     started: u64,
+    // Optional window to watch (title/app substring). None = whole screen.
+    target: Option<String>,
     notes: VecDeque<Note>,
 }
 
 impl WatchState {
     fn new() -> Self {
-        Self { active: false, started: 0, notes: VecDeque::new() }
+        Self { active: false, started: 0, target: None, notes: VecDeque::new() }
     }
 }
 
@@ -90,28 +92,38 @@ pub fn push_hear(words: String) {
 
 /// Begin watching: clear the buffer and spawn the visual sampling loop.
 /// Safe to call when already active (no-op). Returns a short status line.
-pub fn start() -> String {
+pub fn start(target: Option<String>) -> String {
+    let target = target.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     {
         let mut s = cell().lock().unwrap();
         if s.active {
-            return "Already watching your screen. Play the video and ask me anything.".into();
+            return "Already watching. Play the video and ask me anything about it.".into();
         }
         s.active = true;
         s.started = now();
+        s.target = target.clone();
         s.notes.clear();
     }
-    spawn_visual_loop();
+    spawn_visual_loop(target.clone());
     // The ears (Windows): capture + transcribe system audio into the same buffer.
-    // No-ops with a hint if no transcription key is set, so watching still works
-    // visually everywhere.
+    // Audio is system-wide (no focus needed), so it works regardless of target.
+    // No-ops with a hint if no transcription key is set.
     #[cfg(windows)]
     crate::hearing::spawn_audio_loop();
     let secs = env_u64("WATCH_INTERVAL_SECS", 3);
-    format!(
-        "Watching your screen now (checking every {secs}s, captioning only when the picture \
-         changes). Play the video, then ask me anything about it — what's shown, what's on \
-         screen, or help with a step."
-    )
+    match &target {
+        Some(t) => format!(
+            "Watching the '{t}' window now - I can see it even while you keep this HUD in front \
+             (checking every {secs}s, captioning on change), and I hear its audio. Play the video \
+             and ask me anything about it."
+        ),
+        None => format!(
+            "Watching now - I'll auto-detect whichever window is playing the video (by its audio + \
+             title, across any browser) and watch that, even while you keep this HUD in front. \
+             Checking every {secs}s, captioning on change, and I hear the audio too. Just play the \
+             video and ask me about it. (If I pick the wrong window, name it: \"watch the vlc window\".)"
+        ),
+    }
 }
 
 /// Stop watching. The background loop notices `active=false` and exits.
@@ -137,8 +149,12 @@ pub fn status() -> String {
     let secs = now().saturating_sub(s.started);
     let sees = s.notes.iter().filter(|n| n.kind == Kind::See).count();
     let hears = s.notes.iter().filter(|n| n.kind == Kind::Hear).count();
+    let tgt = match &s.target {
+        Some(t) => format!(" the '{t}' window"),
+        None => " the auto-detected playing window".to_string(),
+    };
     format!(
-        "Watching for {}m{:02}s — {sees} things seen, {hears} things heard.",
+        "Watching{tgt} for {}m{:02}s — {sees} things seen, {hears} things heard.",
         secs / 60,
         secs % 60
     )
@@ -211,7 +227,27 @@ fn env_f64(key: &str, default: f64) -> f64 {
 // have passed — so a static slide/paused video costs nothing and a fast-cut video
 // is rate-limited instead of blindly captioned. Capture runs on a blocking thread
 // (xcap types are !Send). Loop exits when watch mode is turned off.
-fn spawn_visual_loop() {
+// Route one capture: an explicit window hint, else auto-detect the playing video
+// window (Windows), else the whole screen. On Windows, if auto-detection finds
+// nothing playing, fall back to the full screen so watching still works.
+fn capture_for(target: &Option<String>) -> Result<(String, Vec<u8>, u32, u32), String> {
+    match target {
+        Some(hint) => crate::tools::screenshot_window_with_fingerprint(hint),
+        None => {
+            #[cfg(windows)]
+            {
+                crate::tools::screenshot_auto_window_with_fingerprint()
+                    .or_else(|_| crate::tools::screenshot_with_fingerprint())
+            }
+            #[cfg(not(windows))]
+            {
+                crate::tools::screenshot_with_fingerprint()
+            }
+        }
+    }
+}
+
+fn spawn_visual_loop(target: Option<String>) {
     tokio::spawn(async move {
         let sample_secs = env_u64("WATCH_INTERVAL_SECS", 3);
         let min_caption_secs = env_u64("WATCH_MIN_CAPTION_SECS", 5);
@@ -223,21 +259,29 @@ fn spawn_visual_loop() {
             if !is_active() {
                 break;
             }
-            let shot = tokio::task::spawn_blocking(crate::tools::screenshot_with_fingerprint).await;
-            if let Ok(Ok((data_url, fp, _w, _h))) = shot {
-                let changed = first || fp_diff(&last_fp, &fp) >= threshold;
-                let cooled = now().saturating_sub(last_caption_ts) >= min_caption_secs;
-                if changed && cooled {
-                    let caption = crate::tools::vision_ask(&data_url, CAPTION_PROMPT).await;
-                    if !caption.starts_with("ERROR") {
-                        push_see(caption);
-                        last_fp = fp;
-                        last_caption_ts = now();
-                        first = false;
-                    } else {
-                        eprintln!("[watch] vision error: {caption}");
+            // Capture the target window (visible even behind the HUD), or, with no
+            // explicit target, auto-detect the window that is currently playing a
+            // video and capture that. Capture is !Send (xcap) -> blocking thread.
+            let t = target.clone();
+            let shot = tokio::task::spawn_blocking(move || capture_for(&t)).await;
+            match shot {
+                Ok(Ok((data_url, fp, _w, _h))) => {
+                    let changed = first || fp_diff(&last_fp, &fp) >= threshold;
+                    let cooled = now().saturating_sub(last_caption_ts) >= min_caption_secs;
+                    if changed && cooled {
+                        let caption = crate::tools::vision_ask(&data_url, CAPTION_PROMPT).await;
+                        if !caption.starts_with("ERROR") {
+                            push_see(caption);
+                            last_fp = fp;
+                            last_caption_ts = now();
+                            first = false;
+                        } else {
+                            eprintln!("[watch] vision error: {caption}");
+                        }
                     }
                 }
+                Ok(Err(e)) => eprintln!("[watch] {e}"), // e.g. window not found (yet)
+                Err(_) => {}
             }
             tokio::time::sleep(Duration::from_secs(sample_secs)).await;
         }

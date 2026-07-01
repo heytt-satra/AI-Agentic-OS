@@ -47,7 +47,8 @@ pub fn definitions() -> Vec<Tool> {
         f("ui_marks", "Set-of-Marks: screenshot the screen with a numbered green box drawn on every interactive element, save the annotated image, and return a numbered legend (number -> name -> center). Use when you must visually identify what to click (icons, ambiguous controls) - read the saved image, pick a number, then click that element's center with click_on, or click it by name with ui_click.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("ui_click", "Click a UI element by its visible NAME using the OS accessibility tree (Windows). FAR more reliable than click_on because it targets the real control, not a guessed pixel. Use this FIRST for buttons, links, menu items, tabs, checkboxes that have a text label. Fall back to click_on only for elements with no accessible name (icons, canvas).", str_prop("label", "the visible text/name of the element")),
         f("operate_app", "Autonomously operate whatever is on screen to accomplish a goal. It loops: screenshot, decide ONE action (click/type/key), do it, re-check, until done. Use this to DRIVE an already-open GUI app to a result, e.g. 'in the open editor, make a new file, type a hello world, and save it'. For one-off clicks prefer ui_click, then click_on.", str_prop("goal", "what to accomplish on screen, in plain words")),
-        f("watch_start", "Start WATCHING a video the user is playing on screen: Jarvis samples the screen every few seconds, captions each frame, and keeps a running log of what is happening. Use this when the user says to watch/follow along with a video, lecture, tutorial, or anything playing on screen. After this, the user can just ask about the video and you will have the live context. Runs in the background until watch_stop.", serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("watch_start", "Start WATCHING a video: Jarvis AUTO-DETECTS whichever window is currently playing a video (by its audio + title, across ANY browser or player) and watches THAT window every few seconds - even while this HUD stays in front - captioning changes and (on Windows) hearing the audio, keeping a running SEE/HEAR log the user can ask about. Use when the user says to watch/follow along with a video, lecture, or tutorial. Normally call it with NO arguments and it finds the right window itself. Only pass 'window' to FORCE a specific one (app or title substring like 'vlc' or part of the title) if auto-detect picks wrong. Runs in the background until watch_stop.",
+          serde_json::json!({"type":"object","properties":{"window":{"type":"string","description":"optional override: app name or title of the window to watch, e.g. 'vlc', 'youtube'. Omit to auto-detect the playing window."}},"required":[]})),
         f("watch_stop", "Stop watching the screen (ends the background watch loop started by watch_start).", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("watch_status", "Report whether Jarvis is currently watching the screen and how much it has seen/heard so far.", serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("browse_url", "Open a URL in a real headless browser (runs JavaScript) and return the rendered page text. Better than fetch_url for modern sites.", str_prop("url", "the URL to load")),
@@ -176,7 +177,12 @@ pub async fn execute(
         "ui_marks" => ui_marks(),
         "ui_click" => ui_click(args_json),
         "operate_app" => operate_app(args_json).await,
-        "watch_start" => crate::watch::start(),
+        "watch_start" => {
+            #[derive(Deserialize)]
+            struct WatchArg { window: Option<String> }
+            let window = serde_json::from_str::<WatchArg>(args_json).ok().and_then(|a| a.window);
+            crate::watch::start(window)
+        }
         "watch_stop" => crate::watch::stop(),
         "watch_status" => crate::watch::status(),
         "browse_url" => browse_url(args_json).await,
@@ -1107,19 +1113,16 @@ pub(crate) fn screenshot_data_url() -> Result<(String, u32, u32), String> {
 // the watch loop, so we only pay for a vision caption when the screen actually
 // changes (a paused video or static slide costs nothing). Sync + !Send-contained
 // like screenshot_data_url.
-pub(crate) fn screenshot_with_fingerprint() -> Result<(String, Vec<u8>, u32, u32), String> {
+// Shared: turn a captured RGBA image into (png_data_url, 64x64 luma fingerprint,
+// w, h). The fingerprint drives cheap scene-change detection in the watch loop.
+fn encode_capture(img: xcap::image::RgbaImage) -> Result<(String, Vec<u8>, u32, u32), String> {
     use base64::Engine as _;
-    let monitors = xcap::Monitor::all().map_err(|e| format!("ERROR: screen capture: {e}"))?;
-    let monitor = monitors.into_iter().next().ok_or("ERROR: no monitor found")?;
-    let img = monitor.capture_image().map_err(|e| format!("ERROR capturing screen: {e}"))?;
     let (w, h) = (img.width(), img.height());
     let dynimg = xcap::image::DynamicImage::ImageRgba8(img);
-    // tiny grayscale fingerprint for change detection
     let fp = dynimg
         .resize_exact(64, 64, xcap::image::imageops::FilterType::Triangle)
         .to_luma8()
         .into_raw();
-    // full PNG for the vision model
     let mut bytes: Vec<u8> = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut bytes);
     dynimg
@@ -1127,6 +1130,118 @@ pub(crate) fn screenshot_with_fingerprint() -> Result<(String, Vec<u8>, u32, u32
         .map_err(|e| format!("ERROR encoding screenshot: {e}"))?;
     let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
     Ok((url, fp, w, h))
+}
+
+pub(crate) fn screenshot_with_fingerprint() -> Result<(String, Vec<u8>, u32, u32), String> {
+    let monitors = xcap::Monitor::all().map_err(|e| format!("ERROR: screen capture: {e}"))?;
+    let monitor = monitors.into_iter().next().ok_or("ERROR: no monitor found")?;
+    let img = monitor.capture_image().map_err(|e| format!("ERROR capturing screen: {e}"))?;
+    encode_capture(img)
+}
+
+// Capture a SPECIFIC window by title/app substring (case-insensitive), even when
+// it is behind other windows - PrintWindow(PW_RENDERFULLCONTENT) renders occluded
+// content. This is what lets Jarvis watch a video window while the user keeps the
+// HUD in front. Skips minimized windows and Jarvis's own HUD. Prefers a title
+// match (the video's title) over an app-name match.
+pub(crate) fn screenshot_window_with_fingerprint(hint: &str) -> Result<(String, Vec<u8>, u32, u32), String> {
+    let hint_l = hint.to_lowercase();
+    let windows = xcap::Window::all().map_err(|e| format!("ERROR: window list: {e}"))?;
+    let mut title_match: Option<xcap::Window> = None;
+    let mut app_match: Option<xcap::Window> = None;
+    for w in windows {
+        if w.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let tl = w.title().unwrap_or_default().to_lowercase();
+        let al = w.app_name().unwrap_or_default().to_lowercase();
+        if tl.contains("jarvis") {
+            continue; // never watch our own HUD
+        }
+        if title_match.is_none() && !hint_l.is_empty() && tl.contains(&hint_l) {
+            title_match = Some(w);
+            continue;
+        }
+        if app_match.is_none() && !hint_l.is_empty() && al.contains(&hint_l) {
+            app_match = Some(w);
+        }
+    }
+    let win = title_match.or(app_match).ok_or_else(|| {
+        format!("ERROR: no visible window matching '{hint}'. Try the app (e.g. 'chrome', 'edge', 'vlc') or part of the video title, and make sure the video is in its OWN window (not a background tab).")
+    })?;
+    let img = win.capture_image().map_err(|e| format!("ERROR capturing window: {e}"))?;
+    encode_capture(img)
+}
+
+// Title markers that strongly suggest a video/media window, so we can identify
+// the right window across ANY browser without being told its name.
+#[cfg(windows)]
+fn media_title_score(tl: &str) -> i64 {
+    const MARKERS: &[&str] = &[
+        "youtube", "netflix", "vimeo", "twitch", "prime video", "hotstar", "disney+",
+        "hulu", "vlc", "mpc-hc", "media player", "movies & tv", "spotify", ".mp4",
+        ".mkv", ".webm", "udemy", "coursera", "- watch", "livestream", "live stream",
+    ];
+    MARKERS.iter().filter(|m| tl.contains(**m)).count() as i64 * 40
+}
+
+#[cfg(windows)]
+fn is_browser_window(tl: &str, al: &str) -> bool {
+    const B: &[&str] = &["chrome", "edge", "firefox", "opera", "brave", "vivaldi", "browser"];
+    B.iter().any(|b| al.contains(b) || tl.contains(b))
+}
+
+// AUTO-DETECT and capture the window that is playing a video, across ANY browser
+// or player - no name needed. Scores every visible window by: whether its process
+// is emitting audio right now (+100, nails single-process players like VLC), a
+// media-like title (+40 each, catches YouTube/Netflix even when Chrome plays audio
+// from a separate service process), and a small nudge for a browser window while
+// audio is playing. Picks the best; ties break by area. Errors if it can't
+// identify one (caller falls back to full screen). Even when occluded (behind the
+// HUD), PrintWindow renders the real content.
+#[cfg(windows)]
+pub(crate) fn screenshot_auto_window_with_fingerprint() -> Result<(String, Vec<u8>, u32, u32), String> {
+    let audio_pids = crate::hearing::active_audio_pids();
+    let audio_playing = !audio_pids.is_empty();
+    let windows = xcap::Window::all().map_err(|e| format!("ERROR: window list: {e}"))?;
+    let mut best: Option<(i64, xcap::Window)> = None;
+    for w in windows {
+        if w.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let title = w.title().unwrap_or_default();
+        if title.trim().is_empty() {
+            continue; // skip invisible/utility windows
+        }
+        let tl = title.to_lowercase();
+        if tl.contains("jarvis") {
+            continue; // never watch our own HUD
+        }
+        let al = w.app_name().unwrap_or_default().to_lowercase();
+        let mut score = 0i64;
+        if audio_pids.contains(&w.pid().unwrap_or(0)) {
+            score += 100;
+        }
+        score += media_title_score(&tl);
+        if audio_playing && is_browser_window(&tl, &al) {
+            score += 20;
+        }
+        if score <= 0 {
+            continue; // no evidence this is the video window
+        }
+        let area = w.width().unwrap_or(0) as i64 * w.height().unwrap_or(0) as i64;
+        let ranked = score * 1_000_000_000 + area; // score dominates, area breaks ties
+        if best.as_ref().map_or(true, |(b, _)| ranked > *b) {
+            best = Some((ranked, w));
+        }
+    }
+    match best {
+        Some((_, win)) => {
+            let img = win.capture_image().map_err(|e| format!("ERROR capturing window: {e}"))?;
+            encode_capture(img)
+        }
+        None => Err("ERROR: couldn't identify a playing video window (nothing is emitting audio or has a media title). Play the video in its own visible window, or tell me the window name.".into()),
+    }
 }
 
 // Reusable: ask a vision model a question about an image (returns text or ERROR).
