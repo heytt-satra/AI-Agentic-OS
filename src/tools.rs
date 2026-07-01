@@ -75,6 +75,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"the durable learning, one clear sentence"},"kind":{"type":"string","description":"preference | fact | heuristic (default fact)"}},"required":["text"]})),
         f("goal_update", "Resolve one of YOUR OWN hypotheses/goals (the ones shown to you under 'Your OWN current hypotheses/goals') once the user responds to it. status: 'confirmed' if the user agreed a hypothesis is true (ALSO call learn to remember the confirmed fact), 'done' if you completed a goal, or 'dropped' if the user said no or it is not useful.",
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer","description":"the #id of the hypothesis/goal"},"status":{"type":"string","description":"confirmed | done | dropped"},"note":{"type":"string"}},"required":["id","status"]})),
+        f("predict_outcome", "BEFORE a consequential or risky action (running a command, deleting or overwriting, installing, an irreversible click), check what this action actually CAUSED the last times you did it on THIS machine. Returns the real past outcomes + success rate so you can predict and adapt instead of guessing. Pass the tool name (e.g. 'run_shell') and optionally 'like' (a key part of the argument, e.g. the command) to match similar past actions. Use this whenever you are unsure or the action is hard to undo.",
+          serde_json::json!({"type":"object","properties":{"tool":{"type":"string","description":"the tool you are about to use, e.g. run_shell"},"like":{"type":"string","description":"optional: key part of the argument to match similar past actions, e.g. the command"}},"required":["tool"]})),
         f("recall_activity", "The user's SECOND BRAIN: a detailed timeline of EVERYTHING they did on the computer (every app they focused, every window title, things they copied), with clock times and per-app time totals. ALWAYS use this for 'what did I do', 'what was I working on', 'what apps did I use', 'how long in X', or any question about a past time window. Set 'minutes' to the look-back window (e.g. 60 for the last hour, 480 for the workday). Optional 'query' filters by app or keyword. Report what it returns in detail; do NOT summarize from the chat.",
           serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"how far back to look, in minutes (default 180)"},"query":{"type":"string","description":"optional app/keyword filter"}},"required":[]})),
 
@@ -180,6 +182,14 @@ pub async fn execute(
                     let ok = mem.goal_set_status(a.id, &a.status, a.note.as_deref().unwrap_or("")).await;
                     if ok { format!("Updated goal #{} -> {}", a.id, a.status) } else { format!("No goal #{} to update", a.id) }
                 }
+                Err(e) => format!("ERROR: bad args: {e}"),
+            }
+        }
+        "predict_outcome" => {
+            #[derive(Deserialize)]
+            struct P { tool: String, like: Option<String> }
+            match serde_json::from_str::<P>(args_json) {
+                Ok(a) => predict_outcome(&a.tool, a.like.as_deref(), mem).await,
                 Err(e) => format!("ERROR: bad args: {e}"),
             }
         }
@@ -375,6 +385,56 @@ pub async fn execute(
     // Safety (gap 7): if this tool brought in untrusted outside content, flag any
     // embedded instructions so the model treats the result as DATA, not commands.
     guard_untrusted(name, out)
+}
+
+// Causal look-ahead: what did this action CAUSE the last times we did it? Queries
+// the interventional log and returns a grounded prediction (real success rate +
+// recent outcomes), optionally filtered to args similar to `like`.
+async fn predict_outcome(tool: &str, like: Option<&str>, mem: &crate::memory::MemoryHandle) -> String {
+    let hist = mem.causal_for_tool(tool, 15).await;
+    if hist.is_empty() {
+        return format!(
+            "No prior record of '{tool}' on this machine yet - no basis to predict; proceed carefully and the outcome will be recorded for next time."
+        );
+    }
+    let likel = like.map(|s| s.to_lowercase());
+    let (mut total, mut succ) = (0i64, 0i64);
+    let mut lines = Vec::new();
+    for (args, outcome, ok) in &hist {
+        if let Some(l) = &likel {
+            if !args.to_lowercase().contains(l.as_str()) {
+                continue;
+            }
+        }
+        total += 1;
+        if *ok {
+            succ += 1;
+        }
+        if lines.len() < 4 {
+            let o: String = outcome.replace('\n', " ").chars().take(80).collect();
+            let a: String = args.chars().take(40).collect();
+            lines.push(format!("  [{}] {a} -> {o}", if *ok { "ok" } else { "FAIL" }));
+        }
+    }
+    if total == 0 {
+        return format!(
+            "No past '{tool}' matching that pattern (but {} other '{tool}' call(s) recorded). No specific prediction; proceed carefully.",
+            hist.len()
+        );
+    }
+    let rate = 100 * succ / total;
+    let verdict = if rate >= 80 {
+        "likely to SUCCEED"
+    } else if rate <= 40 {
+        "has often FAILED here - reconsider or adapt your approach"
+    } else {
+        "MIXED history - proceed carefully"
+    };
+    let filt = like.map(|l| format!(" like \"{l}\"")).unwrap_or_default();
+    format!(
+        "Causal prediction for '{tool}'{filt}: {succ}/{total} past run(s) succeeded ({rate}%) - {verdict}.\nRecent outcomes:\n{}",
+        lines.join("\n")
+    )
 }
 
 // Tools that CHANGE the world (interventions) - the do() operations worth recording

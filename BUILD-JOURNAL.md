@@ -1131,3 +1131,22 @@ causal_probe.txt (write_file); `jarvis causal` then showed "write_file 1/1 (100%
 1/1 (100%)" with each action's args -> real outcome, both ok. The do() dataset is accruing.
 **Next (commit 2):** predict-before-act - before a consequential action, recall its past
 outcomes and state an explicit prediction; after, compare predicted vs actual and surface it.
+
+### 2026-06-30 - Causal world model, commit 2: predict-before-act (look-ahead)
+**What shipped:** a `predict_outcome(tool, like?)` tool that queries the interventional log
+and returns a GROUNDED prediction - the real success rate + recent outcomes for that action
+on this machine, optionally filtered to args similar to `like` (e.g. the same command).
+Verdict thresholds: >=80% "likely to SUCCEED", <=40% "has often FAILED - reconsider", else
+"MIXED". Persona now tells Jarvis: before a consequential/hard-to-undo action, call
+predict_outcome and adapt if it tended to fail - "learning real cause and effect from your
+own interventions, not guessing." This is the look-ahead step of the causal model.
+**Verified live:** after 4 logged run_shell interventions, the agent called predict_outcome
+-> "Causal prediction for 'run_shell': 4/4 past run(s) succeeded (100%) - likely to SUCCEED";
+for delete_path (never done) -> "No prior record ... no basis to predict; proceed carefully."
+Known vs unknown handled correctly; grounded in real do() data.
+**Honest limit noted:** `success` is coarse (tool executed without an ERROR/BLOCKED result),
+not command-level exit code - the outcome TEXT carries the real detail. Sharpening success
+per-tool (parse exit codes) is a later refinement.
+**Next (commit 3):** distill stable action->effect RULES from the log and auto-surface the
+relevant one before the agent acts (so foresight happens even without an explicit call),
+plus record predicted-vs-actual to measure the model's calibration.
