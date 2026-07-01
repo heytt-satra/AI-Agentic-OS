@@ -96,6 +96,12 @@ task, EXTEND yourself instead of giving up: write a shell command that accomplis
 it (use {placeholders} for inputs), save it with skill_create, then run it with \
 skill_run. Reuse saved skills via skill_list. This grows new capabilities over time \
 (skill_run executes shell, so it asks for approval unless you have been granted it).\n\
+YOU LEARN ACROSS SESSIONS: you are not stateless. When the user states a durable \
+preference, fact, or correction, or you notice a stable pattern about them or their \
+work, call the learn tool with ONE clear sentence so you remember it in future \
+sessions. Messages labelled 'What you have LEARNED about this user' are your own \
+accumulated knowledge: act consistently with it, and never ask again for something \
+you have already learned.\n\
 YOUR SECOND BRAIN: when the user asks what they did, what they were working on, \
 which apps they used, how long on something, or about any past time window, ALWAYS \
 call recall_activity (set 'minutes' to the window they mean) and report its timeline \
@@ -391,6 +397,20 @@ async fn main() -> Result<()> {
             println!("hear-test is Windows-only (WASAPI loopback).");
             return Ok(());
         }
+        Some("learnings") => {
+            // Continuous-learning spine: show what Jarvis has learned (transparency).
+            let rows = mem.learnings_list().await;
+            if rows.is_empty() {
+                println!("Nothing learned yet. As you use Jarvis it records durable preferences and facts (the `learn` tool) and recalls them in future sessions.");
+            } else {
+                println!("\nWhat Jarvis has learned about you\n=================================");
+                for (id, kind, text, conf, rc) in rows {
+                    println!("  #{id} [{kind}] (confidence {conf:.2}, confirmed x{}) {text}", rc + 1);
+                }
+                println!("\nThese are recalled into every future session. Stored locally in jarvis.db.");
+            }
+            return Ok(());
+        }
         Some("grants") => {
             let g = mem.grants_list().await;
             if g.is_empty() {
@@ -455,6 +475,18 @@ async fn main() -> Result<()> {
         messages.push(Message::system(seed));
     }
 
+    // Continuous-learning spine: load the stable "profile" - the highest-confidence
+    // things Jarvis has learned about this user across past sessions - so it does
+    // NOT start fresh. Per-question relevance recall (in the loop) adds the rest.
+    let profile = mem.top_learnings(6).await;
+    if !profile.is_empty() {
+        println!("(recalling {} things I've learned about you)\n", profile.len());
+        let p = profile.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
+        messages.push(Message::system(format!(
+            "What you have LEARNED about this user across past sessions (persisted; act consistently with it):\n{p}"
+        )));
+    }
+
     // ...and with the last few turns for short-term continuity. (Relevance
     // recall, below, pulls in older relevant facts per-question.)
     let recalled = mem.recent_dialog(4).await;
@@ -495,6 +527,13 @@ async fn main() -> Result<()> {
                 .join("\n");
             messages.push(Message::system(format!("Possibly relevant memory:\n{ctx}")));
             tracing::info!(hits = relevant.len(), "relevance recall");
+        }
+
+        // Continuous-learning spine: durable learnings relevant to THIS question.
+        let learned = mem.recall_learnings(input, 5).await;
+        if !learned.is_empty() {
+            let l = learned.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
+            messages.push(Message::system(format!("Relevant things you've learned about this user:\n{l}")));
         }
 
         // Live watch-along: if Jarvis is currently watching a video on screen,

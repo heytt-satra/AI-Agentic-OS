@@ -1004,3 +1004,34 @@ hooks (Ask-Jarvis menu + Ctrl+Alt+J summon) + rung 3 supervised background prese
 now SENSES the filesystem, is REACHABLE from the shell, and STAYS UP on its own - genuine OS
 integration, no kernel driver, GUI/computer-use intact. The big remaining lever from the
 owner's AGI list is the continuous-learning spine (self-updating beliefs + reflection loop).
+
+### 2026-06-30 - Continuous-learning spine, Stage 1: Jarvis stops starting fresh
+**The gap (owner's AGI list, #1):** "every session starts fresh; I don't learn from
+experience between conversations." True: memory STORED history but never formed or
+updated durable beliefs. This closes that.
+**What shipped:** a `learnings` store on the SAME local-embedder foundation as document
+RAG (no new ML). New `learnings` table (kind, text, source, confidence REAL, reinforced,
+vec) + MemCmd LearnAdd/LearnRecall/LearnTop/LearnList in the memory actor.
+- LEARN: a `learn` tool the agent calls when the user states a durable preference/fact/
+  correction, or it spots a stable pattern. One sentence each, confidence starts 0.6.
+- REINFORCE not duplicate: LearnAdd embeds the text and, if cosine >= 0.90 to an existing
+  learning, RAISES its confidence (+0.1, cap 0.99) and bumps the counter instead of adding
+  a near-copy - a belief strengthens as it's confirmed.
+- RECALL into every session: (1) a stable PROFILE (top-confidence learnings via LearnTop)
+  injected at session start in BOTH the REPL and HUD, and (2) per-question relevance recall
+  (LearnRecall) ranked by relevance*confidence. So it never starts blank and pulls the
+  right belief for the question.
+- Transparency: `jarvis learnings` lists everything with confidence + confirm-count; all
+  local in jarvis.db. Persona updated: "you are not stateless... act consistently with what
+  you have learned, never re-ask what you already know."
+**Verified live (the real test, two SEPARATE processes):** process #1 -> "remember my
+company is Lensr and I prefer concise one-line answers" -> agent called learn; `jarvis
+learnings` showed 2 persisted rows (fact + preference, conf 0.60). Process #2, a BRAND-NEW
+process with no shared chat -> printed "(recalling 2 things I've learned about you)" and
+answered "Your company is Lensr... you prefer concise one-line answers" purely from the
+recalled learnings. Learned in one session, known in another. AGI-list #1 closed at the
+mechanism level.
+**Next (Stage 2):** a reflection loop - after sessions / on the heartbeat, auto-distill new
+learnings from conversation + activity (learn WITHOUT being told), plus confidence decay for
+stale unconfirmed beliefs and a hypotheses kind the proactive layer can test. Stage 1 is the
+store + recall + explicit/on-mention learning; Stage 2 makes it autonomous.

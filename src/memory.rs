@@ -66,6 +66,12 @@ enum MemCmd {
     // Document RAG (gap 3).
     DocIngest { source: String, chunks: Vec<String>, reply: oneshot::Sender<usize> },
     DocSearch { query: String, k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> },
+
+    // Continuous-learning spine.
+    LearnAdd { text: String, kind: String, source: String, reply: oneshot::Sender<String> },
+    LearnRecall { query: String, k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> }, // (kind, text, confidence)
+    LearnTop { k: i64, reply: oneshot::Sender<Vec<(String, String, f32)>> }, // highest-confidence profile
+    LearnList { reply: oneshot::Sender<Vec<(i64, String, String, f32, i64)>> }, // (id, kind, text, confidence, reinforced)
     // Leads / outreach engine.
     LeadAdd { lead: Lead, reply: oneshot::Sender<i64> },
     LeadList { reply: oneshot::Sender<Vec<(i64, Lead)>> },
@@ -432,6 +438,41 @@ impl MemoryHandle {
         rx.await.unwrap_or_default()
     }
 
+    // ── continuous-learning spine ───────────────────────────────────────────
+    /// Record a durable learning (deduped/reinforced). Returns "added" or
+    /// "reinforced (confidence X)".
+    pub async fn learn(&self, text: &str, kind: &str, source: &str) -> String {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LearnAdd { text: text.to_string(), kind: kind.to_string(), source: source.to_string(), reply }).await.is_err() {
+            return "error".to_string();
+        }
+        rx.await.unwrap_or_else(|_| "error".to_string())
+    }
+    /// Learnings relevant to a query (kind, text, confidence), ranked by relevance*confidence.
+    pub async fn recall_learnings(&self, query: &str, k: i64) -> Vec<(String, String, f32)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LearnRecall { query: query.to_string(), k, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// The highest-confidence learnings (the stable "profile"), independent of query.
+    pub async fn top_learnings(&self, k: i64) -> Vec<(String, String, f32)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LearnTop { k, reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// All learnings (id, kind, text, confidence, reinforced) for `jarvis learnings`.
+    pub async fn learnings_list(&self) -> Vec<(i64, String, String, f32, i64)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::LearnList { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     // ── leads / outreach engine ─────────────────────────────────────────────
     pub async fn lead_add(&self, lead: Lead) -> i64 {
         let (reply, rx) = oneshot::channel();
@@ -526,6 +567,15 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS documents (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             source TEXT NOT NULL, chunk TEXT NOT NULL, vec BLOB NOT NULL
+         );
+         -- Continuous-learning spine: durable things Jarvis has LEARNED about the
+         -- user/their work (preferences, facts, heuristics), recalled into future
+         -- sessions. confidence grows on reinforcement, source records origin.
+         CREATE TABLE IF NOT EXISTS learnings (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'fact', text TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0.6,
+            reinforced INTEGER NOT NULL DEFAULT 0, vec BLOB NOT NULL
          );
          -- Leads / contacts for the research+outreach engine.
          -- status = new | contacted | replied | dropped.
@@ -898,6 +948,109 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 }
             }
             let _ = reply.send(hits);
+        }
+        MemCmd::LearnAdd { text, kind, source, reply } => {
+            // Learn, but DON'T pile up near-duplicates: if a very similar learning
+            // already exists, REINFORCE it (raise confidence, bump the counter,
+            // refresh the wording) instead of inserting a new row. This is how a
+            // belief gets stronger the more often it's confirmed.
+            let mut result = "skipped (no embedder)".to_string();
+            if let Some(emb) = embedder {
+                if let Ok(v) = emb.embed(&text) {
+                    let mut best: Option<(i64, f32, f64, i64)> = None; // (id, sim, confidence, reinforced)
+                    if let Ok(mut stmt) = conn.prepare("SELECT id, vec, confidence, reinforced FROM learnings") {
+                        if let Ok(rows) = stmt.query_map([], |r| {
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+                        }) {
+                            for (id, b, conf, rc) in rows.filter_map(|x| x.ok()) {
+                                let sim = cosine(&v, &blob_to_vec(&b));
+                                if best.as_ref().map_or(true, |(_, s, _, _)| sim > *s) {
+                                    best = Some((id, sim, conf, rc));
+                                }
+                            }
+                        }
+                    }
+                    match best {
+                        Some((id, sim, conf, rc)) if sim >= 0.90 => {
+                            let newconf = (conf + 0.1).min(0.99);
+                            let _ = conn.execute(
+                                "UPDATE learnings SET confidence=?1, reinforced=?2, last_seen=?3, text=?4, vec=?5 WHERE id=?6",
+                                params![newconf, rc + 1, now_secs(), text, vec_to_blob(&v), id],
+                            );
+                            result = format!("reinforced (confidence {newconf:.2})");
+                        }
+                        _ => {
+                            if conn.execute(
+                                "INSERT INTO learnings (ts, last_seen, kind, text, source, confidence, reinforced, vec) VALUES (?1, ?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                                params![now_secs(), kind, text, source, 0.6_f64, vec_to_blob(&v)],
+                            ).is_ok() {
+                                result = "added".to_string();
+                            } else {
+                                result = "error".to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = reply.send(result);
+        }
+        MemCmd::LearnRecall { query, k, reply } => {
+            // Rank by relevance * confidence, so a strongly-held, on-topic belief
+            // surfaces above a weakly-held tangential one.
+            let mut hits: Vec<(String, String, f32)> = Vec::new();
+            if let Some(emb) = embedder {
+                if let Ok(qv) = emb.embed(&query) {
+                    if let Ok(mut stmt) = conn.prepare("SELECT kind, text, confidence, vec FROM learnings") {
+                        if let Ok(rows) = stmt.query_map([], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, Vec<u8>>(3)?))
+                        }) {
+                            let mut scored: Vec<(f64, String, String, f32)> = rows
+                                .filter_map(|x| x.ok())
+                                .map(|(kind, text, conf, b)| {
+                                    let sim = cosine(&qv, &blob_to_vec(&b));
+                                    (sim as f64 * conf, kind, text, conf as f32)
+                                })
+                                .filter(|(rank, _, _, _)| *rank > 0.12)
+                                .collect();
+                            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                            for (_, kind, text, conf) in scored.into_iter().take(k.max(1) as usize) {
+                                hits.push((kind, text, conf));
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = reply.send(hits);
+        }
+        MemCmd::LearnTop { k, reply } => {
+            let mut out: Vec<(String, String, f32)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT kind, text, confidence FROM learnings ORDER BY confidence DESC, reinforced DESC, last_seen DESC LIMIT ?1",
+            ) {
+                if let Ok(rows) = stmt.query_map(params![k.max(1)], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?))
+                }) {
+                    for (kind, text, conf) in rows.filter_map(|x| x.ok()) {
+                        out.push((kind, text, conf as f32));
+                    }
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::LearnList { reply } => {
+            let mut out: Vec<(i64, String, String, f32, i64)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT id, kind, text, confidence, reinforced FROM learnings ORDER BY confidence DESC, last_seen DESC",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)?, r.get::<_, i64>(4)?))
+                }) {
+                    for (id, kind, text, conf, rc) in rows.filter_map(|x| x.ok()) {
+                        out.push((id, kind, text, conf as f32, rc));
+                    }
+                }
+            }
+            let _ = reply.send(out);
         }
         MemCmd::LeadAdd { lead, reply } => {
             // Dedupe: if a lead with the same email or phone already exists,

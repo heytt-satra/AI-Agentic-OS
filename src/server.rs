@@ -95,6 +95,16 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
 
     let mut messages = vec![Message::system(crate::system_prompt())];
 
+    // Continuous-learning spine: load the stable profile so the HUD session, like
+    // the REPL, starts already knowing the user.
+    let profile = st.mem.top_learnings(6).await;
+    if !profile.is_empty() {
+        let p = profile.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
+        messages.push(Message::system(format!(
+            "What you have LEARNED about this user across past sessions (persisted; act consistently with it):\n{p}"
+        )));
+    }
+
     while let Some(Ok(msg)) = socket.recv().await {
         let text = match msg {
             WsMessage::Text(t) => t.as_str().to_owned(),
@@ -121,6 +131,12 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                 .collect::<Vec<_>>()
                 .join("\n");
             messages.push(Message::system(format!("Possibly relevant memory:\n{ctx}")));
+        }
+        // Continuous-learning spine: durable learnings relevant to THIS question.
+        let learned = st.mem.recall_learnings(&user_text, 5).await;
+        if !learned.is_empty() {
+            let l = learned.iter().map(|(k, t, _)| format!("- [{k}] {t}")).collect::<Vec<_>>().join("\n");
+            messages.push(Message::system(format!("Relevant things you've learned about this user:\n{l}")));
         }
         // Live watch-along: hand the agent everything it is currently seeing/
         // hearing on screen, so the user can ask about a playing video (same as
