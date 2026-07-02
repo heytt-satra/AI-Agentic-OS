@@ -1231,3 +1231,17 @@ run_turn, the HUD stream). all_definitions kept (allow(dead_code)) as the fallba
 answered "4" cleanly - no more DeepSeek "ok"-class garbage. The remaining tokens are the
 persona + per-turn context injections (learnings/goals/causal), a separate future trim.
 **Next (1.2):** degenerate-reply retry (auto re-ask once on empty/"ok"-class replies).
+
+### 2026-06-30 - Roadmap Phase 1.2: degenerate-reply retry
+**What shipped:** a safety net for weak-model failure modes. `is_degenerate(user, content)`
+flags a final reply that is empty, a bare acknowledgement ("ok"/"okay"/"k"/"sure") that
+answers nothing, or a wrong-language refusal (mostly non-ASCII letters when the user wrote in
+ASCII, e.g. the DeepSeek "你好，我无法..." replies). Real short answers ("4", "Yes") are NOT
+flagged. In run_turn, if the final answer is degenerate and we haven't retried yet, push a
+one-line nudge ("answer directly, completely, in English now") and loop once more; the flag
+caps it at a single re-ask. **Verified:** unit test degenerate_reply_detection (empty/ok/
+Chinese-vs-English = true; "4"/"Yes"/a real sentence = false); cargo test 27 passed. With
+gemini-2.5-flash now the default this rarely fires, but it protects the deepseek fast-tier
+turns. **Scope:** run_turn (REPL + heartbeat); the streaming HUD path is a follow-on (retry
+mid-stream is trickier and the default model doesn't degenerate).
+**Next (1.3):** HUD usage/latency meter (wire token + timing into the streaming path).

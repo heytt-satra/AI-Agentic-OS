@@ -1150,12 +1150,35 @@ async fn run_dataset_export(mem: &MemoryHandle, out_path: &str) {
     }
 }
 
+// Is this final reply a degenerate non-answer? Catches the failure modes weaker
+// models fall into: empty, a bare acknowledgement ("ok") that answers nothing, or a
+// wrong-language refusal (non-Latin reply when the user wrote in Latin script). Real
+// short answers like "4" or "Yes" are NOT degenerate.
+fn is_degenerate(user: &str, content: &str) -> bool {
+    let c = content.trim();
+    if c.is_empty() {
+        return true;
+    }
+    // Wrong-language reply: mostly non-ASCII letters while the user wrote ASCII.
+    let letters: Vec<char> = c.chars().filter(|ch| ch.is_alphabetic()).collect();
+    if !letters.is_empty() {
+        let non_ascii = letters.iter().filter(|ch| !ch.is_ascii()).count();
+        let user_ascii = user.chars().filter(|ch| ch.is_alphabetic()).all(|ch| ch.is_ascii());
+        if user_ascii && non_ascii * 2 > letters.len() {
+            return true;
+        }
+    }
+    // Bare acknowledgement that answers nothing.
+    matches!(c.to_lowercase().as_str(), "ok" | "okay" | "k" | "sure")
+}
+
 // One user turn = the agent loop until the model gives a final answer.
 // Borrows `messages` mutably so tool results accumulate into the conversation.
 async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Message>) -> Result<String> {
     let mut tainted = false; // becomes true once we read untrusted web content
     let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
     let mut critic_done = false; // allow exactly one critic-triggered retry
+    let mut degen_retried = false; // allow exactly one degenerate-reply re-ask
     let task = messages.iter().rev().find(|m| m.role == "user")
         .and_then(|m| m.content.clone()).unwrap_or_default();
     // Model routing (Pillar 8): trivial turns may use the cheap model.
@@ -1200,6 +1223,16 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         }
 
         let answer = reply.message.content.unwrap_or_else(|| "(no answer)".to_string());
+        // Degenerate-reply guard: some models return an empty or "ok"-class non-answer
+        // (or a wrong-language refusal). Re-ask once to get a real answer.
+        if !degen_retried && is_degenerate(&task, &answer) {
+            degen_retried = true;
+            println!("  · that looked like a non-answer; re-asking.");
+            messages.push(Message::user(
+                "Your previous reply was empty or a non-answer. Answer the request directly, completely, and in English now.".to_string(),
+            ));
+            continue;
+        }
         // Critic: verify the task is actually done before returning (once).
         if !critic_done {
             if let Some(reason) = critic_verify(provider, &task, &answer).await {
@@ -1561,6 +1594,19 @@ pub(crate) async fn run_proact(provider: &Provider, mem: &MemoryHandle) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn degenerate_reply_detection() {
+        // real answers are NOT degenerate
+        assert!(!is_degenerate("what is 2+2?", "4"));
+        assert!(!is_degenerate("is it raining?", "Yes, it looks like it."));
+        assert!(!is_degenerate("summarize this", "The document covers three points..."));
+        // empty, bare acks, and wrong-language replies ARE degenerate
+        assert!(is_degenerate("do the thing", ""));
+        assert!(is_degenerate("what is 2+2?", "ok"));
+        assert!(is_degenerate("what is 2+2?", "  OK "));
+        assert!(is_degenerate("please answer in english", "你好，我无法给到相关内容。"));
+    }
 
     #[test]
     fn norm_args_collapses_order_case_space() {
