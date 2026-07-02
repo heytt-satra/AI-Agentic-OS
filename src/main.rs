@@ -804,7 +804,7 @@ pub async fn run_subagent(
     let mut critic_done = false; // allow exactly one critic-triggered retry
     let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
     for _ in 0..steps {
-        let reply = match provider.chat(&messages, Some(tools::all_definitions().await)).await {
+        let reply = match provider.chat(&messages, Some(tools::relevant_definitions(task).await)).await {
             Ok(r) => r,
             Err(e) => return format!("ERROR: sub-agent ({role}) failed: {e}"),
         };
@@ -1163,7 +1163,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     let provider = &routed;
     let steps = max_steps();
     for _step in 1..=steps {
-        let reply = provider.chat(messages, Some(tools::all_definitions().await)).await?;
+        let reply = provider.chat(messages, Some(tools::relevant_definitions(&task).await)).await?;
         messages.push(reply.message.clone());
         mem.add_usage(provider.model(), reply.tokens).await;
 

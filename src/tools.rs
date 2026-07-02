@@ -139,8 +139,67 @@ pub fn definitions() -> Vec<Tool> {
 
 // The full tool list sent to the model each turn: built-ins plus any tools
 // discovered from connected MCP servers (gap 5).
+#[allow(dead_code)]
 pub async fn all_definitions() -> Vec<Tool> {
     let mut defs = definitions();
+    if let Some(h) = crate::mcp::handle() {
+        defs.extend(h.tools().await);
+    }
+    defs
+}
+
+// Cost + speed (Pillar 8): send only the tools RELEVANT to this turn instead of
+// all ~60 on every call. A small always-on core plus keyword-matched groups. This
+// cuts thousands of tokens off trivial turns while keeping capability on real ones.
+// MCP tools (user-configured) are always included. Falls back to the full set if,
+// somehow, nothing is selected.
+pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
+    use std::collections::HashSet;
+    let m = msg.to_lowercase();
+    let hit = |kws: &[&str]| kws.iter().any(|k| m.contains(k));
+    let mut keep: HashSet<&str> = [
+        // core: always available
+        "read_file", "write_file", "list_dir", "delete_path", "run_shell", "open_path",
+        "open_app", "install_software", "wait", "web_search", "news_search", "fetch_url",
+        "recall_activity", "learn",
+    ]
+    .into_iter()
+    .collect();
+    if hit(&["screen", "click", "button", "window", " app", "type ", "operate", "gui", " ui ", "see ", "cursor", "mouse"]) {
+        keep.extend(["see_screen", "click_on", "check_screen", "ui_list", "ui_marks", "ui_click", "operate_app", "mouse_click", "press_keys", "paste_text", "type_text"]);
+    }
+    if hit(&["watch", "video", "hear", "listen", "playing", "subtitle", "transcri"]) {
+        keep.extend(["watch_start", "watch_stop", "watch_status"]);
+    }
+    if hit(&["predict", "cause", "risky", "before i", "before you", "last time", "will it"]) {
+        keep.extend(["predict_outcome"]);
+    }
+    if hit(&["remember", "learn", "know about me", "goal", "hypothes", "reflect", "curious", "what do you know", "think about"]) {
+        keep.extend(["self_report", "self_reflect", "proact_check", "pursue_goal", "goal_update"]);
+    }
+    if hit(&["document", "pdf", "ingest", "my files", "my notes", "search my", "knowledge"]) {
+        keep.extend(["ingest_path", "search_docs"]);
+    }
+    if hit(&["code", "compile", "build", "program", "rust", "python", "script", "project", "function", "bug"]) {
+        keep.extend(["code_new_project", "code_write_file", "code_read_file", "code_list", "code_open", "code_exec"]);
+    }
+    if hit(&["browse", "website", "url", "http", "web page", "webpage", "scrape"]) {
+        keep.extend(["browse_url", "browse_js"]);
+    }
+    if hit(&["lead", "outreach", "prospect", "contact", "reach out", "cold email", "email"]) {
+        keep.extend(["extract_contacts", "verify_email", "lead_add", "lead_list", "lead_update", "email_compose"]);
+    }
+    if hit(&["skill"]) {
+        keep.extend(["skill_create", "skill_list", "skill_remove", "skill_run"]);
+    }
+    if hit(&["task", "agent", "schedule", "remind", "every ", "delegate", "automate"]) {
+        keep.extend(["task_add", "task_list", "task_done", "task_cancel", "agent_create", "agent_list", "agent_run", "agent_delete", "schedule_add", "schedule_list", "schedule_remove", "spawn_agent"]);
+    }
+    let mut defs: Vec<Tool> = definitions()
+        .into_iter()
+        .filter(|t| keep.contains(t.function.name.as_str()))
+        .collect();
+    // Always include MCP tools (user-configured intent, usually few).
     if let Some(h) = crate::mcp::handle() {
         defs.extend(h.tools().await);
     }

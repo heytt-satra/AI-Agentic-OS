@@ -1213,3 +1213,21 @@ not a bug; putting it in the Win11 top-level menu needs a packaged IExplorerComm
 (MSIX), which breaks zero-install. Updated the integrate message to tell the user where to find it.
 **Lesson reinforced:** ship, then let real use sharpen it - the exit-code fix and the Win11 menu
 gotcha only showed up under actual HUD dogfooding, exactly as intended.
+
+### 2026-06-30 - Roadmap Phase 0 (config) + Phase 1.1: cost/speed - tool trimming
+**Phase 0 (config, not a commit - .env is gitignored):** set a cheap, capable, NON-Claude brain
+per owner's cost constraint: OPENROUTER_MODEL=google/gemini-2.5-flash (main), MODEL_FAST=
+deepseek/deepseek-chat (trivial turns via the existing routing seam), VISION_MODEL=
+gemini-2.5-flash (sharp reading), HEAR_CHUNK_SECS=8 (snappier transcripts). Owner still to
+rotate the exposed Groq key.
+**Phase 1.1 (tool trimming):** we were shipping ALL ~60 tool definitions on EVERY model call
+(the "9300 tokens for 2+2" problem). New tools::relevant_definitions(msg) sends a small
+always-on CORE (read/write/list/shell/open/web_search/recall/learn, ~14) plus only the
+keyword-matched groups (gui, watch, causal, learning, docs, code, browse, leads, skills,
+tasks/agents). MCP tools always included. Wired into all three call sites (run_subagent,
+run_turn, the HUD stream). all_definitions kept (allow(dead_code)) as the fallback.
+**Verified:** a trivial "what is 2+2?" turn went from the ~9300 baseline to 6672 tokens
+(~2600 / ~28% saved just from tools; tool-heavy turns save much more), and gemini-2.5-flash
+answered "4" cleanly - no more DeepSeek "ok"-class garbage. The remaining tokens are the
+persona + per-turn context injections (learnings/goals/causal), a separate future trim.
+**Next (1.2):** degenerate-reply retry (auto re-ask once on empty/"ok"-class replies).
