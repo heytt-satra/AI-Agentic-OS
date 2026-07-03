@@ -1468,3 +1468,27 @@ empty).
 **Remaining 5.2 piece:** nudge-frequency auto-tuning needs accept/dismiss tracking + HUD wiring
 (a bigger UI loop) - deferred. Self-contained roadmap items are now largely done; what's left is
 owner-gated (2.2/2.3) or heavy/strategic (4.2 ProbeLogits, 4.3 job-object isolation).
+
+### 2026-07-03 - Roadmap Phase 5.2 (final): nudge auto-tuning from accept/dismiss rate
+**Why:** the last open 5.2 piece. Jarvis nudged on a fixed cadence and never learned whether its
+nudges were welcome. Now the user's own reactions tune how often it interrupts - the loop that
+makes proactivity feel considerate instead of naggy.
+**Schema:** a `reaction` column on nudges (0 pending / 1 acted / -1 dismissed) via an idempotent
+ALTER TABLE migration (no framework here, so we run it and ignore the already-exists error).
+**Data path:** new memory ops - nudges_pending() (id+text where reaction=0), nudge_react(id,±1)
+(records the reaction and marks it shown), nudge_reaction_stats() -> (acted, dismissed).
+**HUD:** the mind panel's Pending nudges now carry 'Act on it' / 'Dismiss' buttons (POST /nudge),
+styled like the goal buttons. /mind switched from unshown nudges to the pending queue (with ids).
+**Auto-tune:** the proactive-sensing loop replaced its fixed interval with tuned_proact_secs(base,
+acted, dismissed) - a pure, unit-tested function. <3 reactions: stay at base. >=60% acceptance:
+x0.6 (nudge more). <=25% acceptance: x2.0 (nudge less). Always clamped to [5 min, 2 h] so it
+can't run away. Recomputed after every proactive check.
+**Verified:** build clean; cargo test 37 passed (1 new - cadence shortens on high acceptance,
+lengthens on dismissals, holds on middling, respects the floor). Booted `jarvis serve` and probed
+live: /mind returns nudges with ids, POST /nudge rejects a bad action and returns ok:false for a
+missing id (same row-affected UPDATE pattern as the verified /goal route).
+**Roadmap status - Phase 5.2 COMPLETE** (calibration + causal-rules-to-learnings + nudge
+auto-tuning). Shipped across this whole session: Phase 1 (1.1-1.4), 2.1, 3.1, 4.1, 4.3 (spend +
+MCP timeouts), 5.1, 5.2 (all three). Remaining roadmap is owner-gated (2.2 code-signing cert, 2.3
+installer) or heavy/strategic (4.2 ProbeLogits needs a logits-exposing local runtime; 4.3
+job-object isolation).

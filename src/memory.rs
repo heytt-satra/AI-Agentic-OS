@@ -78,6 +78,9 @@ enum MemCmd {
     NudgeAdd { text: String, reply: oneshot::Sender<bool> }, // false if a duplicate unshown nudge exists
     NudgeTake { reply: oneshot::Sender<Option<String>> },    // newest unshown nudge, marked shown
     NudgeList { reply: oneshot::Sender<Vec<(i64, String, bool)>> },
+    NudgePending { reply: oneshot::Sender<Vec<(i64, String)>> }, // (id, text) not yet reacted to
+    NudgeReact { id: i64, reaction: i64, reply: oneshot::Sender<bool> }, // record act(1)/dismiss(-1)
+    NudgeReactionStats { reply: oneshot::Sender<(i64, i64)> }, // (acted, dismissed)
 
     // Causal world model (interventional log).
     CausalLog { tool: String, args: String, context: String, outcome: String, success: bool }, // fire-and-forget
@@ -525,6 +528,32 @@ impl MemoryHandle {
         }
         rx.await.unwrap_or_default()
     }
+    /// Nudges (id, text) the user hasn't acted on or dismissed yet - the queue the
+    /// HUD mind panel offers Act/Dismiss buttons for (roadmap 5.2).
+    pub async fn nudges_pending(&self) -> Vec<(i64, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::NudgePending { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// Record the user's reaction to a nudge: 1 = acted on, -1 = dismissed.
+    pub async fn nudge_react(&self, id: i64, reaction: i64) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::NudgeReact { id, reaction, reply }).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+    /// (acted, dismissed) tallies over all reacted nudges - the signal that
+    /// auto-tunes how often Jarvis nudges.
+    pub async fn nudge_reaction_stats(&self) -> (i64, i64) {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::NudgeReactionStats { reply }).await.is_err() {
+            return (0, 0);
+        }
+        rx.await.unwrap_or((0, 0))
+    }
 
     // ── causal world model (interventions) ──────────────────────────────────
     /// Record one intervention (a consequential tool call and its real outcome).
@@ -746,6 +775,11 @@ fn open_db(path: &str) -> Result<Connection> {
          );",
     )
     .context("creating tables")?;
+
+    // Idempotent migration: add the nudge reaction column to older DBs that predate
+    // it (roadmap 5.2). reaction: 0 = pending, 1 = acted on, -1 = dismissed. SQLite
+    // errors if the column already exists, so we ignore the result.
+    let _ = conn.execute("ALTER TABLE nudges ADD COLUMN reaction INTEGER NOT NULL DEFAULT 0", []);
 
     // One-time backfill: if the FTS index is empty but we already have messages
     // (from before this feature existed), index them now.
@@ -1257,6 +1291,29 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 }
             }
             let _ = reply.send(out);
+        }
+        MemCmd::NudgePending { reply } => {
+            let mut out: Vec<(i64, String)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT id, text FROM nudges WHERE reaction=0 ORDER BY id DESC LIMIT 10") {
+                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                    out = rows.filter_map(|x| x.ok()).collect();
+                }
+            }
+            let _ = reply.send(out);
+        }
+        MemCmd::NudgeReact { id, reaction, reply } => {
+            // Clamp to the known reactions and mark it surfaced too.
+            let r = if reaction > 0 { 1 } else { -1 };
+            let ok = conn
+                .execute("UPDATE nudges SET reaction=?1, shown=1 WHERE id=?2", params![r, id])
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            let _ = reply.send(ok);
+        }
+        MemCmd::NudgeReactionStats { reply } => {
+            let acted: i64 = conn.query_row("SELECT COUNT(*) FROM nudges WHERE reaction=1", [], |r| r.get(0)).unwrap_or(0);
+            let dismissed: i64 = conn.query_row("SELECT COUNT(*) FROM nudges WHERE reaction=-1", [], |r| r.get(0)).unwrap_or(0);
+            let _ = reply.send((acted, dismissed));
         }
         MemCmd::CausalLog { tool, args, context, outcome, success } => {
             let _ = conn.execute(

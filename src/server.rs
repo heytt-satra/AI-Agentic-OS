@@ -28,6 +28,20 @@ fn max_steps() -> u32 {
         .unwrap_or(40)
 }
 
+// Auto-tune the proactive-sensing interval from how the user reacts to nudges
+// (roadmap 5.2). With little signal it stays at the base. A high acceptance rate
+// shortens the interval (nudge more); lots of dismissals lengthen it (nudge less).
+// Always clamped to a sane band so it can't run away in either direction.
+fn tuned_proact_secs(base: u64, acted: i64, dismissed: i64) -> u64 {
+    let total = acted + dismissed;
+    if total < 3 {
+        return base.max(60); // not enough signal to tune on yet
+    }
+    let accept = acted as f64 / total as f64;
+    let factor = if accept >= 0.6 { 0.6 } else if accept <= 0.25 { 2.0 } else { 1.0 };
+    ((base as f64 * factor) as u64).clamp(300, 7200)
+}
+
 #[derive(Clone)]
 struct AppState {
     provider: Provider,
@@ -43,12 +57,16 @@ pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
         let p = provider.clone();
         let m = mem.clone();
         tokio::spawn(async move {
-            let secs: u64 = std::env::var("PROACT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs.max(60)));
-            tick.tick().await; // skip the immediate first tick
+            let base: u64 = std::env::var("PROACT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
+            // Initial delay before the first proactive check.
+            tokio::time::sleep(std::time::Duration::from_secs(base.max(60))).await;
             loop {
-                tick.tick().await;
                 crate::run_proact(&p, &m).await;
+                // Auto-tune the cadence (roadmap 5.2): nudge more when the user acts
+                // on nudges, less when they dismiss them.
+                let (acted, dismissed) = m.nudge_reaction_stats().await;
+                let next = tuned_proact_secs(base, acted, dismissed);
+                tokio::time::sleep(std::time::Duration::from_secs(next)).await;
             }
         });
     }
@@ -60,6 +78,7 @@ pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
         // state and POSTs /goal to confirm or drop a hypothesis with one click.
         .route("/mind", get(mind))
         .route("/goal", post(goal_action))
+        .route("/nudge", post(nudge_action))
         .with_state(state);
 
     let addr = "127.0.0.1:7878";
@@ -106,7 +125,7 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
     let learns = st.mem.top_learnings(10).await;
     let goals = st.mem.goals_list().await;
     let cstats = st.mem.causal_stats().await;
-    let nudges: Vec<_> = st.mem.nudges_list().await.into_iter().filter(|(_, _, shown)| !*shown).collect();
+    let pending = st.mem.nudges_pending().await;
 
     let learnings: Vec<_> = learns
         .iter()
@@ -126,7 +145,7 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
             serde_json::json!({"tool": tool, "total": total, "succ": succ, "rate": rate})
         })
         .collect();
-    let nudges: Vec<_> = nudges.iter().take(6).map(|(_, t, _)| serde_json::json!({"text": t})).collect();
+    let nudges: Vec<_> = pending.iter().take(6).map(|(id, t)| serde_json::json!({"id": id, "text": t})).collect();
     let (calib, scored) = st.mem.causal_calibration().await;
 
     Json(serde_json::json!({
@@ -155,6 +174,24 @@ async fn goal_action(State(st): State<AppState>, Json(req): Json<GoalReq>) -> Js
         _ => return Json(serde_json::json!({"ok": false, "error": "bad status"})),
     };
     let ok = st.mem.goal_set_status(req.id, status, "resolved from the HUD mind panel").await;
+    Json(serde_json::json!({"ok": ok}))
+}
+
+#[derive(serde::Deserialize)]
+struct NudgeReq {
+    id: i64,
+    action: String, // "act" | "dismiss"
+}
+
+// The user acting on or dismissing a nudge from the mind panel. The reaction both
+// clears the nudge and feeds the auto-tuner that sets how often Jarvis nudges.
+async fn nudge_action(State(st): State<AppState>, Json(req): Json<NudgeReq>) -> Json<serde_json::Value> {
+    let reaction = match req.action.as_str() {
+        "act" => 1,
+        "dismiss" => -1,
+        _ => return Json(serde_json::json!({"ok": false, "error": "bad action"})),
+    };
+    let ok = st.mem.nudge_react(req.id, reaction).await;
     Json(serde_json::json!({"ok": ok}))
 }
 
@@ -426,6 +463,26 @@ fn open_browser(url: &str) {
     };
 }
 
+#[cfg(test)]
+mod tests {
+    use super::tuned_proact_secs;
+
+    #[test]
+    fn proact_cadence_tunes_on_reaction_rate() {
+        let base = 900;
+        // too little signal -> stay at base
+        assert_eq!(tuned_proact_secs(base, 1, 1), base);
+        // mostly acted on (>=60%) -> nudge more often (shorter interval)
+        assert!(tuned_proact_secs(base, 8, 2) < base);
+        // mostly dismissed (<=25% accept) -> nudge less often (longer interval)
+        assert!(tuned_proact_secs(base, 1, 9) > base);
+        // a middling rate holds at base
+        assert_eq!(tuned_proact_secs(base, 4, 6), base);
+        // clamped: even a tiny base can't drop below the 5-min floor
+        assert!(tuned_proact_secs(60, 9, 1) >= 300);
+    }
+}
+
 const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -564,12 +621,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .goal .st{font-size:8.5px; letter-spacing:.14em; text-transform:uppercase}
   .goal .st.confirmed{color:var(--cyan)} .goal .st.done{color:var(--cyan)}
   .goal .st.dropped{color:var(--muted)}
-  .goal .acts{display:flex; gap:7px; margin-top:7px}
-  .goal .acts button{flex:1; font-family:var(--mono); font-size:9px; letter-spacing:.1em;
+  .goal .acts, .nudge .acts{display:flex; gap:7px; margin-top:7px}
+  .goal .acts button, .nudge .acts button{flex:1; font-family:var(--mono); font-size:9px; letter-spacing:.1em;
     text-transform:uppercase; padding:6px; background:transparent; color:var(--muted);
     border:1px solid var(--line); border-radius:3px; cursor:pointer; transition:.15s}
-  .goal .acts .yes:hover{border-color:var(--cyan); color:var(--cyan)}
-  .goal .acts .no:hover{border-color:var(--red); color:var(--red)}
+  .goal .acts .yes:hover, .nudge .acts .yes:hover{border-color:var(--cyan); color:var(--cyan)}
+  .goal .acts .no:hover, .nudge .acts .no:hover{border-color:var(--red); color:var(--red)}
   /* causal bars */
   .cz{padding:7px 0; border-bottom:1px solid var(--line2)}
   .cz:last-child{border-bottom:0}
@@ -807,9 +864,13 @@ function renderMind(d){
     ).join(''));
   } else { html += sec(czHead, emptyRow('No interventions recorded yet.')); }
 
-  // Pending nudges
+  // Pending nudges - Act/Dismiss both clear it and tune how often Jarvis nudges
   if(d.nudges && d.nudges.length){
-    html += sec('Pending nudges', d.nudges.map(n=>'<div class="nudge">'+esc(n.text)+'</div>').join(''));
+    html += sec('Pending nudges', d.nudges.map(n=>
+      '<div class="nudge"><div>'+esc(n.text)+'</div>'+
+      '<div class="acts"><button class="yes" onclick="reactNudge('+n.id+',\'act\')">Act on it</button>'+
+      '<button class="no" onclick="reactNudge('+n.id+',\'dismiss\')">Dismiss</button></div></div>'
+    ).join(''));
   }
   mindBody.innerHTML = html;
 }
@@ -820,6 +881,10 @@ async function refreshMind(){
 }
 async function resolveGoal(id, status){
   try{ await fetch('/goal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,status})}); }catch(e){}
+  refreshMind();
+}
+async function reactNudge(id, action){
+  try{ await fetch('/nudge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,action})}); }catch(e){}
   refreshMind();
 }
 refreshMind();
