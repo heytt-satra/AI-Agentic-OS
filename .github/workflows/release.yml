@@ -31,6 +31,35 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
+      # Code signing (roadmap 2.2): sign the Windows binary so users don't hit the
+      # SmartScreen "unknown publisher" wall. This runs ONLY when a signing cert is
+      # configured as repo secrets, so releases keep working (unsigned) until the
+      # owner buys a cert. To enable: add secrets WINDOWS_CERT_BASE64 (base64 of a
+      # .pfx) and WINDOWS_CERT_PASSWORD. Runs before Package so the signed exe ships.
+      - name: Sign Windows binary (only if a cert is configured)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_BASE64) {
+            Write-Host "No signing cert configured (WINDOWS_CERT_BASE64 secret is empty) - shipping UNSIGNED. Users will see a SmartScreen prompt until a cert is added. See BUILD.md."
+            exit 0
+          }
+          $exe = "target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          $pfx = Join-Path $env:RUNNER_TEMP "jarvis-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          # Find the newest signtool.exe from the installed Windows SDK.
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { Write-Error "signtool.exe not found on the runner"; exit 1 }
+          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe
+          $code = $LASTEXITCODE
+          Remove-Item $pfx -Force  # never leave the cert on disk
+          if ($code -ne 0) { Write-Error "signing failed with exit $code"; exit $code }
+          & $signtool verify /pa $exe
+          Write-Host "Signed and verified $exe"
       - name: Package
         shell: bash
         run: |

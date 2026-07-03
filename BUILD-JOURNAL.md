@@ -1492,3 +1492,23 @@ auto-tuning). Shipped across this whole session: Phase 1 (1.1-1.4), 2.1, 3.1, 4.
 MCP timeouts), 5.1, 5.2 (all three). Remaining roadmap is owner-gated (2.2 code-signing cert, 2.3
 installer) or heavy/strategic (4.2 ProbeLogits needs a logits-exposing local runtime; 4.3
 job-object isolation).
+
+### 2026-07-03 - Roadmap Phase 2.2: code-signing wired into the release pipeline
+**Why:** the maintainer-side half of 2.2. The cert purchase is the owner's to make, but the
+pipeline that USES it can be ready now, so the day a cert exists, signing is one secret away - no
+code change, no scramble.
+**What shipped:** a signing step in .github/workflows/release.yml, between Build and Package on
+the Windows job. It runs ONLY when a cert is configured (secret WINDOWS_CERT_BASE64 present), so
+releases keep working UNSIGNED until then (it prints a clear SmartScreen note and exits 0). When
+a cert is present it: decodes the base64 .pfx to a temp file, finds the newest signtool from the
+installed Windows SDK, signs with SHA256 + an RFC-3161 timestamp (so signatures outlive the
+cert), ALWAYS deletes the .pfx from disk, fails the build if signing failed, then verifies with
+`signtool verify /pa`. macOS/Linux jobs are untouched. Documented in BUILD.md: the two secrets to
+add, how to base64 a .pfx, and the cert options (standard OV/EV or the cheaper Azure Trusted
+Signing).
+**Verified:** the workflow YAML parses and the signing step is correctly ordered before Package.
+NOT executed end-to-end - it only runs in CI on a tag push, and there's no cert to sign with; the
+logic is standard signtool usage with a clean no-cert fallback. This is the "[BUILD] wire signing
+into the release pipeline once you have the cert" item from the roadmap, done.
+**Owner action to activate:** buy a code-signing cert, add WINDOWS_CERT_BASE64 +
+WINDOWS_CERT_PASSWORD as repo secrets. Then every tagged release is signed automatically.

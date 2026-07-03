@@ -39,6 +39,25 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+## Code signing (Windows SmartScreen)
+
+Unsigned Windows binaries trip the SmartScreen "unknown publisher" wall, which
+scares off strangers. The release workflow signs the Windows binary
+automatically **once a cert is configured** — until then it ships unsigned and
+prints a note, so releases keep working.
+
+To enable signing, add two repo secrets (Settings -> Secrets and variables ->
+Actions):
+
+- `WINDOWS_CERT_BASE64` — your code-signing certificate (`.pfx`) as base64.
+  Create it with: `base64 -w0 cert.pfx` (or `certutil -encode` on Windows).
+- `WINDOWS_CERT_PASSWORD` — the .pfx password.
+
+The workflow decodes the cert to a temp file, signs with `signtool` (SHA256 +
+RFC-3161 timestamp so signatures outlive the cert), deletes the cert, and
+verifies. Certs: a standard OV/EV code-signing cert (~$100-400/yr) or the
+cheaper **Azure Trusted Signing**. macOS/Linux binaries are unaffected.
+
 ## Runtime data (not install)
 
 Jarvis writes a few files next to where it runs: `.env` (your keys),
