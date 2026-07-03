@@ -1245,3 +1245,24 @@ gemini-2.5-flash now the default this rarely fires, but it protects the deepseek
 turns. **Scope:** run_turn (REPL + heartbeat); the streaming HUD path is a follow-on (retry
 mid-stream is trickier and the default model doesn't degenerate).
 **Next (1.3):** HUD usage/latency meter (wire token + timing into the streaming path).
+
+### 2026-07-03 - Roadmap Phase 1.3: HUD usage/latency meter
+**Why:** the streaming HUD path was completely unmeasured - `chat_stream` hard-coded
+`tokens: 0` because OpenRouter/OpenAI streaming omits the usage block from normal chunks.
+No way to see if a turn was fast or cheap, so no way to optimize it. This wires real numbers
+into the live path.
+**Provider:** added `stream_options: { include_usage: true }` to the streaming ChatRequest
+(the non-stream path passes None). OpenRouter then appends a final SSE chunk that carries
+`usage.total_tokens` with an EMPTY `choices` array - we read that tail chunk and populate
+`tokens` on the streamed reply instead of the old hard `0`.
+**Server:** per HUD turn we stamp `turn_start` (Instant) and accumulate `turn_tokens` across
+every model round-trip in the turn (streamed rounds + the step-limit fallback `chat`). On the
+final answer we emit `{"type":"meter","tokens":N,"ms":M}` before `done`; the fallback path
+emits it too, so no answer path is unmeasured.
+**HUD:** new "Last turn" row in the status panel, rendered in cyan (DESIGN.md: cyan is for
+live-data signals only). Shows e.g. `1240 tok · 2.3s`; falls back to `— tok` if a provider
+doesn't return usage.
+**Verified:** cargo build clean (only the pre-existing unrelated tools.rs unreachable-pattern
+warning). Token+timing now flow end-to-end into the streaming path, which was the whole point
+of 1.3 - speed and cost are now visible and therefore optimizable.
+**Next (1.4):** perception polish - speaker labels on HEAR lines + a vision-confidence note.

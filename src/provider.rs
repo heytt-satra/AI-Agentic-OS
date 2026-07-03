@@ -88,6 +88,13 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<Tool>>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Deserialize)]
@@ -193,6 +200,7 @@ impl Provider {
             max_tokens: 1024,
             tools,
             stream: false,
+            stream_options: None,
         };
         let url = format!("{}/chat/completions", self.base_url);
         let response = self
@@ -243,6 +251,7 @@ impl Provider {
             max_tokens: 1024,
             tools,
             stream: true,
+            stream_options: Some(StreamOptions { include_usage: true }),
         };
         let url = format!("{}/chat/completions", self.base_url);
         let response = self
@@ -265,6 +274,7 @@ impl Provider {
         let mut buffer = String::new();
         let mut content = String::new();
         let mut finish = String::new();
+        let mut total_tokens: u64 = 0;
         // (id, name, args) accumulated per tool_call index across fragments
         let mut tools_acc: Vec<(String, String, String)> = Vec::new();
 
@@ -282,6 +292,10 @@ impl Provider {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                // The include_usage tail chunk carries usage with an empty choices array.
+                if let Some(t) = v["usage"]["total_tokens"].as_u64() {
+                    if t > 0 { total_tokens = t; }
+                }
                 let choice = &v["choices"][0];
                 if let Some(fr) = choice["finish_reason"].as_str() {
                     finish = fr.to_string();
@@ -330,7 +344,7 @@ impl Provider {
                 tool_call_id: None,
             },
             finish_reason: finish,
-            tokens: 0, // streaming responses don't carry usage in this path
+            tokens: total_tokens, // populated via stream_options.include_usage tail chunk
         })
     }
 
