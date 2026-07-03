@@ -84,6 +84,7 @@ enum MemCmd {
     CausalForTool { tool: String, k: i64, reply: oneshot::Sender<Vec<(String, String, bool)>> }, // (args, outcome, success)
     CausalStats { reply: oneshot::Sender<Vec<(String, i64, i64)>> }, // (tool, total, successes)
     CausalRecent { n: i64, reply: oneshot::Sender<Vec<(String, String, String, bool)>> }, // (tool, args, outcome, success)
+    CausalCalibration { reply: oneshot::Sender<(f64, i64)> }, // (calibration 0..1, scored count)
 
     // Self-direction: hypotheses + goals Jarvis forms and pursues on its own.
     GoalAdd { kind: String, text: String, reply: oneshot::Sender<bool> }, // false if duplicate open goal
@@ -560,6 +561,19 @@ impl MemoryHandle {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+    /// How well Jarvis's causal predictions have matched reality (roadmap 5.2).
+    /// Returns (calibration 0..1, number of scored predictions). Calibration is
+    /// 1 - prequential Brier score: for each intervention we take the tool's
+    /// success rate BEFORE it as the prediction and the real outcome as truth, so
+    /// a perfectly-calibrated forecaster scores 1.0. (0.0, 0) means not enough
+    /// history to score yet.
+    pub async fn causal_calibration(&self) -> (f64, i64) {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::CausalCalibration { reply }).await.is_err() {
+            return (0.0, 0);
+        }
+        rx.await.unwrap_or((0.0, 0))
     }
 
     // ── self-direction: hypotheses + goals ──────────────────────────────────
@@ -1291,6 +1305,15 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
             }
             let _ = reply.send(out);
         }
+        MemCmd::CausalCalibration { reply } => {
+            let mut events: Vec<(String, bool)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT tool, success FROM causal_events ORDER BY id ASC") {
+                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))) {
+                    events = rows.filter_map(|x| x.ok()).collect();
+                }
+            }
+            let _ = reply.send(calibration_from(&events));
+        }
         MemCmd::GoalAdd { kind, text, reply } => {
             let dup: i64 = conn
                 .query_row("SELECT COUNT(*) FROM goals WHERE status='open' AND text=?1", params![text], |r| r.get(0))
@@ -1655,4 +1678,64 @@ fn query_recent_dialog(conn: &Connection, n: i64) -> Result<Vec<(String, String)
     }
     out.reverse();
     Ok(out)
+}
+
+// Prequential calibration (roadmap 5.2): given interventions in time order as
+// (tool, success), score how well each tool's running success rate predicted the
+// NEXT outcome. For each event past a tool's first two, the prior rate is the
+// prediction p and the outcome is o (1/0); we accumulate the Brier score (p-o)^2.
+// Returns (1 - mean_brier clamped to 0..1, number of scored events). Pure so it
+// can be unit-tested without a database.
+fn calibration_from(events: &[(String, bool)]) -> (f64, i64) {
+    let mut priors: std::collections::HashMap<&str, (f64, f64)> = std::collections::HashMap::new(); // tool -> (total, succ)
+    let mut brier_sum = 0.0f64;
+    let mut scored = 0i64;
+    for (tool, success) in events {
+        let e = priors.entry(tool.as_str()).or_insert((0.0, 0.0));
+        if e.0 >= 2.0 {
+            let p = e.1 / e.0; // predicted success probability from history
+            let o = if *success { 1.0 } else { 0.0 };
+            brier_sum += (p - o) * (p - o);
+            scored += 1;
+        }
+        e.0 += 1.0;
+        if *success {
+            e.1 += 1.0;
+        }
+    }
+    let calib = if scored > 0 { (1.0 - brier_sum / scored as f64).clamp(0.0, 1.0) } else { 0.0 };
+    (calib, scored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calibration_from;
+
+    fn ev(pairs: &[(&str, bool)]) -> Vec<(String, bool)> {
+        pairs.iter().map(|(t, s)| (t.to_string(), *s)).collect()
+    }
+
+    #[test]
+    fn perfectly_predictable_tool_scores_high() {
+        // a tool that always succeeds: after the 2-event warmup, every prediction
+        // is p=1.0 and the outcome is 1 -> Brier 0 -> calibration 1.0
+        let (c, n) = calibration_from(&ev(&[("run_shell", true); 6]));
+        assert_eq!(n, 4); // 6 events, first 2 warm up the prior
+        assert!((c - 1.0).abs() < 1e-9, "calib was {c}");
+    }
+
+    #[test]
+    fn a_surprise_lowers_calibration() {
+        // three successes then a failure: at the 4th event p=1.0 but o=0 -> a
+        // Brier hit, so calibration drops below 1.
+        let (c, n) = calibration_from(&ev(&[("t", true), ("t", true), ("t", true), ("t", false)]));
+        assert_eq!(n, 2);
+        assert!(c < 1.0 && c >= 0.0, "calib was {c}");
+    }
+
+    #[test]
+    fn too_little_history_scores_nothing() {
+        let (c, n) = calibration_from(&ev(&[("a", true), ("b", false)]));
+        assert_eq!((c, n), (0.0, 0));
+    }
 }

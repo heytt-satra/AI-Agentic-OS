@@ -469,6 +469,17 @@ async fn main() -> Result<()> {
                     let rate = if *total > 0 { 100 * succ / total } else { 0 };
                     println!("  {tool:<16} {succ}/{total} succeeded ({rate}%)");
                 }
+                // Calibration: was I right when I predicted? (roadmap 5.2)
+                let (calib, scored) = mem.causal_calibration().await;
+                if scored > 0 {
+                    println!(
+                        "\nPrediction calibration: {}% over {scored} scored prediction(s) - how well my \
+                         success-rate forecasts have matched what actually happened (higher is better).",
+                        (calib * 100.0).round() as i64
+                    );
+                } else {
+                    println!("\nPrediction calibration: not enough repeated actions yet to score (needs a few repeats per tool).");
+                }
                 println!("\nMost recent interventions:");
                 for (tool, args, outcome, ok) in mem.causal_recent(8).await {
                     let a: String = args.chars().take(40).collect();

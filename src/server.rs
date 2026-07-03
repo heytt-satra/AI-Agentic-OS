@@ -127,11 +127,13 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         })
         .collect();
     let nudges: Vec<_> = nudges.iter().take(6).map(|(_, t, _)| serde_json::json!({"text": t})).collect();
+    let (calib, scored) = st.mem.causal_calibration().await;
 
     Json(serde_json::json!({
         "learnings": learnings,
         "goals": goals,
         "causal": causal,
+        "calibration": {"pct": (calib * 100.0).round() as i64, "scored": scored},
         "nudges": nudges,
         "watching": crate::watch::is_active(),
         "watch": crate::watch::status(),
@@ -792,14 +794,18 @@ function renderMind(d){
     }).join(''));
   } else { html += sec('Hypotheses &amp; goals', emptyRow('None yet.')); }
 
-  // Causal track record
+  // Causal track record - with a calibration readout (was I right when I predicted?)
+  let czHead = 'Causal record';
+  if(d.calibration && d.calibration.scored>0){
+    czHead += ' <span style="color:var(--cyan)">· '+d.calibration.pct+'% calibrated</span>';
+  }
   if(d.causal && d.causal.length){
-    html += sec('Causal record', d.causal.map(c=>
+    html += sec(czHead, d.causal.map(c=>
       '<div class="cz"><div class="top"><span class="t">'+esc(c.tool)+'</span>'+
       '<span class="r">'+c.succ+'/'+c.total+' · '+c.rate+'%</span></div>'+
       '<div class="bar"><i style="width:'+c.rate+'%"></i></div></div>'
     ).join(''));
-  } else { html += sec('Causal record', emptyRow('No interventions recorded yet.')); }
+  } else { html += sec(czHead, emptyRow('No interventions recorded yet.')); }
 
   // Pending nudges
   if(d.nudges && d.nudges.length){

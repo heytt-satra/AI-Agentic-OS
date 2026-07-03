@@ -1398,3 +1398,27 @@ exercising a real hang would need a deliberately-wedged MCP server; the logic is
 channel-with-deadline pattern.
 **Remaining 4.3 piece:** job-object isolation for risky shell is Windows-kernel-specific and
 heavier; deferred. Next self-contained build: 5.2 causal calibration (was my prediction right?).
+
+### 2026-07-03 - Roadmap Phase 5.2: causal calibration (was my prediction right?)
+**Why:** the causal world model records what actions cause, and predict_outcome forecasts a
+success rate from history - but nothing ever checked whether those forecasts were RIGHT. Without
+that, "gets measurably better" is a claim, not a number. This closes the loop.
+**What shipped:** a prequential Brier-score calibration over the intervention log. calibration_from()
+(a pure, unit-tested function) walks causal_events in time order; for each event past a tool's
+first two, it takes the tool's running success rate as the prediction p and the real outcome as
+o (1/0) and accumulates (p-o)^2. Calibration = 1 - mean(brier), clamped 0..1 - a
+perfectly-calibrated forecaster scores 1.0. It needs no new schema (retrospective over existing
+data) and no separate prediction capture: the historical rate IS what predict_outcome reports, so
+this measures exactly the forecast the tool makes. New MemCmd::CausalCalibration + a thin actor
+handler that just loads (tool, success) rows and calls the pure fn.
+**Surfaced two ways:** `jarvis causal` now prints "Prediction calibration: N% over K scored
+prediction(s)" (or a "not enough repeats yet" note); the HUD mind panel shows "· N% calibrated"
+in cyan next to the Causal record header (fed by a new calibration field in /mind).
+**Verified:** build clean; cargo test 36 passed - 3 new pure-function tests (an always-succeeds
+tool scores 1.0 after the 2-event warmup; a surprise failure drops it below 1; too little history
+scores nothing). Couldn't show a live number because this box's causal_events table is currently
+empty, but the math is covered by the unit tests and the wiring runs through `jarvis causal`.
+**Roadmap status:** Phases 1 (all), 2.1, 3.1, 4.1, 4.3 (2 of 3 pieces), and 5.2 (calibration
+piece) are shipped. Remaining are owner-gated (2.2 cert, 2.3 installer) or heavy/strategic (4.2
+ProbeLogits needs a logits-exposing local runtime; 4.3 job-object isolation; 5.1 bigger eval
+instrument). Good stopping point for self-contained builds.
