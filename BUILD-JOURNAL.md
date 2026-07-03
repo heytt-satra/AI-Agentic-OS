@@ -1319,3 +1319,33 @@ exits (no stdin hang) confirmed by running `jarvis once` with the key unset and 
 run_setup used by `jarvis setup`.
 **Next:** Phase 2.2 (code signing) needs the owner to buy a cert first; Phase 3.1 (live mind
 panel in the HUD) is the next buildable, high-value item - proceeding to that.
+
+### 2026-07-03 - Roadmap Phase 3.1: live mind panel (the money shot)
+**Why:** Jarvis already keeps a rich inner state - learnings about the user, its own
+hypotheses/goals, a causal track record of what its actions cause on this machine, what it's
+watching, and pending nudges - but ALL of it hid behind a single self_report tool call. You had
+to ASK to see the mind. This surfaces it live, always-on, in the HUD - the thing that makes it
+look like a mind and the pitch-deck money shot.
+**Backend (server.rs):** two new routes on the existing axum server. GET /mind returns the whole
+inner state as JSON (top learnings + confidence, all goals with status, per-tool causal
+success rates, unshown nudges, watch on/off + status line) - read-only, cheap, safe to poll.
+POST /goal {id, status} resolves a hypothesis with one click; it reuses the same
+mem.goal_set_status the goal_update tool uses, but only accepts the user-facing resolutions
+(confirmed / dropped / done) so the model still owns the rest of the lifecycle.
+**Frontend (INDEX_HTML):** a new right rail ('MIND') added as a third grid column
+(300px | 1fr | 328px). Sections: Learned (each with its kind + a cyan confidence readout),
+Hypotheses & goals (open ones get one-click Confirm/Drop buttons; resolved ones show their
+status), Causal record (a cyan progress bar per tool showing success rate), and Pending nudges.
+A cyan 'watching' pill in the cap lights up when watch mode is live. It polls /mind every 5s and
+also refreshes immediately when a turn finishes (on 'done'/'answer'), so acting in chat updates
+the mind in near-real-time. Strict DESIGN.md adherence: amber section headers (system), cyan for
+all live-data values (confidence, rates, watch state), red only on the Drop-button hover.
+Responsive: the mind rail is the first thing to drop below 1180px, then the left rail collapses
+below 760px. All output HTML-escaped (esc()) since learnings/goals are model-generated text.
+**Verified:** built clean; booted `jarvis serve` and probed the endpoints live - GET /mind
+returned real JSON (open goal #3 + two confirmed hypotheses + learnings), POST /goal correctly
+rejected an invalid status ({"error":"bad status"}) and returned ok:false for a missing id, and
+the served index contains the mind rail. cargo test 31 passed.
+**Status:** Phases 1 (all), 2.1, and 3.1 shipped this stretch. Remaining roadmap needs the owner
+(2.2 cert purchase) or is deeper strategic work (4.x local model + ProbeLogits governance, 5.x
+evals). Those are the next candidates.

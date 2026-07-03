@@ -15,8 +15,8 @@ use anyhow::Result;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::{Html, Response};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 
 // Per-turn tool-call budget for the HUD path. Generous for code-building;
 // overridable via JARVIS_MAX_STEPS. Only a backstop — the model stops when done.
@@ -56,6 +56,10 @@ pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/ws", get(ws_handler))
+        // Live mind panel (roadmap 3.1): the HUD polls /mind for Jarvis's inner
+        // state and POSTs /goal to confirm or drop a hypothesis with one click.
+        .route("/mind", get(mind))
+        .route("/goal", post(goal_action))
         .with_state(state);
 
     let addr = "127.0.0.1:7878";
@@ -94,6 +98,62 @@ fn spawn_scheduler(provider: Provider, mem: MemoryHandle) {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+// The live mind: everything that used to hide behind a self_report tool call,
+// as JSON the HUD renders in the right rail. Read-only, cheap, safe to poll.
+async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let learns = st.mem.top_learnings(10).await;
+    let goals = st.mem.goals_list().await;
+    let cstats = st.mem.causal_stats().await;
+    let nudges: Vec<_> = st.mem.nudges_list().await.into_iter().filter(|(_, _, shown)| !*shown).collect();
+
+    let learnings: Vec<_> = learns
+        .iter()
+        .map(|(k, t, c)| serde_json::json!({"kind": k, "text": t, "conf": c}))
+        .collect();
+    // Open hypotheses/goals get one-click confirm/drop; resolved ones show status.
+    let goals: Vec<_> = goals
+        .iter()
+        .take(12)
+        .map(|(id, k, t, s)| serde_json::json!({"id": id, "kind": k, "text": t, "status": s}))
+        .collect();
+    let causal: Vec<_> = cstats
+        .iter()
+        .take(12)
+        .map(|(tool, total, succ)| {
+            let rate = if *total > 0 { 100 * succ / total } else { 0 };
+            serde_json::json!({"tool": tool, "total": total, "succ": succ, "rate": rate})
+        })
+        .collect();
+    let nudges: Vec<_> = nudges.iter().take(6).map(|(_, t, _)| serde_json::json!({"text": t})).collect();
+
+    Json(serde_json::json!({
+        "learnings": learnings,
+        "goals": goals,
+        "causal": causal,
+        "nudges": nudges,
+        "watching": crate::watch::is_active(),
+        "watch": crate::watch::status(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct GoalReq {
+    id: i64,
+    status: String,
+}
+
+// One-click confirm/drop of a hypothesis from the mind panel. Mirrors the
+// goal_update tool but driven by a button instead of the model.
+async fn goal_action(State(st): State<AppState>, Json(req): Json<GoalReq>) -> Json<serde_json::Value> {
+    // Only allow the user-facing resolutions; the model owns the rest.
+    let status = match req.status.as_str() {
+        "confirmed" | "dropped" | "done" => req.status.as_str(),
+        _ => return Json(serde_json::json!({"ok": false, "error": "bad status"})),
+    };
+    let ok = st.mem.goal_set_status(req.id, status, "resolved from the HUD mind panel").await;
+    Json(serde_json::json!({"ok": ok}))
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(st): State<AppState>) -> Response {
@@ -388,7 +448,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     background:radial-gradient(130% 100% at 18% -10%, #0a121c 0%, var(--bg) 55%);
     color:var(--ink); font-family:var(--mono); overflow:hidden; -webkit-font-smoothing:antialiased;
   }
-  .app{display:grid; grid-template-columns:300px 1fr; height:100vh}
+  .app{display:grid; grid-template-columns:300px 1fr 328px; height:100vh}
 
   /* ── left instrument rail ─────────────────────────────────── */
   .rail{
@@ -469,6 +529,56 @@ const INDEX_HTML: &str = r##"<!doctype html>
   #mic.live{border-color:var(--cyan); color:var(--cyan); animation:micpulse 1s ease-in-out infinite}
   @keyframes micpulse{0%,100%{opacity:1}50%{opacity:.5}}
 
+  /* ── right rail: the live mind (roadmap 3.1) ──────────────── */
+  .mind{
+    display:flex; flex-direction:column; min-height:0;
+    background:linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+    border-left:1px solid var(--line);
+  }
+  .mind .cap{flex:0 0 auto; display:flex; align-items:center; justify-content:space-between;
+    padding:22px 20px 14px; font-size:11px; letter-spacing:.42em; color:var(--amber);
+    font-weight:600; text-transform:uppercase}
+  .mind .cap .live{font-size:8.5px; letter-spacing:.2em; color:var(--faint); font-weight:400}
+  .mind .cap .live.on{color:var(--cyan)}
+  .mindBody{flex:1; overflow-y:auto; padding:0 20px 24px;
+    scrollbar-width:thin; scrollbar-color:var(--line) transparent}
+  .mindBody::-webkit-scrollbar{width:7px}
+  .mindBody::-webkit-scrollbar-thumb{background:var(--line); border-radius:4px}
+  .sec{margin-top:20px}
+  .sec > .h{font-size:9px; letter-spacing:.24em; text-transform:uppercase; color:var(--faint);
+    display:flex; align-items:center; gap:7px; margin-bottom:10px}
+  .sec > .h::after{content:""; flex:1; height:1px; background:var(--line2)}
+  .sec .empty{font-size:10.5px; color:var(--muted); line-height:1.6; font-style:italic}
+  .item{font-size:11.5px; line-height:1.55; color:var(--ink); padding:8px 0;
+    border-bottom:1px solid var(--line2)}
+  .item:last-child{border-bottom:0}
+  .item .meta{font-size:8.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted)}
+  .item .conf{color:var(--cyan)}
+  /* goals with one-click confirm / drop */
+  .goal{padding:9px 0; border-bottom:1px solid var(--line2)}
+  .goal:last-child{border-bottom:0}
+  .goal .txt{font-size:11.5px; line-height:1.5; color:var(--amber-soft)}
+  .goal .kind{font-size:8.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted)}
+  .goal .st{font-size:8.5px; letter-spacing:.14em; text-transform:uppercase}
+  .goal .st.confirmed{color:var(--cyan)} .goal .st.done{color:var(--cyan)}
+  .goal .st.dropped{color:var(--muted)}
+  .goal .acts{display:flex; gap:7px; margin-top:7px}
+  .goal .acts button{flex:1; font-family:var(--mono); font-size:9px; letter-spacing:.1em;
+    text-transform:uppercase; padding:6px; background:transparent; color:var(--muted);
+    border:1px solid var(--line); border-radius:3px; cursor:pointer; transition:.15s}
+  .goal .acts .yes:hover{border-color:var(--cyan); color:var(--cyan)}
+  .goal .acts .no:hover{border-color:var(--red); color:var(--red)}
+  /* causal bars */
+  .cz{padding:7px 0; border-bottom:1px solid var(--line2)}
+  .cz:last-child{border-bottom:0}
+  .cz .top{display:flex; justify-content:space-between; font-size:10.5px; margin-bottom:5px}
+  .cz .top .t{color:var(--ink)} .cz .top .r{color:var(--cyan)}
+  .cz .bar{height:3px; background:var(--line2); border-radius:2px; overflow:hidden}
+  .cz .bar > i{display:block; height:100%; background:var(--cyan)}
+  .nudge{font-size:11px; line-height:1.55; color:var(--amber-dim); padding:8px 0;
+    border-bottom:1px solid var(--line2)}
+  .nudge:last-child{border-bottom:0}
+
   /* ── approval modal ───────────────────────────────────────── */
   #approvalWrap{position:fixed;inset:0;background:rgba(2,4,7,.82);display:none;
     align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(3px)}
@@ -486,7 +596,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .approval button:hover{border-color:var(--amber);color:var(--amber)}
   .approval button.deny:hover{border-color:var(--red);color:var(--red)}
 
-  /* ── responsive: rail collapses to a top strip ────────────── */
+  /* ── responsive: drop the mind rail first, then collapse the left rail ── */
+  @media(max-width:1180px){
+    .app{grid-template-columns:300px 1fr}
+    .mind{display:none}
+  }
   @media(max-width:760px){
     .app{grid-template-columns:1fr; grid-template-rows:auto 1fr}
     .rail{flex-direction:row; flex-wrap:wrap; align-items:center; gap:12px;
@@ -533,6 +647,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
         </div>
       </footer>
     </section>
+    <aside class="mind">
+      <div class="cap">Mind <span class="live" id="mindLive">standby</span></div>
+      <div class="mindBody" id="mindBody">
+        <div class="sec"><div class="empty">Waking up…</div></div>
+      </div>
+    </aside>
   </div>
   <div id="approvalWrap"><div class="approval">
     <div class="h">&#9888; Approval required</div>
@@ -629,14 +749,75 @@ function connect(){
     else if(m.type==='state'){ if(m.state!=='speaking') setState(m.state); }
     else if(m.type==='tool'){ flashTool(m.name); }
     else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); setState('speaking'); log.scrollTop=log.scrollHeight; }
-    else if(m.type==='done'){ speak(plainify(curRaw)); cur=null; curRaw=''; setState('idle'); }
-    else if(m.type==='answer'){ const txt=plainify(m.text); typewriter(addMsg('jarvis','Jarvis'), txt); speak(txt); }
+    else if(m.type==='done'){ speak(plainify(curRaw)); cur=null; curRaw=''; setState('idle'); refreshMind(); }
+    else if(m.type==='answer'){ const txt=plainify(m.text); typewriter(addMsg('jarvis','Jarvis'), txt); speak(txt); refreshMind(); }
     else if(m.type==='meter'){ const s=(m.ms/1000).toFixed(1); const tk=m.tokens>0?(m.tokens+' tok'):'— tok'; meterEl.textContent=tk+' · '+s+'s'; }
     else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; setState('idle'); }
     else if(m.type==='approval'){ showApproval(m); }
   };
 }
 connect();
+
+// ── live mind panel (roadmap 3.1): poll /mind, render the inner state, and let
+//    the user confirm or drop a hypothesis with one click.
+const mindBody=document.getElementById('mindBody'), mindLive=document.getElementById('mindLive');
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function sec(title, inner){ return '<div class="sec"><div class="h">'+title+'</div>'+inner+'</div>'; }
+function emptyRow(t){ return '<div class="empty">'+t+'</div>'; }
+
+function renderMind(d){
+  let html='';
+  // Watching status: cyan when live, muted otherwise.
+  mindLive.textContent = d.watching ? 'watching' : 'idle';
+  mindLive.className = 'live'+(d.watching?' on':'');
+
+  // Learned about you
+  if(d.learnings && d.learnings.length){
+    html += sec('Learned', d.learnings.map(l=>
+      '<div class="item"><div>'+esc(l.text)+'</div>'+
+      '<div class="meta">'+esc(l.kind)+' · <span class="conf">conf '+Number(l.conf).toFixed(2)+'</span></div></div>'
+    ).join(''));
+  } else { html += sec('Learned', emptyRow('Nothing yet — I learn as we work.')); }
+
+  // Hypotheses & goals with one-click confirm / drop
+  if(d.goals && d.goals.length){
+    html += sec('Hypotheses &amp; goals', d.goals.map(g=>{
+      const open = g.status==='open' || g.status==='testing';
+      const acts = open
+        ? '<div class="acts"><button class="yes" onclick="resolveGoal('+g.id+',\'confirmed\')">Confirm</button>'+
+          '<button class="no" onclick="resolveGoal('+g.id+',\'dropped\')">Drop</button></div>'
+        : '<div class="st '+esc(g.status)+'">'+esc(g.status)+'</div>';
+      return '<div class="goal"><div class="kind">'+esc(g.kind)+' · #'+g.id+'</div>'+
+             '<div class="txt">'+esc(g.text)+'</div>'+acts+'</div>';
+    }).join(''));
+  } else { html += sec('Hypotheses &amp; goals', emptyRow('None yet.')); }
+
+  // Causal track record
+  if(d.causal && d.causal.length){
+    html += sec('Causal record', d.causal.map(c=>
+      '<div class="cz"><div class="top"><span class="t">'+esc(c.tool)+'</span>'+
+      '<span class="r">'+c.succ+'/'+c.total+' · '+c.rate+'%</span></div>'+
+      '<div class="bar"><i style="width:'+c.rate+'%"></i></div></div>'
+    ).join(''));
+  } else { html += sec('Causal record', emptyRow('No interventions recorded yet.')); }
+
+  // Pending nudges
+  if(d.nudges && d.nudges.length){
+    html += sec('Pending nudges', d.nudges.map(n=>'<div class="nudge">'+esc(n.text)+'</div>').join(''));
+  }
+  mindBody.innerHTML = html;
+}
+
+let mindTimer=null;
+async function refreshMind(){
+  try{ const r=await fetch('/mind'); if(r.ok) renderMind(await r.json()); }catch(e){}
+}
+async function resolveGoal(id, status){
+  try{ await fetch('/goal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,status})}); }catch(e){}
+  refreshMind();
+}
+refreshMind();
+mindTimer=setInterval(refreshMind, 5000); // keep the mind live while the HUD is open
 
 // ── approval modal
 const apWrap=document.getElementById('approvalWrap'),
