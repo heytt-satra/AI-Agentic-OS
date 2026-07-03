@@ -240,7 +240,15 @@ async fn main() -> Result<()> {
 
     // `jarvis setup` runs BEFORE we need an API key, so a brand-new user can
     // choose their brain (API key or local) and we write their .env for them.
+    // `jarvis setup --local [model]` is the one-command private brain (roadmap
+    // 4.1): it installs Ollama, pulls a model, and points Jarvis at it - no keys,
+    // nothing leaves the device.
     if std::env::args().nth(1).as_deref() == Some("setup") {
+        let arg2 = std::env::args().nth(2);
+        if matches!(arg2.as_deref(), Some("--local") | Some("local")) {
+            let model = std::env::args().nth(3);
+            return run_setup_local(model);
+        }
         return run_setup();
     }
     // `jarvis autostart [off]` registers (or removes) a login task so `serve`
@@ -1013,7 +1021,9 @@ fn run_setup() -> Result<()> {
         set(&mut env, "OPENROUTER_API_KEY", "ollama");
         set(&mut env, "OPENROUTER_MODEL", "qwen2.5-coder:7b");
         std::fs::write(".env", env)?;
-        println!("\nLocal mode set. One-time steps:");
+        println!("\nLocal mode set. Let me install and pull everything for you in one command:");
+        println!("  jarvis setup --local");
+        println!("\nOr do it by hand:");
         println!("  1. Install Ollama:  winget install Ollama.Ollama   (mac: brew install ollama)");
         println!("  2. Pull the model:  ollama pull qwen2.5-coder:7b");
         println!("  3. Start Jarvis:    jarvis");
@@ -1053,6 +1063,98 @@ fn run_setup() -> Result<()> {
         println!("Hearing is on - I'll transcribe on-screen audio while watching.");
     }
     Ok(())
+}
+
+// Roadmap 4.1: one-command private brain. Install Ollama (if missing), pull a
+// model, and point Jarvis at the local endpoint - so the whole loop runs on the
+// device with no API key and nothing leaving the machine. Idempotent: safe to
+// re-run; skips anything already in place.
+fn run_setup_local(model: Option<String>) -> Result<()> {
+    use std::process::Command;
+    let model = model.unwrap_or_else(|| "qwen2.5-coder:7b".to_string());
+    println!("\nSetting up your local, private brain ({model}).");
+    println!("Everything runs on this machine - no API key, nothing leaves the device.\n");
+
+    // 1. Ollama present? `ollama --version` succeeding is the truth test.
+    let have_ollama = Command::new("ollama")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if have_ollama {
+        println!("[1/3] Ollama already installed. Skipping install.");
+    } else {
+        println!("[1/3] Installing Ollama...");
+        let ok = install_ollama();
+        if !ok {
+            eprintln!(
+                "\nCouldn't install Ollama automatically. Install it manually, then re-run \
+                 `jarvis setup --local`:\n  Windows: winget install Ollama.Ollama\n  \
+                 macOS:   brew install ollama\n  Linux:   curl -fsSL https://ollama.com/install.sh | sh"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    // 2. Pull the model (a no-op re-download if already local; ollama is idempotent).
+    println!("\n[2/3] Pulling the model ({model}) - this can take a few minutes the first time...");
+    let pulled = Command::new("ollama").args(["pull", &model]).status().map(|s| s.success()).unwrap_or(false);
+    if !pulled {
+        eprintln!(
+            "\nCouldn't pull '{model}'. Is the Ollama service running? Try `ollama serve` in \
+             another terminal, or pick a different model: `jarvis setup --local llama3.1:8b`."
+        );
+        std::process::exit(1);
+    }
+
+    // 3. Point Jarvis at the local endpoint.
+    println!("\n[3/3] Configuring Jarvis to use the local brain...");
+    let mut env = std::fs::read_to_string(".env").unwrap_or_default();
+    env = upsert_env(&env, "OPENROUTER_BASE_URL", "http://localhost:11434/v1");
+    env = upsert_env(&env, "OPENROUTER_API_KEY", "ollama");
+    env = upsert_env(&env, "OPENROUTER_MODEL", &model);
+    std::fs::write(".env", env)?;
+
+    println!("\nDone. Your brain is local and private. Start Jarvis:  jarvis");
+    println!("(The first reply is slow while the model loads into memory; it's fast after that.)");
+    println!("Tip: `jarvis privacy` shows that nothing leaves the device in this mode.");
+    Ok(())
+}
+
+// Install Ollama with the platform's native package manager, inheriting stdio so
+// the user sees real progress. Returns whether it now appears installed.
+fn install_ollama() -> bool {
+    use std::process::Command;
+    let ran = if cfg!(windows) {
+        Command::new("winget")
+            .args(["install", "--id", "Ollama.Ollama", "-e", "--silent",
+                   "--accept-source-agreements", "--accept-package-agreements"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else if cfg!(target_os = "macos") {
+        Command::new("brew").args(["install", "ollama"]).status().map(|s| s.success()).unwrap_or(false)
+    } else {
+        // Linux: the official one-liner (sh reads the installer from stdin).
+        Command::new("sh")
+            .arg("-c")
+            .arg("curl -fsSL https://ollama.com/install.sh | sh")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    // Trust the actual binary over the installer's exit code (winget can report
+    // odd codes even on success), so re-verify with `ollama --version`.
+    ran || Command::new("ollama")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // Set key=value in .env content: replace the existing line (even if commented)

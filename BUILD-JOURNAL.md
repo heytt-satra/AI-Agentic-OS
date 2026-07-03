@@ -1349,3 +1349,26 @@ the served index contains the mind rail. cargo test 31 passed.
 **Status:** Phases 1 (all), 2.1, and 3.1 shipped this stretch. Remaining roadmap needs the owner
 (2.2 cert purchase) or is deeper strategic work (4.x local model + ProbeLogits governance, 5.x
 evals). Those are the next candidates.
+
+### 2026-07-03 - Roadmap Phase 4.1: one-command local brain (provably private, literally)
+**Why:** the moat is "provably private." Until now local mode just PRINTED the manual steps
+(install Ollama, pull a model, edit .env). 4.1 makes it one command that actually does all three,
+so "offline + local = nothing leaves the device" is true with zero fuss.
+**What shipped:** `jarvis setup --local [model]` (model defaults to qwen2.5-coder:7b). It: (1)
+checks for Ollama via `ollama --version` and installs it only if missing - winget on Windows,
+brew on macOS, the official curl|sh installer on Linux - inheriting stdio so the user watches
+real progress; (2) `ollama pull <model>`; (3) writes the local endpoint to .env
+(OPENROUTER_BASE_URL=localhost:11434/v1, key=ollama, model). Idempotent and re-runnable - it
+skips an install that's already there and ollama's pull is itself a no-op when the model is
+local. Clear, actionable errors at each step (install failed -> manual commands; pull failed ->
+'is ollama serve running?' + how to pick another model). The interactive `jarvis setup` local
+branch now points at this one-command flow. install_ollama() re-verifies with `ollama --version`
+because winget can report odd exit codes even on success.
+**Verified:** builds clean; cargo test 31 passed; dispatch routing confirmed (`setup --local`
+enters run_setup_local, not the interactive stdin path). NOT run end-to-end here on purpose:
+Ollama isn't installed on this box, so executing it would install real software + pull a
+multi-GB model as a side effect the owner didn't ask for right now. The logic is a
+straightforward three-step dispatch over std::process::Command with per-step verification.
+**Next candidates:** 4.3 safety depth (MCP read timeouts, a 'spend' financial action category,
+job-object isolation for risky shell) and 5.2 causal calibration are the next self-contained
+builds; 4.2 ProbeLogits governance needs a logits-exposing local runtime and is deeper.
