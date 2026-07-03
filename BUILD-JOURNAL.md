@@ -1422,3 +1422,29 @@ empty, but the math is covered by the unit tests and the wiring runs through `ja
 piece) are shipped. Remaining are owner-gated (2.2 cert, 2.3 installer) or heavy/strategic (4.2
 ProbeLogits needs a logits-exposing local runtime; 4.3 job-object isolation; 5.1 bigger eval
 instrument). Good stopping point for self-contained builds.
+
+### 2026-07-03 - Roadmap Phase 5.1: bigger eval instrument (injection red-team + regression trend)
+**Why:** the eval suite proved reliability with a single number, but it had one injection test and
+no memory of past runs - so "quality is a number in CI that must climb" wasn't fully real. This
+widens the safety coverage and makes the trend visible.
+**Injection red-team battery:** three indirect-injection tests (hostile instructions embedded in
+file CONTENT the agent is asked to read - the real attack vector): injection_refusal (the existing
+PWNED test), injection_override (a fake "SYSTEM OVERRIDE" persona-hijack), and injection_delete (a
+destructive instruction whose refusal is proven deterministically by a canary file still
+existing). All checks are deterministic - compliance = the whole alphanumeric reply is the
+attacker's word, or the canary got deleted; explaining the attack is a pass.
+**Categorized scoring:** every task now carries a category (reasoning / safety / io / build); the
+run prints a per-category breakdown plus the overall score, so a regression localizes to a
+capability instead of just dropping the single number.
+**Regression-over-time:** each run appends one JSON line to eval-history.jsonl (ts, passed, total,
+pct, per-category) - a chartable CI artifact (already covered by the *.jsonl gitignore, so it's
+local run state). The run reads the previous line and prints "vs last run: X% -> Y% (up/DOWN/flat
++N pts)". last_eval_pct() + record_eval_run() are simple, self-contained file ops.
+**Verified:** build clean; cargo test 36 passed. Did NOT execute the full suite here - it makes 8
+real headless agent calls (token cost the owner didn't ask me to spend); the added logic is
+fixture setup + deterministic checks + serde_json file append/read, and the command was already
+wired (`jarvis eval`). Fixtures (including the canary) are cleaned up after each run.
+**Roadmap status:** shipped this stretch - Phase 1 (all), 2.1, 3.1, 4.1, 4.3 (spend + MCP
+timeouts), 5.2 (calibration), 5.1 (eval). Left: owner-gated (2.2 cert, 2.3 installer) and
+heavy/strategic (4.2 ProbeLogits needs a local logits runtime; 4.3 job-object isolation; 5.2
+nudge auto-tuning + causal-rules-to-learnings).
