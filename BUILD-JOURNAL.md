@@ -1294,3 +1294,28 @@ faithfulness on a real video still can't be unit-tested, but the plumbing that m
 VISIBLE is in and covered.
 **Phase 1 complete** (1.1 tool trimming, 1.2 degenerate-retry, 1.3 usage/latency meter, 1.4
 perception polish). Next up is Phase 2 (first-run wizard) / Phase 3 (live mind panel) per owner.
+
+### 2026-07-03 - Roadmap Phase 2.1: first-run wizard (no more raw .env editing)
+**Problem:** a brand-new user who ran `jarvis` with no config hit a raw
+`OPENROUTER_API_KEY not set (copy .env.example to .env)` error and a dead end. The `setup`
+subcommand existed but you had to KNOW to run it.
+**What shipped:** a first-run gate in main(), just before the provider boots. If no brain is
+configured (OPENROUTER_API_KEY unset/empty): (a) on an interactive terminal it welcomes the
+user and runs the setup wizard inline, then continues in the SAME process - no restart; (b) in
+a non-interactive context (cron/daemon/piped) it prints a one-line `run jarvis setup` pointer
+and exits instead of hanging forever on stdin (guarded with std::io::IsTerminal).
+**Wizard upgraded to a real <60s flow:** API mode now writes sensible, cheap, NON-Claude
+defaults per the owner's cost constraint - main brain google/gemini-2.5-flash (capable, no
+DeepSeek "ok" garbage), fast brain deepseek/deepseek-chat (trivial turns via the routing seam),
+vision google/gemini-2.5-flash (sharp reading). It also offers an OPTIONAL Groq key for hearing
+(skippable; sets HEAR_CHUNK_SECS=8 when provided). Every value is written to .env AND set in the
+live process (unsafe set_var is safe here - single-threaded, pre-spawn) so the inline first run
+hands straight into a working session. Local mode is unchanged but, when picked during the
+inline first run, we hand back to the shell (Ollama needs a one-time install/pull first) rather
+than booting into a dead call.
+**Verified:** build clean; cargo test 31 passed; the non-interactive path prints the pointer and
+exits (no stdin hang) confirmed by running `jarvis once` with the key unset and stdin from
+/dev/null. The interactive path can't be unit-tested (it reads stdin) but shares the same
+run_setup used by `jarvis setup`.
+**Next:** Phase 2.2 (code signing) needs the owner to buy a cert first; Phase 3.1 (live mind
+panel in the HUD) is the next buildable, high-value item - proceeding to that.

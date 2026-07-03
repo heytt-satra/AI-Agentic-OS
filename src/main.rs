@@ -264,6 +264,31 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // First-run wizard (roadmap 2.1): if no brain is configured yet, don't crash
+    // with a raw env error - walk the user through setup in under a minute, then
+    // continue in the SAME process. Non-interactive contexts (cron/daemon) get a
+    // one-line pointer instead of a hang on stdin.
+    if std::env::var("OPENROUTER_API_KEY").map(|k| k.trim().is_empty()).unwrap_or(true) {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            println!("\nWelcome to Jarvis. Looks like this is your first run - let's get you set up.");
+            run_setup()?;
+            // Local mode needs a one-time Ollama install/pull before the brain can
+            // answer, so hand back to the shell instead of booting into a dead call.
+            if std::env::var("OPENROUTER_BASE_URL").unwrap_or_default().contains("localhost") {
+                println!("\nFinish the local-model steps above, then start Jarvis: jarvis");
+                return Ok(());
+            }
+            println!(); // breathing room before the brain boots
+        } else {
+            eprintln!(
+                "No brain configured yet. Run `jarvis setup` once (about a minute) to pick a \
+                 model and paste a key, then start me again."
+            );
+            std::process::exit(1);
+        }
+    }
+
     let provider = Provider::from_env()?;
     let mem = MemoryHandle::spawn("jarvis.db")?;
     // Connect any MCP servers configured in mcp.json (gap 5). No-op if absent.
@@ -961,38 +986,71 @@ fn run_privacy() {
 // run a local model (free per use, needs Ollama + a decent GPU).
 fn run_setup() -> Result<()> {
     use std::io::{stdin, stdout, Write};
+    let prompt = |q: &str| -> String {
+        print!("{q}");
+        let _ = stdout().flush();
+        let mut s = String::new();
+        let _ = stdin().read_line(&mut s);
+        s.trim().to_string()
+    };
+
     println!("\nJarvis setup. Choose how to power the brain:\n");
-    println!("  [1] API key  - cheapest to start, works on any machine (OpenRouter/DeepSeek, a few cents of use)");
+    println!("  [1] API key  - cheapest to start, works on any machine (OpenRouter, a few cents of use)");
     println!("  [2] Local    - free per use, runs entirely on your machine (needs Ollama + a decent GPU)\n");
-    print!("Enter 1 or 2: ");
-    let _ = stdout().flush();
-    let mut choice = String::new();
-    let _ = stdin().read_line(&mut choice);
+    let choice = prompt("Enter 1 or 2 [1]: ");
 
     let mut env = std::fs::read_to_string(".env").unwrap_or_default();
-    if choice.trim() == "2" {
-        env = upsert_env(&env, "OPENROUTER_BASE_URL", "http://localhost:11434/v1");
-        env = upsert_env(&env, "OPENROUTER_API_KEY", "ollama");
-        env = upsert_env(&env, "OPENROUTER_MODEL", "qwen2.5-coder:7b");
+    // Apply a key to both the .env buffer and this live process, so a first-run
+    // wizard can hand off straight into the running session with no restart.
+    let mut set = |env: &mut String, k: &str, v: &str| {
+        *env = upsert_env(env, k, v);
+        // Safe: setup runs single-threaded at first-run, before any task is spawned.
+        unsafe { std::env::set_var(k, v) };
+    };
+
+    if choice == "2" {
+        set(&mut env, "OPENROUTER_BASE_URL", "http://localhost:11434/v1");
+        set(&mut env, "OPENROUTER_API_KEY", "ollama");
+        set(&mut env, "OPENROUTER_MODEL", "qwen2.5-coder:7b");
         std::fs::write(".env", env)?;
         println!("\nLocal mode set. One-time steps:");
         println!("  1. Install Ollama:  winget install Ollama.Ollama   (mac: brew install ollama)");
         println!("  2. Pull the model:  ollama pull qwen2.5-coder:7b");
         println!("  3. Start Jarvis:    jarvis");
         println!("\nNo API key, no per-use cost. The first reply is slow while the model loads into VRAM.");
+        return Ok(());
+    }
+
+    // ── API mode ──────────────────────────────────────────────────────────────
+    let key = prompt("\nPaste your OpenRouter API key (get one at https://openrouter.ai/keys): ");
+    if !key.is_empty() {
+        set(&mut env, "OPENROUTER_API_KEY", &key);
+    }
+    set(&mut env, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
+    // Sensible, cheap, NON-Claude defaults (owner's cost constraint): a capable
+    // main brain that doesn't emit the DeepSeek "ok" garbage, a cheap brain for
+    // trivial turns via the routing seam, and sharp eyes for the watch-along.
+    set(&mut env, "OPENROUTER_MODEL", "google/gemini-2.5-flash");
+    set(&mut env, "OPENROUTER_MODEL_FAST", "deepseek/deepseek-chat");
+    set(&mut env, "OPENROUTER_VISION_MODEL", "google/gemini-2.5-flash");
+
+    // Optional: hearing (system-audio transcription) needs a Groq key. Skippable -
+    // watching still works visually without it.
+    let groq = prompt(
+        "\nOptional - paste a Groq key for hearing (transcribes on-screen audio while watching), \
+         or press Enter to skip (free key: https://console.groq.com/keys): ",
+    );
+    if !groq.is_empty() {
+        set(&mut env, "GROQ_API_KEY", &groq);
+        set(&mut env, "HEAR_CHUNK_SECS", "8"); // snappier transcripts than the 12s default
+    }
+
+    std::fs::write(".env", env)?;
+    println!("\nAll set. Main brain: gemini-2.5-flash (cheap, capable). Fast brain: deepseek-chat.");
+    if groq.is_empty() {
+        println!("Hearing is off (no Groq key) - watching is visual-only. Re-run `jarvis setup` to add it later.");
     } else {
-        print!("\nPaste your OpenRouter API key (get one at https://openrouter.ai/keys): ");
-        let _ = stdout().flush();
-        let mut key = String::new();
-        let _ = stdin().read_line(&mut key);
-        let key = key.trim();
-        if !key.is_empty() {
-            env = upsert_env(&env, "OPENROUTER_API_KEY", key);
-        }
-        env = upsert_env(&env, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
-        env = upsert_env(&env, "OPENROUTER_MODEL", "deepseek/deepseek-v4-flash");
-        std::fs::write(".env", env)?;
-        println!("\nAPI mode set with DeepSeek (very cheap). Start Jarvis:  jarvis");
+        println!("Hearing is on - I'll transcribe on-screen audio while watching.");
     }
     Ok(())
 }
