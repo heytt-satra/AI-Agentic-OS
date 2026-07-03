@@ -1448,3 +1448,23 @@ wired (`jarvis eval`). Fixtures (including the canary) are cleaned up after each
 timeouts), 5.2 (calibration), 5.1 (eval). Left: owner-gated (2.2 cert, 2.3 installer) and
 heavy/strategic (4.2 ProbeLogits needs a local logits runtime; 4.3 job-object isolation; 5.2
 nudge auto-tuning + causal-rules-to-learnings).
+
+### 2026-07-03 - Roadmap Phase 5.2 (cont.): causal rules -> learnings
+**Why:** Jarvis records a causal track record but only USED it when explicitly asked
+(predict_outcome). This turns a strong, well-sampled track record into a durable heuristic the
+agent carries into every future session automatically - self-improvement with no model call.
+**What shipped:** a deterministic step at the end of run_reflect (which runs on the heartbeat and
+via `jarvis reflect`). For each tool with >=5 recorded interventions, a skewed success rate
+becomes a learning: >=90% -> "the '<tool>' action is highly reliable - trust it"; <=30% ->
+"unreliable - check predict_outcome and have a fallback". Middling rates make no rule. Crucially
+the durable text is NUMBER-FREE and stable, so re-running reflect REINFORCES the same learning
+(the learn() path reinforces on identical text) instead of spawning near-duplicates as the
+counts drift. Self-correcting: if a tool's reliability flips, the stale rule stops being
+reinforced and decays (14-day decay already in place) while the new one strengthens.
+**Verified:** build clean; cargo test 36 passed. The reflect summary now reports the causal-rule
+count too. Behavior is deterministic over causal_stats, so no model call is needed to test the
+logic path; it activates once real interventions accumulate (this box's causal log is currently
+empty).
+**Remaining 5.2 piece:** nudge-frequency auto-tuning needs accept/dismiss tracking + HUD wiring
+(a bigger UI loop) - deferred. Self-contained roadmap items are now largely done; what's left is
+owner-gated (2.2/2.3) or heavy/strategic (4.2 ProbeLogits, 4.3 job-object isolation).

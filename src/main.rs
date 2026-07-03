@@ -1748,8 +1748,32 @@ pub(crate) async fn run_reflect(provider: &Provider, mem: &MemoryHandle) -> Stri
             g += 1;
         }
     }
+    // Deterministic causal rules -> learnings (roadmap 5.2): promote a tool's own
+    // well-sampled track record on THIS machine into a durable heuristic, with no
+    // model call. The durable text is deliberately NUMBER-FREE and stable so a
+    // re-run REINFORCES the same learning instead of spawning near-duplicates; if a
+    // tool's reliability flips, the stale rule simply stops being reinforced and
+    // decays while the new one strengthens.
+    let mut c = 0;
+    for (tool, total, succ) in mem.causal_stats().await {
+        if total < 5 {
+            continue; // not enough evidence to make a rule
+        }
+        let rate = 100 * succ / total;
+        let rule = if rate >= 90 {
+            format!("On this machine, the '{tool}' action is highly reliable - trust it.")
+        } else if rate <= 30 {
+            format!("On this machine, the '{tool}' action is unreliable - check predict_outcome and have a fallback before relying on it.")
+        } else {
+            continue; // middling rates aren't a rule worth stating
+        };
+        if !mem.learn(&rule, "causal", "causal-rule").await.starts_with("error") {
+            c += 1;
+        }
+    }
+
     let pruned = mem.decay_learnings(14 * 86_400, 0.15).await;
-    format!("Reflected: distilled {n} new learning(s), formed {g} hypothesis/goal(s), pruned {pruned} stale.")
+    format!("Reflected: distilled {n} new learning(s), {c} causal rule(s), formed {g} hypothesis/goal(s), pruned {pruned} stale.")
 }
 
 // Self-direction: advance ONE open hypothesis/goal by raising it with the user (as
