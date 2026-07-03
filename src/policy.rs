@@ -63,7 +63,37 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         _ => (false, String::new(), String::new()),
     };
 
+    // Financial override (roadmap 4.3): a distinct "spend" category. Anything that
+    // could MOVE MONEY always gets a nod, even in autonomous mode, and is labeled
+    // as a spend so the user knows exactly why. Money-safe by design: a false
+    // positive just costs one prompt. Scoped to the money-capable tools so normal
+    // reads/clicks aren't inspected.
+    let money = matches!(tool, "run_shell" | "code_exec" | "browse_url" | "browse_js" | "open_path" | "fetch_url")
+        && is_financial(args_json);
+    if money {
+        let what = if salient.is_empty() { tool.to_string() } else { salient.chars().take(80).collect() };
+        return Risk {
+            needs_approval: true,
+            label: format!("SPEND (financial action): {what}"),
+            key: format!("{tool}:spend:{salient}"),
+        };
+    }
+
     Risk { needs_approval, label, key: format!("{tool}:{salient}") }
+}
+
+// Intent that would move money. Deliberately narrow (strong transaction signals
+// only) to avoid prompt fatigue on ordinary browsing, but broad enough to catch
+// a checkout/payment/transfer. Matched case-insensitively over the raw args.
+fn is_financial(args_json: &str) -> bool {
+    let c = args_json.to_lowercase();
+    const MONEY: &[&str] = &[
+        "checkout", "place order", "confirm order", "confirm payment", "complete purchase",
+        "buy now", "pay now", "pay $", "payment", "paypal", "stripe", "credit card",
+        "card number", "cvv", "wire transfer", "bank transfer", "venmo", "zelle",
+        "send money", "transfer money", "send bitcoin", "send eth",
+    ];
+    MONEY.iter().any(|m| c.contains(m))
 }
 
 // Commands that can wreck the system or destroy data. Matched case-insensitively
@@ -89,4 +119,34 @@ fn is_system_path(p: &str) -> bool {
         || c.contains("system32")
         || c.contains("hklm") || c.contains("hkey_")
         || c.starts_with("/etc") || c.starts_with("/usr") || c.starts_with("/bin") || c.starts_with("/sys")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assess;
+
+    #[test]
+    fn spend_actions_always_need_approval_and_are_labeled() {
+        // a browse action that reaches a checkout -> spend prompt
+        let r = assess("browse_js", r#"{"script":"click the Place order button and confirm payment"}"#);
+        assert!(r.needs_approval);
+        assert!(r.label.starts_with("SPEND"), "label was: {}", r.label);
+        assert!(r.key.contains(":spend:"));
+
+        // a shell command that wires money -> spend prompt even though it isn't a
+        // system-dangerous command
+        let r = assess("run_shell", r#"{"command":"paypal-cli send-money --to x --amount 50"}"#);
+        assert!(r.needs_approval);
+        assert!(r.label.starts_with("SPEND"));
+    }
+
+    #[test]
+    fn ordinary_actions_are_not_flagged_as_spend() {
+        // reading a page about pricing is not a transaction
+        let r = assess("browse_url", r#"{"url":"https://example.com/features"}"#);
+        assert!(!r.needs_approval);
+        // a plain read tool is never inspected for money
+        let r = assess("read_file", r#"{"path":"notes about payment.txt"}"#);
+        assert!(!r.needs_approval);
+    }
 }

@@ -18,9 +18,18 @@
 use crate::provider::{FunctionDef, Tool};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc as smpsc;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+
+// How long to wait for a single MCP server response before giving up, so a wedged
+// server can't hang the agent forever (roadmap 4.3). Override with MCP_TIMEOUT_SECS.
+fn mcp_timeout() -> Duration {
+    let secs = std::env::var("MCP_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(30);
+    Duration::from_secs(secs)
+}
 
 enum Cmd {
     Tools { reply: oneshot::Sender<Vec<Tool>> },
@@ -145,7 +154,9 @@ struct Server {
     name: String, // sanitized (alphanumeric) for the tool-name prefix
     _child: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    // Lines are read off the child's stdout on a dedicated thread and delivered
+    // here, so rpc() can wait with a timeout instead of blocking forever.
+    rx: smpsc::Receiver<String>,
     next_id: i64,
     tools: Vec<McpTool>,
 }
@@ -167,11 +178,25 @@ impl Server {
         let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
+        // Drain stdout on its own thread so a slow/wedged server blocks the reader
+        // thread, not the agent. rpc() then reads with a timeout off this channel.
+        let (tx, rx) = smpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,                       // EOF: server exited
+                    Ok(_) => if tx.send(line).is_err() { break }, // rpc side dropped
+                    Err(_) => break,
+                }
+            }
+        });
         let mut s = Server {
             name,
             _child: child,
             stdin,
-            reader: BufReader::new(stdout),
+            rx,
             next_id: 0,
             tools: Vec::new(),
         };
@@ -186,12 +211,23 @@ impl Server {
         let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
         writeln!(self.stdin, "{req}").map_err(|e| format!("write: {e}"))?;
         self.stdin.flush().ok();
+        // Bound the whole exchange: keep reading matching-id responses until the
+        // deadline, so a wedged or chatty server can't hang the agent forever.
+        let deadline = Instant::now() + mcp_timeout();
         loop {
-            let mut line = String::new();
-            let n = self.reader.read_line(&mut line).map_err(|e| format!("read: {e}"))?;
-            if n == 0 {
-                return Err("server closed the connection".to_string());
-            }
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(d) => d,
+                None => return Err(format!("timed out after {}s", mcp_timeout().as_secs())),
+            };
+            let line = match self.rx.recv_timeout(remaining) {
+                Ok(l) => l,
+                Err(smpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!("timed out after {}s waiting for a response", mcp_timeout().as_secs()));
+                }
+                Err(smpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("server closed the connection".to_string());
+                }
+            };
             let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
             if v.get("id").and_then(|x| x.as_i64()) == Some(id) {
                 if let Some(err) = v.get("error") {

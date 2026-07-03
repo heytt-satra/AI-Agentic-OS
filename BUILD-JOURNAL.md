@@ -1372,3 +1372,29 @@ straightforward three-step dispatch over std::process::Command with per-step ver
 **Next candidates:** 4.3 safety depth (MCP read timeouts, a 'spend' financial action category,
 job-object isolation for risky shell) and 5.2 causal calibration are the next self-contained
 builds; 4.2 ProbeLogits governance needs a logits-exposing local runtime and is deeper.
+
+### 2026-07-03 - Roadmap Phase 4.3: safety depth (spend category + MCP read timeouts)
+**Two independent hardening wins toward "safe to hand real money."**
+**(1) A 'spend' financial action category (policy.rs):** the safety gate posture is "just do it
+unless it could damage the OS." Money was a hole in that - a checkout or a wire-transfer command
+isn't OS-dangerous, so it ran silently. Now assess() has a financial override: for the
+money-capable tools (run_shell, code_exec, browse_url, browse_js, open_path, fetch_url), if the
+args carry strong transaction intent (is_financial: checkout / place order / confirm payment /
+pay $ / paypal / stripe / credit card / wire transfer / venmo / send money / send bitcoin / ...)
+it ALWAYS prompts, with a distinct "SPEND (financial action): ..." label so the user knows why,
+and a `{tool}:spend:{args}` permission key. Money-safe by design - a false positive costs one
+prompt; the keyword list is deliberately narrow (strong signals only) to avoid prompt fatigue on
+ordinary browsing. Plain reads/clicks are never inspected.
+**(2) MCP read timeouts (mcp.rs):** rpc() read the child server's stdout with a blocking
+read_line in a loop - a wedged or silent MCP server hung the agent FOREVER. Fixed by draining
+each server's stdout on a dedicated thread into a std::sync::mpsc channel; rpc() now waits with
+recv_timeout against a deadline (MCP_TIMEOUT_SECS, default 30s) and returns a clean "timed out
+after Ns" error instead of blocking. EOF and dropped-reader cases are handled. This also cleanly
+separates the blocking I/O from the request/response logic.
+**Verified:** build clean (removed the now-unused ChildStdout import; also fixed a stray `mut`
+from the 2.1 wizard closure); cargo test 33 passed (2 new: spend actions flagged + labeled,
+ordinary actions not flagged). The timeout path is structural (recv_timeout against a deadline) -
+exercising a real hang would need a deliberately-wedged MCP server; the logic is a standard
+channel-with-deadline pattern.
+**Remaining 4.3 piece:** job-object isolation for risky shell is Windows-kernel-specific and
+heavier; deferred. Next self-contained build: 5.2 causal calibration (was my prediction right?).

@@ -1010,7 +1010,7 @@ fn run_setup() -> Result<()> {
     let mut env = std::fs::read_to_string(".env").unwrap_or_default();
     // Apply a key to both the .env buffer and this live process, so a first-run
     // wizard can hand off straight into the running session with no restart.
-    let mut set = |env: &mut String, k: &str, v: &str| {
+    let set = |env: &mut String, k: &str, v: &str| {
         *env = upsert_env(env, k, v);
         // Safe: setup runs single-threaded at first-run, before any task is spawned.
         unsafe { std::env::set_var(k, v) };
