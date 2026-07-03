@@ -1266,3 +1266,31 @@ doesn't return usage.
 warning). Token+timing now flow end-to-end into the streaming path, which was the whole point
 of 1.3 - speed and cost are now visible and therefore optimizable.
 **Next (1.4):** perception polish - speaker labels on HEAR lines + a vision-confidence note.
+
+### 2026-07-03 - Roadmap Phase 1.4: perception polish (trust what it reports)
+**Goal:** make the watch-along log something you can TRUST - know how sure it is about what it
+saw and heard, and separate distinct speakers.
+**Honest constraint first:** Groq's whisper does NOT do real speaker diarization, and the
+project rule is no invention / no AI slop. So rather than fabricate "Bob:"/"Alice:" names, we
+surface the real signals the models actually give us and label them truthfully.
+**Vision confidence (SEE):** CAPTION_PROMPT now asks the vision model to end each caption with
+one of 'confidence: high|medium|low' (its own read of frame legibility). split_confidence()
+strips that line off the caption body and stores it; context_snapshot renders it in the tag as
+e.g. [00:12 SEE ~low]. Same philosophy as the existing '(text unclear)' rule, but structured
+and always present.
+**Hearing confidence + turns (HEAR):** transcription switched from response_format=text to
+verbose_json, which returns per-segment start/end, avg_logprob, and no_speech_prob. parse_verbose():
+(1) drops segments with no_speech_prob > 0.6 - this is what kills whisper's "thanks for watching"
+hallucinations over music; (2) averages avg_logprob and flags low_conf when it falls below
+HEAR_CONF_FLOOR (default -0.7), rendered as [.. HEAR ~unclear]; (3) inserts a ' | ' divider when
+the pause between segments exceeds HEAR_TURN_GAP_SECS (default 1.4s) - an honest, acoustic
+speaker-turn boundary rather than a made-up name.
+**Context rules updated:** the LIVE WATCH preamble now tells the agent HEAR is on-screen/media
+audio (not the user), explains the ~low/~unclear markers and the ' | ' turn divider, and says to
+treat marked lines as uncertain.
+**Verified:** cargo test 31 passed (4 new - confidence_is_split_off_the_caption, verbose_json
+turn-splitting + low-conf flagging + non-speech drop, flat-text fallback). Build clean. Model
+faithfulness on a real video still can't be unit-tested, but the plumbing that makes trust
+VISIBLE is in and covered.
+**Phase 1 complete** (1.1 tool trimming, 1.2 degenerate-retry, 1.3 usage/latency meter, 1.4
+perception polish). Next up is Phase 2 (first-run wizard) / Phase 3 (live mind panel) per owner.

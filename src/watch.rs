@@ -29,6 +29,10 @@ struct Note {
     ts: u64,
     kind: Kind,
     text: String,
+    // A short trust marker shown next to the tag: for SEE it is the vision
+    // model's self-rated read confidence (high/medium/low); for HEAR it is
+    // "unclear" when the transcription confidence was low. Empty = unmarked.
+    note: String,
 }
 
 struct WatchState {
@@ -63,7 +67,7 @@ pub fn is_active() -> bool {
     cell().lock().map(|s| s.active).unwrap_or(false)
 }
 
-fn push(kind: Kind, text: String) {
+fn push(kind: Kind, text: String, note: String) {
     let text = text.trim().to_string();
     if text.is_empty() {
         return;
@@ -72,22 +76,24 @@ fn push(kind: Kind, text: String) {
         if !s.active {
             return; // a late frame after stop(); drop it
         }
-        s.notes.push_back(Note { ts: now(), kind, text });
+        s.notes.push_back(Note { ts: now(), kind, text, note });
         while s.notes.len() > MAX_NOTES {
             s.notes.pop_front();
         }
     }
 }
 
-/// Record one captioned video frame (the "eyes").
-pub fn push_see(caption: String) {
-    push(Kind::See, caption);
+/// Record one captioned video frame (the "eyes"). `conf` is the vision model's
+/// self-rated read confidence (high/medium/low), or empty if it didn't report.
+pub fn push_see(caption: String, conf: String) {
+    push(Kind::See, caption, conf);
 }
 
-/// Record one chunk of transcribed audio (the "ears" — Stage 2).
+/// Record one chunk of transcribed audio (the "ears"). `low_conf` flags a
+/// shaky transcription so the agent treats those words with suspicion.
 #[allow(dead_code)]
-pub fn push_hear(words: String) {
-    push(Kind::Hear, words);
+pub fn push_hear(words: String, low_conf: bool) {
+    push(Kind::Hear, words, if low_conf { "unclear".into() } else { String::new() });
 }
 
 /// Begin watching: clear the buffer and spawn the visual sampling loop.
@@ -178,6 +184,9 @@ pub fn context_snapshot() -> String {
             Kind::See => "SEE",
             Kind::Hear => "HEAR",
         };
+        // Append the trust marker to the tag, e.g. [00:12 SEE ~low] or
+        // [00:20 HEAR ~unclear], so the model can see how much to trust each line.
+        let tag = if n.note.is_empty() { tag.to_string() } else { format!("{tag} ~{}", n.note) };
         lines.push(format!("[{:02}:{:02} {tag}] {}", rel / 60, rel % 60, n.text));
     }
     if lines.is_empty() {
@@ -188,9 +197,16 @@ pub fn context_snapshot() -> String {
     format!(
         "LIVE WATCH CONTEXT — what you are CURRENTLY seeing (SEE) and hearing (HEAR) on the \
          user's screen as a video plays, oldest first, newest last (mm:ss since watching began). \
+         HEAR is the on-screen/media audio (the video, a call, whatever is playing through the \
+         speakers), NOT the user speaking to you. A tag may carry a trust marker: '~low'/'~medium' \
+         on a SEE line is the vision model's own read confidence for that frame; '~unclear' on a \
+         HEAR line means the transcription was shaky. A ' | ' inside a HEAR line separates distinct \
+         spoken turns (a pause in the audio), which often marks a change of speaker. \
          ACCURACY RULES: answer ONLY from this log. Quote the HEAR (spoken) lines close to \
          VERBATIM - do NOT paraphrase dramatically, embellish, add backstory, or invent any \
-         detail. Preserve names/numbers/spellings exactly as logged. If the log is unclear, \
+         detail. Preserve names/numbers/spellings exactly as logged. Treat '~low'/'~unclear' \
+         lines as uncertain - lean on clearer lines and flag the doubt rather than stating shaky \
+         content as fact. If the log is unclear, \
          partial, or does not contain the answer, say so plainly instead of guessing or \
          filling gaps. Better to say 'I only caught part of that' than to make it up.\n{}",
         lines.join("\n")
@@ -204,7 +220,39 @@ const CAPTION_PROMPT: &str =
      what it says, never 'Lenser'). (2) Describe ONLY what is literally visible right now - no \
      interpretation, no backstory, no guessing what it means. (3) If text is too small or blurry \
      to read with confidence, say '(text unclear)' rather than inventing it. Keep it to one or \
-     two short factual lines. If the screen is a static desktop or page, say so briefly.";
+     two short factual lines. If the screen is a static desktop or page, say so briefly. \
+     (4) On the VERY LAST line, on its own, rate how clearly you could read this frame as exactly \
+     one of: 'confidence: high' (everything crisp and legible), 'confidence: medium' (some text \
+     small or blurry), or 'confidence: low' (much was unreadable or the frame was noisy).";
+
+// Split a raw vision caption into (caption_text, confidence). The model is asked
+// to end with a 'confidence: high|medium|low' line; we strip it off the caption
+// and surface it separately so the agent knows how much to trust the frame. If
+// the tag is missing (older/other model), confidence is empty and nothing breaks.
+fn split_confidence(raw: &str) -> (String, String) {
+    for line in raw.lines().rev() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        if let Some(rest) = l.to_ascii_lowercase().strip_prefix("confidence:") {
+            let conf = match rest.trim() {
+                s if s.starts_with("high") => "high",
+                s if s.starts_with("med") => "medium",
+                s if s.starts_with("low") => "low",
+                _ => "",
+            };
+            if !conf.is_empty() {
+                // Remove that trailing line from the caption body.
+                let body = raw.trim_end();
+                let cut = body.rfind(line).unwrap_or(body.len());
+                return (body[..cut].trim_end().to_string(), conf.to_string());
+            }
+        }
+        break; // only inspect the last non-empty line
+    }
+    (raw.trim().to_string(), String::new())
+}
 
 // Mean absolute difference between two equal-length grayscale fingerprints, in
 // 0..=255 units. Large for full-motion video / scene cuts, ~0 for a static or
@@ -275,7 +323,8 @@ fn spawn_visual_loop(target: Option<String>) {
                     if changed && cooled {
                         let caption = crate::tools::vision_ask(&data_url, CAPTION_PROMPT).await;
                         if !caption.starts_with("ERROR") {
-                            push_see(caption);
+                            let (body, conf) = split_confidence(&caption);
+                            push_see(body, conf);
                             last_fp = fp;
                             last_caption_ts = now();
                             first = false;
@@ -295,7 +344,22 @@ fn spawn_visual_loop(target: Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::fp_diff;
+    use super::{fp_diff, split_confidence};
+
+    #[test]
+    fn confidence_is_split_off_the_caption() {
+        let (body, conf) = split_confidence("A desktop with the text 'Lensr'.\nconfidence: low");
+        assert_eq!(body, "A desktop with the text 'Lensr'.");
+        assert_eq!(conf, "low");
+        // case-insensitive, trailing words after the level are tolerated
+        let (body, conf) = split_confidence("Two lines of code.\nConfidence: High and crisp");
+        assert_eq!(body, "Two lines of code.");
+        assert_eq!(conf, "high");
+        // no tag -> caption kept whole, empty confidence
+        let (body, conf) = split_confidence("Just a caption, no tag.");
+        assert_eq!(body, "Just a caption, no tag.");
+        assert_eq!(conf, "");
+    }
 
     #[test]
     fn fp_diff_detects_change() {

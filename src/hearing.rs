@@ -123,12 +123,10 @@ fn capture_and_transcribe(handle: tokio::runtime::Handle) -> Result<(), String> 
                 continue;
             }
             let wav = wav_pcm16_mono(&chunk, SR);
-            let text = handle.block_on(transcribe_wav(wav));
-            let t = text.trim();
-            if t.starts_with("ERROR") {
-                eprintln!("[hearing] {t}");
-            } else if !t.is_empty() {
-                crate::watch::push_hear(t.to_string());
+            match handle.block_on(transcribe_wav(wav)) {
+                Err(e) => eprintln!("[hearing] {e}"),
+                Ok(h) if !h.text.is_empty() => crate::watch::push_hear(h.text, h.low_conf),
+                Ok(_) => {} // empty transcript (silence/non-speech) - drop
             }
         }
         let _ = h_event.wait_for_event(500); // short so we notice watch-off fast
@@ -194,41 +192,136 @@ fn wav_pcm16_mono(pcm: &[u8], sr: u32) -> Vec<u8> {
     v
 }
 
+// One transcribed audio chunk: the (possibly multi-turn) text plus a flag for
+// when the model's own confidence was low, so the watch log can mark it.
+pub struct Heard {
+    pub text: String,
+    pub low_conf: bool,
+}
+
+// Whisper's avg_logprob is ~-0.1..-0.3 for clean speech and drops well below
+// this when it is unsure or hallucinating over noise/music.
+fn conf_floor() -> f64 {
+    std::env::var("HEAR_CONF_FLOOR").ok().and_then(|s| s.parse().ok()).unwrap_or(-0.7)
+}
+// A gap between spoken segments longer than this (seconds) is treated as a new
+// turn - usually a change of speaker - and marked with a divider.
+fn turn_gap() -> f64 {
+    std::env::var("HEAR_TURN_GAP_SECS").ok().and_then(|s| s.parse().ok()).filter(|n: &f64| *n > 0.0).unwrap_or(1.4)
+}
+
 // POST a WAV to the OpenAI-compatible /audio/transcriptions endpoint (Groq by
-// default) and return the plain transcript text, or an ERROR: string.
-async fn transcribe_wav(wav: Vec<u8>) -> String {
+// default). We ask for verbose_json so we get per-segment timings and
+// confidence: that lets us (1) flag shaky transcripts and (2) split distinct
+// spoken turns on audio pauses. Returns Err(msg) on any failure.
+async fn transcribe_wav(wav: Vec<u8>) -> Result<Heard, String> {
     let key = transcribe_key();
     if key.is_empty() {
-        return "ERROR: no transcription key".into();
+        return Err("no transcription key".into());
     }
     let base = std::env::var("TRANSCRIBE_BASE_URL")
         .unwrap_or_else(|_| "https://api.groq.com/openai/v1".into());
     let model = std::env::var("TRANSCRIBE_MODEL")
         .unwrap_or_else(|_| "whisper-large-v3-turbo".into());
-    let part = match reqwest::multipart::Part::bytes(wav).file_name("audio.wav").mime_str("audio/wav") {
-        Ok(p) => p,
-        Err(e) => return format!("ERROR transcribe part: {e}"),
-    };
+    let part = reqwest::multipart::Part::bytes(wav)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| format!("transcribe part: {e}"))?;
     let form = reqwest::multipart::Form::new()
         .part("file", part)
         .text("model", model)
-        .text("response_format", "text");
+        .text("response_format", "verbose_json");
     let client = reqwest::Client::new();
-    match client
+    let r = client
         .post(format!("{base}/audio/transcriptions"))
         .header("Authorization", format!("Bearer {key}"))
         .multipart(form)
         .send()
         .await
-    {
-        Ok(r) => {
-            let s = r.status();
-            let body = r.text().await.unwrap_or_default();
-            if !s.is_success() {
-                return format!("ERROR transcribe {s}: {}", body.chars().take(200).collect::<String>());
-            }
-            body.trim().to_string()
+        .map_err(|e| format!("transcribe request: {e}"))?;
+    let s = r.status();
+    let body = r.text().await.unwrap_or_default();
+    if !s.is_success() {
+        return Err(format!("transcribe {s}: {}", body.chars().take(200).collect::<String>()));
+    }
+    Ok(parse_verbose(&body))
+}
+
+// Turn a verbose_json transcription body into a Heard. Falls back gracefully to
+// the flat "text" field if a provider doesn't return segments.
+fn parse_verbose(body: &str) -> Heard {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        // Not JSON (e.g. a plain-text provider) - use it verbatim.
+        Err(_) => return Heard { text: body.trim().to_string(), low_conf: false },
+    };
+    let segs = v["segments"].as_array();
+    let Some(segs) = segs else {
+        return Heard { text: v["text"].as_str().unwrap_or("").trim().to_string(), low_conf: false };
+    };
+
+    let gap = turn_gap();
+    let mut out = String::new();
+    let mut logprob_sum = 0.0;
+    let mut logprob_n = 0.0;
+    let mut prev_end: Option<f64> = None;
+    for seg in segs {
+        let txt = seg["text"].as_str().unwrap_or("").trim();
+        if txt.is_empty() {
+            continue;
         }
-        Err(e) => format!("ERROR transcribe request: {e}"),
+        // Drop segments the model itself thinks are probably not speech - this is
+        // what kills whisper's "thanks for watching" hallucinations over music.
+        if seg["no_speech_prob"].as_f64().unwrap_or(0.0) > 0.6 {
+            continue;
+        }
+        if let Some(lp) = seg["avg_logprob"].as_f64() {
+            logprob_sum += lp;
+            logprob_n += 1.0;
+        }
+        let start = seg["start"].as_f64().unwrap_or(0.0);
+        if let Some(pe) = prev_end {
+            out.push_str(if start - pe > gap { " | " } else { " " });
+        }
+        out.push_str(txt);
+        prev_end = Some(seg["end"].as_f64().unwrap_or(start));
+    }
+    let mean_lp = if logprob_n > 0.0 { logprob_sum / logprob_n } else { 0.0 };
+    Heard { text: out.trim().to_string(), low_conf: logprob_n > 0.0 && mean_lp < conf_floor() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_verbose;
+
+    #[test]
+    fn verbose_json_splits_turns_and_flags_low_confidence() {
+        // two segments with a 2s gap between them -> a turn divider; clean logprob
+        let body = r#"{"text":"hello there general","segments":[
+            {"start":0.0,"end":1.0,"text":"hello","avg_logprob":-0.2,"no_speech_prob":0.01},
+            {"start":3.0,"end":4.0,"text":"there general","avg_logprob":-0.25,"no_speech_prob":0.02}
+        ]}"#;
+        let h = parse_verbose(body);
+        assert_eq!(h.text, "hello | there general");
+        assert!(!h.low_conf);
+    }
+
+    #[test]
+    fn verbose_json_drops_nonspeech_and_flags_shaky() {
+        // one real segment (shaky logprob) + one non-speech hallucination dropped
+        let body = r#"{"text":"x","segments":[
+            {"start":0.0,"end":1.0,"text":"muffled words","avg_logprob":-1.1,"no_speech_prob":0.1},
+            {"start":1.0,"end":2.0,"text":"thanks for watching","avg_logprob":-0.3,"no_speech_prob":0.9}
+        ]}"#;
+        let h = parse_verbose(body);
+        assert_eq!(h.text, "muffled words");
+        assert!(h.low_conf);
+    }
+
+    #[test]
+    fn falls_back_to_flat_text_without_segments() {
+        let h = parse_verbose(r#"{"text":"just a sentence"}"#);
+        assert_eq!(h.text, "just a sentence");
+        assert!(!h.low_conf);
     }
 }
