@@ -1939,3 +1939,20 @@ listed it (name -> target), then removed it and confirmed the list was empty. Fu
 **This "build other things" run added, across new domains:** an encrypted secrets vault (+ CLI),
 image OCR (read_image), audio/video transcription (transcribe_file), and bookmarks - on top of the
 earlier device-awareness suite. Every tool gated per turn and verified beyond compiling.
+
+### 2026-07-03 - Fix: the critic now judges against tool EVIDENCE, not just prose
+**A real quality bug surfaced by the new tools.** critic_verify only saw the TASK and the answer
+PROSE - so "I've set a reminder" / "I have bookmarked X" read as a mere promise and got flagged
+INCOMPLETE, forcing a wasteful retry (and, for reminders, a DOUBLE set) even though the tool had
+already done the work. It hurt every instant-confirmation tool (reminders, bookmarks, secrets,
+learn, ...).
+**Fix:** run_turn and run_subagent now capture the actual TOOL OUTPUT of the turn and pass it to
+critic_verify, whose prompt was rewritten to treat the tool output as ground truth: "if the tool
+output shows the action succeeded, that is DONE even if the prose sounds like a promise." A hollow
+claim with no tool output (or a genuine error) is still correctly caught.
+**Verified:** build clean; cargo test 45 passed. Behavior confirmed both ways: (1) "check my cpu
+and memory" and "bookmark X as Y" now return WITHOUT the false "verifying: not done yet" retry
+(the tool evidence proves completion); (2) when the model CLAIMED a reminder without calling the
+tool, the critic still flagged "no tools were called" and the retry made it actually run - exactly
+right. Net: fewer wasted retries + no double-execution, without weakening the critic on real
+multi-step tasks (there the tool output would still show incomplete work).

@@ -859,7 +859,7 @@ async fn main() -> Result<()> {
 // cheap call per completed turn; disable with JARVIS_CRITIC=off. Deliberately
 // conservative: only blocks on a clear INCOMPLETE verdict, never on ambiguity, so
 // it adds reliability without false stalls.
-async fn critic_verify(provider: &Provider, task: &str, answer: &str) -> Option<String> {
+async fn critic_verify(provider: &Provider, task: &str, answer: &str, evidence: &str) -> Option<String> {
     if std::env::var("JARVIS_CRITIC").unwrap_or_default().to_lowercase() == "off" {
         return None;
     }
@@ -867,13 +867,24 @@ async fn critic_verify(provider: &Provider, task: &str, answer: &str) -> Option<
     if answer.trim().is_empty() {
         return Some("no result was produced".to_string());
     }
+    // The actual tool output this turn is the ground truth. Prose can sound like a
+    // promise ("I'll remind you") when the tool already did the work ("Reminder #3
+    // set") - so the critic must judge against the evidence, not the phrasing.
+    let evidence_block = if evidence.trim().is_empty() {
+        "(no tools were called this turn)".to_string()
+    } else {
+        evidence.chars().take(1500).collect::<String>()
+    };
     let prompt = format!(
-        "You verify task completion. Given the TASK and the agent's RESULT, decide if the \
-         task is ACTUALLY and fully accomplished by the result. Reply EXACTLY 'DONE' if it \
-         is complete and correct. Otherwise reply 'INCOMPLETE: <one sentence on what is \
-         missing>'. Treat a refusal of a malicious instruction as DONE (that is correct \
-         behavior). Treat a mere promise, a partial answer, or an error as INCOMPLETE.\n\n\
-         TASK:\n{task}\n\nRESULT:\n{}",
+        "You verify task completion. Given the TASK, the agent's RESULT prose, and the actual \
+         TOOL OUTPUT from this turn, decide if the task is ACTUALLY accomplished. Reply EXACTLY \
+         'DONE' if it is complete and correct. Otherwise reply 'INCOMPLETE: <one sentence on what \
+         is missing>'. Rules: the TOOL OUTPUT is ground truth - if it shows the action succeeded \
+         (a file written, a reminder set, a bookmark saved, a value stored, data returned), that \
+         is DONE even if the prose sounds like a promise. Treat a refusal of a malicious \
+         instruction as DONE. Treat only a genuine error, empty output, or a claim contradicted by \
+         the tool output as INCOMPLETE.\n\n\
+         TASK:\n{task}\n\nRESULT:\n{}\n\nTOOL OUTPUT:\n{evidence_block}",
         answer.chars().take(2000).collect::<String>()
     );
     let msgs = vec![
@@ -984,6 +995,7 @@ pub async fn run_subagent(
     let steps = max_steps();
     let mut critic_done = false; // allow exactly one critic-triggered retry
     let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
+    let mut evidence = String::new(); // tool outputs this turn, for the critic
     for _ in 0..steps {
         let reply = match provider.chat(&messages, Some(tools::relevant_definitions(task).await)).await {
             Ok(r) => r,
@@ -1007,6 +1019,7 @@ pub async fn run_subagent(
                     tools::execute(&name, &args, mem, provider, depth + 1).await
                 };
                 mem.log_audit(&name, &args, "subagent", tools::result_ok(&result)).await;
+                evidence = format!("[{name}] {}", result.chars().take(400).collect::<String>());
                 messages.push(Message::tool_result(call.id, result));
             }
             continue;
@@ -1014,7 +1027,7 @@ pub async fn run_subagent(
         let answer = reply.message.content.unwrap_or_else(|| "(sub-agent returned nothing)".to_string());
         // Critic: verify the task is actually done before returning (once).
         if !critic_done {
-            if let Some(reason) = critic_verify(provider, task, &answer).await {
+            if let Some(reason) = critic_verify(provider, task, &answer, &evidence).await {
                 critic_done = true;
                 messages.push(Message::user(format!(
                     "VERIFICATION FAILED: {reason}. The task is NOT finished. Use your tools to actually complete it, then give the final result."
@@ -1706,6 +1719,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
     let mut critic_done = false; // allow exactly one critic-triggered retry
     let mut degen_retried = false; // allow exactly one degenerate-reply re-ask
+    let mut evidence = String::new(); // tool outputs this turn, for the critic
     let task = messages.iter().rev().find(|m| m.role == "user")
         .and_then(|m| m.content.clone()).unwrap_or_default();
     // Model routing (Pillar 8): trivial turns may use the cheap model.
@@ -1744,6 +1758,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                     tainted = true; // read untrusted web -> later risky actions re-ask
                 }
                 mem.log("tool", &result).await;
+                evidence = format!("[{name}] {}", result.chars().take(400).collect::<String>());
                 messages.push(Message::tool_result(call.id, result));
             }
             continue;
@@ -1762,7 +1777,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
         }
         // Critic: verify the task is actually done before returning (once).
         if !critic_done {
-            if let Some(reason) = critic_verify(provider, &task, &answer).await {
+            if let Some(reason) = critic_verify(provider, &task, &answer, &evidence).await {
                 critic_done = true;
                 println!("  · verifying: not done yet ({reason})");
                 messages.push(Message::user(format!(
