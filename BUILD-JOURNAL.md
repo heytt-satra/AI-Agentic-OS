@@ -1912,3 +1912,17 @@ because memory recall pulled in an earlier failed-screenshot turn and the model 
 image was missing - a memory-context quirk, not a read_image bug; a clean-context run confirmed
 the tool works perfectly.)
 **Two new domains this round:** an encrypted secrets vault and image OCR - both verified end to end.
+
+### 2026-07-03 - New capability: transcribe_file (audio/video file -> text)
+**Transcription of saved recordings.** watch handles live audio; transcribe_file takes a FILE
+(mp3/m4a/wav/mp4/...) and returns its text - 'transcribe this meeting recording', 'what does this
+voice memo say'. POSTs the file to the OpenAI-compatible /audio/transcriptions endpoint (Groq
+whisper by default), reusing the same key/base/model env seam as the live-audio path. Guards: needs
+GROQ_API_KEY (clear message if missing) and refuses files over ~25MB (the API cap).
+**Wiring:** definition + async dispatch + relevant_definitions gating (transcribe/recording/voice
+memo/audio/.mp3/.m4a/meeting keywords).
+**Verified:** build clean; cargo test 45 passed; end-to-end - synthesized a WAV saying 'hello this
+is a jarvis transcription test' and the agent transcribed it back EXACTLY (in a clean-context run
+to avoid the memory-recall pollution seen earlier).
+**Round of new domains:** encrypted secrets vault, image OCR, and audio/video transcription - three
+distinct capability areas beyond device control, each verified end to end.

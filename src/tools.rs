@@ -74,6 +74,8 @@ pub fn definitions() -> Vec<Tool> {
         f("search_docs", "Semantically search the files you have ingested with ingest_path and return the most relevant chunks with their source. Use to answer questions from the user's own documents/code.", str_prop("query", "what to look for")),
         f("read_image", "Look at an IMAGE FILE on disk (png/jpg/etc.) with the vision model and read its text or describe it. Use for 'what does this receipt/screenshot say', 'read the text in photo.png', 'describe this image'. Different from see_screen (the live screen) - this is a saved file.",
           serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"path to the image file (natural locations like 'desktop/shot.png' work)"},"question":{"type":"string","description":"optional: what to look for; defaults to reading all text and describing it"}},"required":["path"]})),
+        f("transcribe_file", "Transcribe an audio or video FILE to text (mp3, m4a, wav, mp4, etc.). Use for 'transcribe this recording', 'what does this voice memo say', 'get the text of this meeting'. Needs a transcription key (GROQ_API_KEY). Different from watch (live audio) - this is a saved file.",
+          str_prop("path", "path to the audio/video file")),
         f("learn", "Save a DURABLE thing you have learned about the user or their work, so you REMEMBER it in future sessions (not just this chat). Call this whenever the user states a lasting preference, fact, or correction, or when you notice a stable pattern - e.g. 'prefers concise answers', 'their company is Lensr', 'dislikes em dashes', 'deploys on Fridays'. Write ONE clear sentence. Do NOT save one-off or transient details. If it is similar to something already learned, it is reinforced automatically.",
           serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"the durable learning, one clear sentence"},"kind":{"type":"string","description":"preference | fact | heuristic (default fact)"}},"required":["text"]})),
         f("goal_update", "Resolve one of YOUR OWN hypotheses/goals (the ones shown to you under 'Your OWN current hypotheses/goals') once the user responds to it. status: 'confirmed' if the user agreed a hypothesis is true (ALSO call learn to remember the confirmed fact), 'done' if you completed a goal, or 'dropped' if the user said no or it is not useful.",
@@ -277,6 +279,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     if hit(&["image", "photo", "picture", "receipt", "screenshot", ".png", ".jpg", ".jpeg", "ocr", "read the text", "what does this say", "scan"]) {
         keep.extend(["read_image"]);
     }
+    if hit(&["transcribe", "transcript", "recording", "voice memo", "audio", "meeting", ".mp3", ".m4a", ".wav", ".mp4", "podcast", "what does this say"]) {
+        keep.extend(["transcribe_file"]);
+    }
     if hit(&["code", "compile", "build", "program", "rust", "python", "script", "project", "function", "bug"]) {
         keep.extend(["code_new_project", "code_write_file", "code_read_file", "code_list", "code_open", "code_exec"]);
     }
@@ -367,6 +372,7 @@ pub async fn execute(
         "ingest_path" => ingest_path(args_json, mem).await,
         "search_docs" => search_docs(args_json, mem).await,
         "read_image" => read_image(args_json).await,
+        "transcribe_file" => transcribe_file(args_json).await,
         "learn" => {
             #[derive(Deserialize)]
             struct LearnArg { text: String, kind: Option<String> }
@@ -2366,6 +2372,48 @@ async fn read_image(args: &str) -> String {
     let answer = vision_ask(&data_url, prompt).await;
     if answer.starts_with("ERROR") { return answer; }
     format!("Image ({}): {answer}", a.path)
+}
+
+// Transcribe an audio/video FILE via the OpenAI-compatible /audio/transcriptions
+// endpoint (Groq whisper by default), which accepts common formats directly. Uses
+// the same key/base/model env seam as the live-audio path in hearing.rs.
+async fn transcribe_file(args: &str) -> String {
+    let a: PathArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let resolved = resolve_path(&a.path);
+    let p = std::path::Path::new(&resolved);
+    if !p.is_file() {
+        return format!("ERROR: no file at {}", a.path);
+    }
+    let key = std::env::var("TRANSCRIBE_API_KEY").or_else(|_| std::env::var("GROQ_API_KEY")).unwrap_or_default();
+    if key.is_empty() {
+        return "ERROR: no transcription key set. Add GROQ_API_KEY to your .env (free key: https://console.groq.com/keys).".to_string();
+    }
+    let bytes = match std::fs::read(p) { Ok(b) => b, Err(e) => return format!("ERROR reading {}: {e}", a.path) };
+    if bytes.len() > 25 * 1024 * 1024 {
+        return format!("ERROR: {} is {}MB; the transcription API caps at ~25MB. Trim or compress it first.", a.path, bytes.len() / 1_048_576);
+    }
+    let base = std::env::var("TRANSCRIBE_BASE_URL").unwrap_or_else(|_| "https://api.groq.com/openai/v1".into());
+    let model = std::env::var("TRANSCRIBE_MODEL").unwrap_or_else(|_| "whisper-large-v3-turbo".into());
+    let fname = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "audio".into());
+    let part = match reqwest::multipart::Part::bytes(bytes).file_name(fname).mime_str("application/octet-stream") {
+        Ok(p) => p,
+        Err(e) => return format!("ERROR: {e}"),
+    };
+    let form = reqwest::multipart::Form::new().part("file", part).text("model", model).text("response_format", "text");
+    let client = reqwest::Client::new();
+    match client.post(format!("{base}/audio/transcriptions")).header("Authorization", format!("Bearer {key}")).multipart(form).send().await {
+        Ok(r) => {
+            let s = r.status();
+            let body = r.text().await.unwrap_or_default();
+            if !s.is_success() {
+                return format!("ERROR transcribe {s}: {}", body.chars().take(200).collect::<String>());
+            }
+            let t = body.trim();
+            if t.is_empty() { format!("Transcribed {} but it was empty (silence or non-speech).", a.path) }
+            else { format!("Transcript of {}:\n{t}", a.path) }
+        }
+        Err(e) => format!("ERROR transcribe request: {e}"),
+    }
 }
 
 // ── see-then-act: screenshot, ask vision for coordinates, then click ─────────
