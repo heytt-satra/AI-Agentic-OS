@@ -147,6 +147,11 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         .collect();
     let nudges: Vec<_> = pending.iter().take(6).map(|(id, t)| serde_json::json!({"id": id, "text": t})).collect();
     let (calib, scored) = st.mem.causal_calibration().await;
+    // Live watch feed: the most recent things Jarvis is seeing/hearing right now.
+    let feed: Vec<_> = crate::watch::recent_feed(8)
+        .into_iter()
+        .map(|(kind, marker, text)| serde_json::json!({"kind": kind, "marker": marker, "text": text}))
+        .collect();
 
     Json(serde_json::json!({
         "learnings": learnings,
@@ -156,6 +161,7 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         "nudges": nudges,
         "watching": crate::watch::is_active(),
         "watch": crate::watch::status(),
+        "feed": feed,
     }))
 }
 
@@ -663,6 +669,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .nudge{font-size:11px; line-height:1.55; color:var(--amber-dim); padding:8px 0;
     border-bottom:1px solid var(--line2)}
   .nudge:last-child{border-bottom:0}
+  /* live watch feed */
+  .feed{padding:7px 0; border-bottom:1px solid var(--line2)}
+  .feed:last-child{border-bottom:0}
+  .feed .ftag{font-size:8px; letter-spacing:.14em; padding:1px 5px; border-radius:2px;
+    border:1px solid var(--line); color:var(--muted)}
+  .feed .ftag.see{color:var(--amber-dim); border-color:var(--amber-dim)}
+  .feed .ftag.hear{color:var(--cyan); border-color:var(--cyan)}
+  .feed .fmark{font-size:8px; letter-spacing:.1em; color:var(--red)}
+  .feed .ftext{font-size:11px; line-height:1.5; color:var(--ink); margin-top:5px}
 
   /* ── approval modal ───────────────────────────────────────── */
   #approvalWrap{position:fixed;inset:0;background:rgba(2,4,7,.82);display:none;
@@ -858,6 +873,15 @@ function renderMind(d){
   // Watching status: cyan when live, muted otherwise.
   mindLive.textContent = d.watching ? 'watching' : 'idle';
   mindLive.className = 'live'+(d.watching?' on':'');
+
+  // Live watch feed (top, only while watching): what Jarvis is seeing/hearing now
+  if(d.watching && d.feed && d.feed.length){
+    html += sec('Watching now', d.feed.map(f=>{
+      const mk = f.marker ? ' <span class="fmark">~'+esc(f.marker)+'</span>' : '';
+      return '<div class="feed"><span class="ftag '+(f.kind==='HEAR'?'hear':'see')+'">'+f.kind+'</span>'+mk+
+             '<div class="ftext">'+esc(f.text)+'</div></div>';
+    }).join(''));
+  }
 
   // Learned about you
   if(d.learnings && d.learnings.length){

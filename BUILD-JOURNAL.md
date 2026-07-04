@@ -1576,3 +1576,22 @@ turn loop, just two counters and an extra field on an event that already fires.
 **Cost-lever recap (this session):** tool trim (1.1) + degenerate retry now on the HUD + persona
 trim (~1,938 tok/trivial turn) + the meter/session instrument to SEE it all. Cost is now both
 lower and visible end-to-end on the primary surface.
+
+### 2026-07-03 - Improvement: live "Watching now" feed in the mind panel (completes 3.1)
+**Finishing the money shot.** The mind panel had a "watching" pill but not the roadmap's "what
+it's watching" - the actual live SEE/HEAR stream. Now when watch mode is on, the panel shows, at
+the top, the last 8 things Jarvis is seeing and hearing in real time, updating every 5s with the
+rest of the mind.
+**What shipped:** watch::recent_feed(n) - a compact accessor returning the last n notes as (kind,
+marker, text) without the verbose model-facing formatting of context_snapshot. /mind now includes
+a `feed` array (kind SEE/HEAR, the trust marker from 1.4, and the text). The mind panel renders a
+"Watching now" section (only while watching) at the top: each line tagged SEE (amber) or HEAR
+(cyan, a live-data signal), with the ~low/~unclear trust marker in red when present, so you can
+literally watch its perception stream and how confident it is. All HTML-escaped.
+**Verified:** build clean; cargo test 38 passed; booted `jarvis serve` and confirmed /mind
+carries the feed array (empty when idle) and the HUD ships the "Watching now" renderer. The live
+lines only populate while actually watching a video (needs a real screen + the vision/hearing
+models), but the plumbing and rendering are in and covered end-to-end.
+**Mind panel now shows, live:** what it's watching (SEE/HEAR + confidence), what it's learned,
+its hypotheses/goals (one-click confirm/drop), its causal record + calibration %, and pending
+nudges (act/dismiss) - the full "this looks like a mind" surface the roadmap's 3.1 called for.

@@ -166,6 +166,31 @@ pub fn status() -> String {
     )
 }
 
+/// The last `n` observations as compact (kind, marker, text) tuples for the HUD
+/// mind panel's live "Watching" feed. kind is "SEE" or "HEAR"; marker is the
+/// trust note ("low"/"unclear"/""); newest last. Empty when not watching.
+pub fn recent_feed(n: usize) -> Vec<(String, String, String)> {
+    let s = match cell().lock() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    if !s.active {
+        return Vec::new();
+    }
+    let start = s.notes.len().saturating_sub(n);
+    s.notes
+        .iter()
+        .skip(start)
+        .map(|note| {
+            let kind = match note.kind {
+                Kind::See => "SEE",
+                Kind::Hear => "HEAR",
+            };
+            (kind.to_string(), note.note.clone(), note.text.clone())
+        })
+        .collect()
+}
+
 /// The fused, timestamped log of what Jarvis is currently seeing and hearing,
 /// formatted for injection into the agent's context. Empty when not watching.
 pub fn context_snapshot() -> String {
