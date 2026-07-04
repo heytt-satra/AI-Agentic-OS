@@ -1802,3 +1802,17 @@ path and it saved a valid 1920x1080 8-bit RGBA PNG (617 KB) confirmed by `file`.
 **Seven new device capabilities this session:** clipboard, system status, reminders, window
 management, file finder, process management, and screenshot-to-file - the OS agent's hands on the
 real machine got a lot bigger, every tool gated per turn and verified beyond compiling.
+
+### 2026-07-03 - New capability: network_info (IP, Wi-Fi, online check)
+**"What's my IP / am I online?"** network_info reports the local IP (discovered via a UDP socket
+that picks the outbound interface WITHOUT sending any packets - pure std, no dep), the Wi-Fi SSID
+(via netsh on Windows; None if wired/unsupported), and a best-effort public IP (a 4-second call to
+a plain IP-echo service - times out gracefully to 'likely offline', never blocks the turn).
+**Wiring:** definition + async dispatch + relevant_definitions gating (network/ip/wifi/online/...).
+**Verified:** build clean; cargo test 44 passed; end-to-end - asked 'what's my IP and am I online'
+and the agent returned real values (local 192.168.1.6, Wi-Fi 'Airtel_sphere', a public IP,
+online). No unit test added on purpose: local IP + SSID are environment-specific and would be
+flaky in CI; the end-to-end run is the meaningful check.
+**Eight new device capabilities this session** (clipboard, system status, reminders, windows, file
+finder, processes, screenshot, network) - the OS agent now genuinely knows and controls the
+machine: its clipboard, resources, files, windows, processes, screen, and network.

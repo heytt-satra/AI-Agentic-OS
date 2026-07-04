@@ -170,6 +170,10 @@ pub fn definitions() -> Vec<Tool> {
         // ── screenshot to file (local save; unlike see_screen it sends nothing out)
         f("screenshot_save", "Capture the screen and SAVE it as a PNG file on this machine (nothing is sent anywhere, unlike see_screen). Use for 'take a screenshot', 'grab my screen and save it'. Defaults to the Desktop with a timestamped name; pass a path to choose where.",
           serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"optional file path (e.g. 'desktop/shot.png'); omit for a timestamped file on the Desktop"}},"required":[]})),
+
+        // ── network info
+        f("network_info", "Report this machine's network: local IP, Wi-Fi network name (SSID) if on Wi-Fi, and public IP (best-effort). Use for 'what's my IP', 'am I online', 'what wifi am I on'.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
     ]
 }
 
@@ -218,6 +222,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["system", "cpu", "memory", "ram", "disk", "storage", "battery", "how's my", "hows my", "machine", "resources", "uptime", "performance"]) {
         keep.extend(["system_status"]);
+    }
+    if hit(&["network", "ip", "wifi", "wi-fi", "online", "internet", "connected", "ssid", "offline"]) {
+        keep.extend(["network_info"]);
     }
     if hit(&["process", "running", "task", "kill", "close ", "quit", "force quit", "frozen", "not responding", "using my", "slow", "end task"]) {
         keep.extend(["list_processes", "kill_process"]);
@@ -402,6 +409,7 @@ pub async fn execute(
         "list_processes" => list_processes(),
         "kill_process" => kill_process(args_json),
         "screenshot_save" => screenshot_save(args_json),
+        "network_info" => network_info().await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1729,6 +1737,63 @@ fn screenshot_save(args: &str) -> String {
         Ok(()) => format!("Saved a {w}x{h} screenshot to {path}"),
         Err(e) => format!("ERROR: could not save screenshot to {path}: {e}"),
     }
+}
+
+// ── network info ────────────────────────────────────────────────────────────
+// Discover the primary local IP without sending any packets: a UDP socket
+// "connected" to a public address just picks the outbound interface locally.
+fn local_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
+}
+
+// Current Wi-Fi SSID via netsh (Windows). None if not on Wi-Fi or unsupported.
+fn wifi_ssid() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let out = std::process::Command::new("netsh").args(["wlan", "show", "interfaces"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let l = line.trim();
+        // Match "SSID" but not "BSSID"; take the value after the colon.
+        if l.starts_with("SSID") && !l.starts_with("BSSID") {
+            if let Some((_, v)) = l.split_once(':') {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn network_info() -> String {
+    let mut out = String::from("Network:\n");
+    match local_ip() {
+        Some(ip) => out.push_str(&format!("  Local IP: {ip}\n")),
+        None => out.push_str("  Local IP: unavailable (no active network?)\n"),
+    }
+    match wifi_ssid() {
+        Some(ssid) => out.push_str(&format!("  Wi-Fi: {ssid}\n")),
+        None => out.push_str("  Wi-Fi: not connected (or wired/unsupported)\n"),
+    }
+    // Public IP is best-effort: a short call to a plain IP echo service. If it
+    // times out or fails we just say offline/unknown - never block the turn.
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4)).build();
+    match client {
+        Ok(c) => match c.get("https://api.ipify.org").send().await {
+            Ok(r) => match r.text().await {
+                Ok(ip) if !ip.trim().is_empty() => out.push_str(&format!("  Public IP: {} (online)\n", ip.trim())),
+                _ => out.push_str("  Public IP: unknown\n"),
+            },
+            Err(_) => out.push_str("  Public IP: unreachable (likely offline)\n"),
+        },
+        Err(_) => out.push_str("  Public IP: unknown\n"),
+    }
+    out
 }
 
 // Best-effort battery read. sysinfo doesn't expose battery, so on Windows we ask
