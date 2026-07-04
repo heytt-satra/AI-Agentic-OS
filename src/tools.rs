@@ -197,6 +197,16 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("secret_remove", "Delete a stored secret by name.",
           str_prop("name", "the name of the secret to delete")),
+
+        // ── bookmarks / quick-links
+        f("bookmark_add", "Save a named quick-link to a URL, file, or folder so the user can open it later by name. Use for 'bookmark this as X', 'save this link as Y', 'remember my dashboard is <url>'.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"short name, e.g. 'bank', 'dashboard'"},"target":{"type":"string","description":"the URL, file path, or folder to open"}},"required":["name","target"]})),
+        f("bookmark_open", "Open a saved bookmark by name (launches the URL/file/folder with the OS default). Use for 'open my bank', 'go to my dashboard'.",
+          str_prop("name", "the bookmark name to open")),
+        f("bookmark_list", "List saved bookmarks (name and target).",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("bookmark_remove", "Delete a saved bookmark by name.",
+          str_prop("name", "the bookmark name to delete")),
     ]
 }
 
@@ -257,6 +267,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["secret", "password", "passcode", "pin", "api key", "token", "credential", "wifi password", "code for", "vault", "store this key"]) {
         keep.extend(["secret_set", "secret_get", "secret_list", "secret_remove"]);
+    }
+    if hit(&["bookmark", "quick link", "quick-link", "save this link", "save this as", "open my", "go to my", "shortcut"]) {
+        keep.extend(["bookmark_add", "bookmark_open", "bookmark_list", "bookmark_remove"]);
     }
     if hit(&["process", "running", "task", "kill", "close ", "quit", "force quit", "frozen", "not responding", "using my", "slow", "end task"]) {
         keep.extend(["list_processes", "kill_process"]);
@@ -457,6 +470,10 @@ pub async fn execute(
         "secret_get" => secret_get(args_json, mem).await,
         "secret_list" => secret_list(mem).await,
         "secret_remove" => secret_remove(args_json, mem).await,
+        "bookmark_add" => bookmark_add(args_json, mem).await,
+        "bookmark_open" => bookmark_open(args_json, mem).await,
+        "bookmark_list" => bookmark_list(mem).await,
+        "bookmark_remove" => bookmark_remove(args_json, mem).await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1965,6 +1982,60 @@ async fn secret_remove(args: &str, mem: &crate::memory::MemoryHandle) -> String 
         format!("Deleted the secret '{}'.", a.name.trim())
     } else {
         format!("No secret named '{}' to delete.", a.name.trim())
+    }
+}
+
+// ── bookmarks / quick-links ─────────────────────────────────────────────────
+async fn bookmark_add(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String, target: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let name = a.name.trim();
+    let target = a.target.trim();
+    if name.is_empty() || target.is_empty() {
+        return "ERROR: both a name and a target (URL/file/folder) are required.".to_string();
+    }
+    if mem.bookmark_set(name, target).await {
+        format!("Bookmarked '{name}' -> {target}. Say 'open {name}' any time.")
+    } else {
+        "ERROR: could not save the bookmark.".to_string()
+    }
+}
+
+async fn bookmark_open(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    match mem.bookmark_get(a.name.trim()).await {
+        Some(target) => {
+            // Reuse the OS default-open path (same as open_path).
+            let r = open_path(&serde_json::json!({"target": target}).to_string());
+            if r.starts_with("ERROR") { r } else { format!("Opened '{}' ({target}).", a.name.trim()) }
+        }
+        None => format!("No bookmark named '{}'. See your bookmarks with bookmark_list.", a.name.trim()),
+    }
+}
+
+async fn bookmark_list(mem: &crate::memory::MemoryHandle) -> String {
+    let rows = mem.bookmark_list().await;
+    if rows.is_empty() {
+        return "No bookmarks saved yet.".to_string();
+    }
+    let mut out = String::from("Bookmarks:\n");
+    for (name, target) in rows {
+        out.push_str(&format!("  {name} -> {target}\n"));
+    }
+    out
+}
+
+async fn bookmark_remove(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.bookmark_remove(a.name.trim()).await {
+        format!("Removed bookmark '{}'.", a.name.trim())
+    } else {
+        format!("No bookmark named '{}'.", a.name.trim())
     }
 }
 

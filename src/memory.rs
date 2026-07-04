@@ -68,6 +68,11 @@ enum MemCmd {
     SecretGet { name: String, reply: oneshot::Sender<Option<String>> },
     SecretList { reply: oneshot::Sender<Vec<String>> },
     SecretRemove { name: String, reply: oneshot::Sender<bool> },
+    // Bookmarks / quick-links.
+    BookmarkSet { name: String, target: String, reply: oneshot::Sender<bool> },
+    BookmarkGet { name: String, reply: oneshot::Sender<Option<String>> },
+    BookmarkList { reply: oneshot::Sender<Vec<(String, String)>> },
+    BookmarkRemove { name: String, reply: oneshot::Sender<bool> },
     // User-defined agents (gap 4).
     AgentCreate { name: String, instructions: String, reply: oneshot::Sender<bool> },
     AgentList { reply: oneshot::Sender<Vec<(String, String)>> },
@@ -468,6 +473,28 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── bookmarks / quick-links ─────────────────────────────────────────────
+    pub async fn bookmark_set(&self, name: &str, target: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::BookmarkSet { name: name.to_string(), target: target.to_string(), reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+    pub async fn bookmark_get(&self, name: &str) -> Option<String> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::BookmarkGet { name: name.to_string(), reply }).await.is_err() { return None; }
+        rx.await.ok().flatten()
+    }
+    pub async fn bookmark_list(&self) -> Vec<(String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::BookmarkList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn bookmark_remove(&self, name: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::BookmarkRemove { name: name.to_string(), reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+
     // ── user-defined agents (gap 4) ─────────────────────────────────────────
     pub async fn agent_create(&self, name: &str, instructions: &str) -> bool {
         let (reply, rx) = oneshot::channel();
@@ -796,6 +823,10 @@ fn open_db(path: &str) -> Result<Connection> {
          -- so a stolen DB file never reveals a secret. Keyed by a friendly name.
          CREATE TABLE IF NOT EXISTS secrets (
             name TEXT PRIMARY KEY, value TEXT NOT NULL, ts INTEGER NOT NULL
+         );
+         -- Bookmarks / quick-links: named targets (URL, file, or folder) to open.
+         CREATE TABLE IF NOT EXISTS bookmarks (
+            name TEXT PRIMARY KEY, target TEXT NOT NULL, ts INTEGER NOT NULL
          );
          -- Document RAG: chunks of the user's ingested files + their embeddings.
          CREATE TABLE IF NOT EXISTS documents (
@@ -1172,6 +1203,29 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
         }
         MemCmd::SecretRemove { name, reply } => {
             let n = conn.execute("DELETE FROM secrets WHERE name=?1", params![name]).unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
+        MemCmd::BookmarkSet { name, target, reply } => {
+            let ok = conn.execute(
+                "INSERT OR REPLACE INTO bookmarks (name, target, ts) VALUES (?1, ?2, ?3)",
+                params![name, target, now_secs()],
+            ).is_ok();
+            let _ = reply.send(ok);
+        }
+        MemCmd::BookmarkGet { name, reply } => {
+            let v = conn.query_row("SELECT target FROM bookmarks WHERE name=?1", params![name], |r| r.get::<_, String>(0)).ok();
+            let _ = reply.send(v);
+        }
+        MemCmd::BookmarkList { reply } => {
+            let rows = (|| -> Result<Vec<(String, String)>> {
+                let mut stmt = conn.prepare("SELECT name, target FROM bookmarks ORDER BY name ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::BookmarkRemove { name, reply } => {
+            let n = conn.execute("DELETE FROM bookmarks WHERE name=?1", params![name]).unwrap_or(0);
             let _ = reply.send(n > 0);
         }
         MemCmd::AgentCreate { name, instructions, reply } => {

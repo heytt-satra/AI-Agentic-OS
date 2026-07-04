@@ -1926,3 +1926,16 @@ is a jarvis transcription test' and the agent transcribed it back EXACTLY (in a 
 to avoid the memory-recall pollution seen earlier).
 **Round of new domains:** encrypted secrets vault, image OCR, and audio/video transcription - three
 distinct capability areas beyond device control, each verified end to end.
+
+### 2026-07-03 - New capability: bookmarks / quick-links
+**Open things by name.** bookmark_add / bookmark_open / bookmark_list / bookmark_remove: save a
+named quick-link to a URL, file, or folder and open it later ('bookmark this as dashboard', 'open
+my bank'). bookmark_open reuses the OS default-open path (same as open_path), so URLs, files, and
+folders all work.
+**Wiring:** bookmarks table + memory ops, tools + gating (bookmark/quick link/open my/go to my/
+shortcut keywords).
+**Verified:** build clean; cargo test 45 passed; end-to-end - bookmarked example.com as 'testbm',
+listed it (name -> target), then removed it and confirmed the list was empty. Full CRUD works.
+**This "build other things" run added, across new domains:** an encrypted secrets vault (+ CLI),
+image OCR (read_image), audio/video transcription (transcribe_file), and bookmarks - on top of the
+earlier device-awareness suite. Every tool gated per turn and verified beyond compiling.
