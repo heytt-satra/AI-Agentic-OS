@@ -1641,3 +1641,24 @@ tool definitions - which are still sent IN FULL every turn (relevant_definitions
 but always includes all MCP tools). That's the next real cost lever the meter just made visible:
 trim MCP tools per turn the same way local tools are. Noting it here as the highest-value
 follow-on; not doing it blind right now (needs the live MCP set to test against).
+
+### 2026-07-03 - Improvement: per-turn MCP tool trimming (the lever the REPL meter exposed)
+**Acting on what the meter showed.** The new REPL meter revealed a trivial turn burning ~15-22k
+tokens - and the culprit is MCP: relevant_definitions trimmed LOCAL tools (1.1) but always sent
+ALL MCP tools. That's fine for a small server, but a user with Apollo (~50 tools) or a prospecting
+server (~14) pays for dozens of unusable tool defs on EVERY "2+2".
+**What shipped:** MCP tools are now gated per turn, mirroring the local-tool trim. include_all_mcp(msg,
+count) decides: always include when the connected set is small (<= MCP_ALWAYS_MAX, default 12 -
+so small setups like this box's 'everything' server are UNCHANGED), or when MCP_ALWAYS is set, or
+when the message plausibly needs external integrations (search/find/lead/contact/company/enrich/
+email/campaign/crm/...). Otherwise, on a trivial or purely-local turn, only MCP tools whose
+name/description matches a meaningful word in the message are offered - so a direct reference
+('run the apollo enrich') still works, but "2+2" carries zero MCP overhead. MCP_ALWAYS is the
+escape hatch to restore the old always-on behavior.
+**Verified:** build clean; cargo test 39 passed (1 new - include_all_mcp: small set always in;
+big set gated out on trivial/local turns; big set fully in on external-integration turns). On
+THIS machine the 'everything' server is small (<=12), so behavior is intentionally unchanged here
+and the big-server savings can't be shown locally, but the decision logic is unit-covered and the
+big-setup win is exactly what the meter pointed at.
+**Cost-lever set now complete:** local tools (1.1), persona (CORE+sections), AND MCP tools are all
+trimmed per turn - a trivial turn now carries only what it can actually use.
