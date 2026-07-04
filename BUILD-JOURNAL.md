@@ -1985,3 +1985,14 @@ flow: asked for a 16-char password stored under 'gentest', then `jarvis secret g
 store -> retrieve -> delete all work together.
 **Capability count this session keeps climbing** - now with a genuine on-device password manager
 (generate + AES-256 vault + deterministic CLI), all verified end to end.
+
+### 2026-07-03 - New capability: archive tools (zip_path / unzip_file)
+**Compress and extract.** zip_path compresses a file/folder to a .zip (default <source>.zip next to
+it); unzip_file extracts a .zip (default into a folder named after it), refusing to clobber
+existing files (no -Force on extract - safe default). Windows via PowerShell Compress-Archive /
+Expand-Archive (no new dependency); a clear message points to zip/unzip on other OSes. For 'zip my
+project', 'unzip this download'.
+**Wiring:** definitions + dispatch + gating (zip/unzip/compress/extract/archive/.zip keywords).
+**Verified:** build clean; cargo test 46 passed; end-to-end round-trip - zipped a folder with known
+content, extracted it, and confirmed the file came back byte-identical ('hello archive content'),
+with the folder structure preserved.

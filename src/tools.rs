@@ -204,6 +204,12 @@ pub fn definitions() -> Vec<Tool> {
         f("generate_password", "Generate a strong random password (from the OS secure RNG, unambiguous characters). Use for 'make me a password', 'generate a secure passphrase'. Offer to save it with secret_set if it's for a specific account.",
           serde_json::json!({"type":"object","properties":{"length":{"type":"integer","description":"length (default 20; clamped 8-128)"},"symbols":{"type":"boolean","description":"include symbols (default true)"}},"required":[]})),
 
+        // ── archives (zip / unzip)
+        f("zip_path", "Compress a file or folder into a .zip archive. Use for 'zip my project', 'compress this folder to send it'. If no destination is given, creates <source>.zip next to it.",
+          serde_json::json!({"type":"object","properties":{"source":{"type":"string","description":"the file or folder to compress"},"dest":{"type":"string","description":"optional output .zip path"}},"required":["source"]})),
+        f("unzip_file", "Extract a .zip archive into a folder. Use for 'unzip this', 'extract downloads/file.zip'. If no destination is given, extracts into a folder next to the archive. Will not overwrite existing files.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"the .zip file to extract"},"dest":{"type":"string","description":"optional folder to extract into"}},"required":["path"]})),
+
         // ── bookmarks / quick-links
         f("bookmark_add", "Save a named quick-link to a URL, file, or folder so the user can open it later by name. Use for 'bookmark this as X', 'save this link as Y', 'remember my dashboard is <url>'.",
           serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"short name, e.g. 'bank', 'dashboard'"},"target":{"type":"string","description":"the URL, file path, or folder to open"}},"required":["name","target"]})),
@@ -282,6 +288,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["bookmark", "quick link", "quick-link", "save this link", "save this as", "open my", "go to my", "shortcut"]) {
         keep.extend(["bookmark_add", "bookmark_open", "bookmark_list", "bookmark_remove"]);
+    }
+    if hit(&["zip", "unzip", "compress", "extract", "archive", ".zip", "decompress"]) {
+        keep.extend(["zip_path", "unzip_file"]);
     }
     if hit(&["process", "running", "task", "kill", "close ", "quit", "force quit", "frozen", "not responding", "using my", "slow", "end task"]) {
         keep.extend(["list_processes", "kill_process"]);
@@ -484,6 +493,8 @@ pub async fn execute(
         "secret_list" => secret_list(mem).await,
         "secret_remove" => secret_remove(args_json, mem).await,
         "generate_password" => generate_password(args_json),
+        "zip_path" => zip_path(args_json),
+        "unzip_file" => unzip_file(args_json),
         "bookmark_add" => bookmark_add(args_json, mem).await,
         "bookmark_open" => bookmark_open(args_json, mem).await,
         "bookmark_list" => bookmark_list(mem).await,
@@ -2031,6 +2042,75 @@ async fn secret_remove(args: &str, mem: &crate::memory::MemoryHandle) -> String 
         format!("Deleted the secret '{}'.", a.name.trim())
     } else {
         format!("No secret named '{}' to delete.", a.name.trim())
+    }
+}
+
+// ── archives (zip / unzip) ──────────────────────────────────────────────────
+fn zip_path(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { source: String, dest: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let src = resolve_path(&a.source);
+    if !std::path::Path::new(&src).exists() {
+        return format!("ERROR: no such file or folder: {}", a.source);
+    }
+    let dest = match a.dest.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(d) => { let mut d = resolve_path(d); if !d.to_lowercase().ends_with(".zip") { d.push_str(".zip"); } d }
+        None => format!("{src}.zip"),
+    };
+    if !cfg!(windows) {
+        return "ERROR: zip_path is Windows-only for now (use run_shell with 'zip' on other OSes).".to_string();
+    }
+    // -Force so re-zipping overwrites the archive (the archive itself, not user files).
+    let script = format!(
+        "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
+        src.replace('/', "\\").replace('\'', "''"),
+        dest.replace('/', "\\").replace('\'', "''"),
+    );
+    match std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).output() {
+        Ok(o) if o.status.success() => {
+            let sz = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            format!("Zipped {} -> {dest} ({} KB).", a.source, (sz / 1024).max(1))
+        }
+        Ok(o) => format!("ERROR zipping: {}", String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
+        Err(e) => format!("ERROR zipping: {e}"),
+    }
+}
+
+fn unzip_file(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { path: String, dest: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let src = resolve_path(&a.path);
+    let sp = std::path::Path::new(&src);
+    if !sp.is_file() {
+        return format!("ERROR: no such archive: {}", a.path);
+    }
+    // Default: a folder next to the archive, named after it (without .zip).
+    let dest = match a.dest.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(d) => resolve_path(d),
+        None => src.trim_end_matches(".zip").trim_end_matches(".ZIP").to_string(),
+    };
+    if !cfg!(windows) {
+        return "ERROR: unzip_file is Windows-only for now (use run_shell with 'unzip' on other OSes).".to_string();
+    }
+    // No -Force: refuse to clobber existing extracted files (safe default).
+    let script = format!(
+        "Expand-Archive -Path '{}' -DestinationPath '{}'",
+        src.replace('/', "\\").replace('\'', "''"),
+        dest.replace('/', "\\").replace('\'', "''"),
+    );
+    match std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).output() {
+        Ok(o) if o.status.success() => format!("Extracted {} into {}.", a.path, dest.replace('\\', "/")),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            if err.contains("already exists") {
+                format!("Did not extract {}: files already exist in {}. Choose a different destination.", a.path, dest.replace('\\', "/"))
+            } else {
+                format!("ERROR extracting: {}", err.trim().chars().take(200).collect::<String>())
+            }
+        }
+        Err(e) => format!("ERROR extracting: {e}"),
     }
 }
 
