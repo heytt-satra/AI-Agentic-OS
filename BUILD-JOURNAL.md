@@ -1789,3 +1789,16 @@ would end real processes on the user's machine) but its approval gate and matchi
 **Six new device capabilities this session:** clipboard read/write, system status, background
 reminders, window management, file finder, and process management - a real jump in what the OS
 agent can do about the actual machine, all gated per turn and verified beyond compiling.
+
+### 2026-07-03 - New capability: screenshot_save (capture to file, nothing sent out)
+**The privacy-clean screenshot.** see_screen sends the screen to a vision model (needs approval);
+screenshot_save just writes a PNG locally - nothing leaves the device - for 'take a screenshot',
+'grab my screen and save it'. Captures the primary monitor via xcap (already a dep), defaults to a
+timestamped file on the Desktop, or takes a path (auto-appends .png). Reuses resolve_path so
+natural locations work.
+**Wiring:** definition + dispatch + relevant_definitions gating (screenshot/capture/grab keywords).
+**Verified:** build clean; cargo test 44 passed; end-to-end - asked the agent to screenshot to a
+path and it saved a valid 1920x1080 8-bit RGBA PNG (617 KB) confirmed by `file`.
+**Seven new device capabilities this session:** clipboard, system status, reminders, window
+management, file finder, process management, and screenshot-to-file - the OS agent's hands on the
+real machine got a lot bigger, every tool gated per turn and verified beyond compiling.

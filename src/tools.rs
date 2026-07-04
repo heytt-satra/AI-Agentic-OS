@@ -166,6 +166,10 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("kill_process", "Force-quit a running process by name or PID (e.g. 'close spotify', 'kill the frozen chrome'). Requires approval - it ends the program immediately and unsaved work is lost. Prefer the PID from list_processes to hit the exact one; a name ends ALL matching processes.",
           serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"process name to kill (ends all matches), e.g. 'spotify'"},"pid":{"type":"integer","description":"exact process id to kill (preferred; from list_processes)"}},"required":[]})),
+
+        // ── screenshot to file (local save; unlike see_screen it sends nothing out)
+        f("screenshot_save", "Capture the screen and SAVE it as a PNG file on this machine (nothing is sent anywhere, unlike see_screen). Use for 'take a screenshot', 'grab my screen and save it'. Defaults to the Desktop with a timestamped name; pass a path to choose where.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"optional file path (e.g. 'desktop/shot.png'); omit for a timestamped file on the Desktop"}},"required":[]})),
     ]
 }
 
@@ -199,6 +203,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     .collect();
     if hit(&["screen", "click", "button", "window", " app", "type ", "operate", "gui", " ui ", "see ", "cursor", "mouse"]) {
         keep.extend(["see_screen", "click_on", "check_screen", "ui_list", "ui_marks", "ui_click", "operate_app", "mouse_click", "press_keys", "paste_text", "type_text"]);
+    }
+    if hit(&["screenshot", "screen shot", "screen grab", "capture", "grab my screen", "snapshot"]) {
+        keep.extend(["screenshot_save"]);
     }
     if hit(&["window", "switch to", "bring up", "what's open", "whats open", "have open", "focus", "minimize", "alt tab", "front"]) {
         keep.extend(["list_windows", "focus_window"]);
@@ -394,6 +401,7 @@ pub async fn execute(
         "find_files" => find_files(args_json),
         "list_processes" => list_processes(),
         "kill_process" => kill_process(args_json),
+        "screenshot_save" => screenshot_save(args_json),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1690,6 +1698,36 @@ fn kill_process(args: &str) -> String {
         format!("No running process matching '{name}' (nothing killed).")
     } else {
         format!("Killed {killed} process(es) matching '{}' ({hit}).", name)
+    }
+}
+
+// ── screenshot to file ──────────────────────────────────────────────────────
+fn screenshot_save(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { path: Option<String> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+
+    // Resolve the target path, defaulting to a timestamped file on the Desktop.
+    let path = match a.path.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(p) => {
+            let mut p = resolve_path(p);
+            if !p.to_lowercase().ends_with(".png") { p.push_str(".png"); }
+            p
+        }
+        None => {
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let dir = dirs::desktop_dir().or_else(dirs::home_dir).unwrap_or_else(|| std::path::PathBuf::from("."));
+            dir.join(format!("jarvis-screenshot-{secs}.png")).to_string_lossy().replace('\\', "/")
+        }
+    };
+
+    let monitors = match xcap::Monitor::all() { Ok(m) => m, Err(e) => return format!("ERROR: screen capture: {e}") };
+    let Some(monitor) = monitors.into_iter().next() else { return "ERROR: no monitor found".to_string() };
+    let img = match monitor.capture_image() { Ok(i) => i, Err(e) => return format!("ERROR capturing screen: {e}") };
+    let (w, h) = (img.width(), img.height());
+    match xcap::image::DynamicImage::ImageRgba8(img).save(&path) {
+        Ok(()) => format!("Saved a {w}x{h} screenshot to {path}"),
+        Err(e) => format!("ERROR: could not save screenshot to {path}: {e}"),
     }
 }
 
