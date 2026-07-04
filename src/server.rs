@@ -291,7 +291,11 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                 .map(|(r, c)| format!("- ({r}) {c}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            messages.push(Message::system(format!("Possibly relevant memory:\n{ctx}")));
+            messages.push(Message::system(format!(
+                "Possibly relevant snippets from OLD conversations (may be outdated or unrelated - \
+                 use only if they clearly help THIS request; never assume a past error, missing \
+                 file, or old state still applies now - check with your tools instead):\n{ctx}"
+            )));
         }
         // Continuous-learning spine: durable learnings relevant to THIS question.
         let learned = st.mem.recall_learnings(&user_text, 5).await;

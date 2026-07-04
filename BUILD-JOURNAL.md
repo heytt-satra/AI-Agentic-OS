@@ -2006,3 +2006,17 @@ gracefully. Tool text steers the model to prefer it over web_search for weather.
 degrees keywords). 8s timeout, metric units.
 **Verified:** build clean; cargo test 46 passed; end-to-end - 'weather in Mumbai' returned real
 conditions (rainy 26C, feels 29C, 94% humidity, wind 38 km/h).
+
+### 2026-07-03 - Fix: memory-recall pollution (stale snippets read as current truth)
+**A reliability bug caught while testing read_image.** Relevance recall injects the top semantically
+similar OLD messages as "Possibly relevant memory". When those included a past FAILURE ("unable to
+save the screenshot"), the model fixated on it and hallucinated that a CURRENT, present file didn't
+exist - refusing to run the tool.
+**Fix:** reframed the recalled-memory injection (REPL + HUD) from a bare "Possibly relevant memory"
+to an explicit warning: these are snippets from OLD conversations that may be outdated or unrelated;
+use them only if they clearly help THIS request, and NEVER assume a past error, missing file, or old
+state still applies - check with the tools instead.
+**Verified:** build clean; cargo test 46 passed; reproduced the exact failure - in the SAME main-DB
+context that previously made the model hallucinate a missing image, read_image now reads the file
+correctly ('RECALL FIX 77'). Targeted, low-risk (prompt framing only), fixes a real hallucination
+class.
