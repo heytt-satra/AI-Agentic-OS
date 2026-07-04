@@ -1732,3 +1732,23 @@ always-on mode; the tool text says so.
 ~minutes-until). cargo test 41 passed. (The critic sometimes re-runs remind_set thinking a future
 reminder 'isn't done' - a pre-existing critic quirk, not a tool bug; the reminder itself is
 correct.)
+
+### 2026-07-03 - New capability: window management (list + focus)
+**Distinct, practical device power.** Complements the GUI tools: know what's open and switch to it
+by name.
+- list_windows: every visible, non-minimized window as app + title (via xcap::Window::all, already
+  a dep), deduped, skipping our own HUD.
+- focus_window: bring a window to the front by a piece of its app name or title. Matches title
+  first (more specific) then app; on Windows raises it via WScript.Shell AppActivate (no new dep),
+  reporting whether the OS confirmed. Enables "switch to chrome", "bring up the Word doc", then
+  operate it.
+**Wiring:** definitions + dispatch + relevant_definitions gating (window/switch to/what's open/
+focus/front keywords).
+**Verified:** build clean; cargo test 41 passed; asked the running agent "what windows do I have
+open" and it called list_windows and reported the real set (Windows Explorer + the actual Chrome
+tab title). focus_window was NOT driven live on purpose - it would yank the user's foreground
+window mid-session - but it reuses the same verified open_windows() matcher plus a standard
+AppActivate call.
+**Round summary:** four genuinely new device capabilities added and verified this session -
+clipboard read/write, system status, background reminders, and window management - each gated per
+turn so they cost nothing when unrelated.

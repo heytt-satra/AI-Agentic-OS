@@ -150,6 +150,12 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("remind_cancel", "Cancel a pending reminder by its id (from remind_list).",
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
+
+        // ── window management
+        f("list_windows", "List the user's currently open application windows (app name + title), skipping minimized ones. Use when the user asks 'what do I have open', 'which windows are open', or before switching to one.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("focus_window", "Bring an open window to the front by a piece of its app name or title (e.g. 'chrome', 'notepad', part of a document title). Use for 'switch to X', 'bring up my browser', 'go to the Word document'. Then you can operate it.",
+          str_prop("name", "part of the app name or window title to focus")),
     ]
 }
 
@@ -183,6 +189,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     .collect();
     if hit(&["screen", "click", "button", "window", " app", "type ", "operate", "gui", " ui ", "see ", "cursor", "mouse"]) {
         keep.extend(["see_screen", "click_on", "check_screen", "ui_list", "ui_marks", "ui_click", "operate_app", "mouse_click", "press_keys", "paste_text", "type_text"]);
+    }
+    if hit(&["window", "switch to", "bring up", "what's open", "whats open", "have open", "focus", "minimize", "alt tab", "front"]) {
+        keep.extend(["list_windows", "focus_window"]);
     }
     if hit(&["clipboard", "copy", "copied", "paste", "clip "]) {
         keep.extend(["clipboard_read", "clipboard_write"]);
@@ -364,6 +373,8 @@ pub async fn execute(
         "remind_set" => remind_set(args_json, mem).await,
         "remind_list" => remind_list(mem).await,
         "remind_cancel" => remind_cancel(args_json, mem).await,
+        "list_windows" => list_windows(),
+        "focus_window" => focus_window(args_json),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1432,6 +1443,87 @@ pub fn notify_desktop(title: &str, text: &str) {
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
         .spawn();
+}
+
+// ── window management ───────────────────────────────────────────────────────
+// Collect (app, title) for every visible, non-minimized window, skipping our own
+// HUD. Deduped, so multiple captures of the same window don't repeat.
+fn open_windows() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let Ok(windows) = xcap::Window::all() else { return out };
+    for w in windows {
+        if w.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let app = w.app_name().unwrap_or_default();
+        let title = w.title().unwrap_or_default();
+        if app.is_empty() && title.is_empty() {
+            continue;
+        }
+        if title.to_lowercase().contains("jarvis") || app.to_lowercase().contains("jarvis") {
+            continue; // our own HUD
+        }
+        if !out.iter().any(|(a, t)| a == &app && t == &title) {
+            out.push((app, title));
+        }
+    }
+    out
+}
+
+fn list_windows() -> String {
+    let ws = open_windows();
+    if ws.is_empty() {
+        return "No open (non-minimized) windows found.".to_string();
+    }
+    let mut out = format!("Open windows ({}):\n", ws.len());
+    for (app, title) in &ws {
+        let t: String = title.chars().take(90).collect();
+        if t.is_empty() {
+            out.push_str(&format!("  {app}\n"));
+        } else {
+            out.push_str(&format!("  {app} - {t}\n"));
+        }
+    }
+    out
+}
+
+fn focus_window(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let needle = a.name.trim().to_lowercase();
+    if needle.is_empty() {
+        return "ERROR: give part of the app name or window title to focus.".to_string();
+    }
+    // Match by title first (more specific), then app name.
+    let ws = open_windows();
+    let hit = ws.iter().find(|(_, t)| t.to_lowercase().contains(&needle))
+        .or_else(|| ws.iter().find(|(app, _)| app.to_lowercase().contains(&needle)));
+    let Some((app, title)) = hit else {
+        return format!("ERROR: no open window matching '{}'. Use list_windows to see what's open.", a.name);
+    };
+    if !cfg!(windows) {
+        return format!("Found '{app} - {title}' but focusing windows is only implemented on Windows.");
+    }
+    // WScript.Shell AppActivate raises a window by a prefix of its title; fall back
+    // to the app name if the title is empty.
+    let target = if title.is_empty() { app.clone() } else { title.clone() };
+    let safe = target.replace('\'', " ");
+    let script = format!("$ok = (New-Object -ComObject WScript.Shell).AppActivate('{safe}'); if ($ok) {{ 'OK' }} else {{ 'MISS' }}");
+    match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+    {
+        Ok(o) => {
+            let r = String::from_utf8_lossy(&o.stdout);
+            if r.contains("OK") {
+                format!("Brought '{app} - {title}' to the front.")
+            } else {
+                format!("Tried to focus '{app} - {title}' but the OS didn't confirm it (it may have no focusable title). It is open.")
+            }
+        }
+        Err(e) => format!("ERROR: could not focus window: {e}"),
+    }
 }
 
 // Best-effort battery read. sysinfo doesn't expose battery, so on Windows we ask
