@@ -331,6 +331,12 @@ async fn main() -> Result<()> {
         run_privacy();
         return Ok(());
     }
+    // `jarvis help` - discoverable command list. Handled early so it works with no
+    // API key configured (before the first-run wizard / provider boot).
+    if matches!(std::env::args().nth(1).as_deref(), Some("help") | Some("--help") | Some("-h")) {
+        print_help();
+        return Ok(());
+    }
 
     // First-run wizard (roadmap 2.1): if no brain is configured yet, don't crash
     // with a raw env error - walk the user through setup in under a minute, then
@@ -1099,6 +1105,50 @@ fn run_privacy() {
 // First-run setup: let the user pick how to power Jarvis's brain and write the
 // .env for them. Two modes: bring an API key (cheapest to start, any machine) or
 // run a local model (free per use, needs Ollama + a decent GPU).
+// Discoverable command list. Grouped so a new user can see the whole surface at
+// a glance; kept in sync as commands are added.
+fn print_help() {
+    println!(
+"\nJARVIS - a personal AI agentic OS. Run `jarvis` with no command to start the assistant.
+
+SETUP & RUN
+  jarvis                 Start the assistant (REPL). First run walks you through setup.
+  jarvis setup           Interactive setup (pick a brain, paste a key).
+  jarvis setup --local   One command: install Ollama + a model, run fully private/offline.
+  jarvis serve           Launch the web HUD (streaming UI + live mind panel).
+  jarvis daemon          Supervised always-on background presence (keeps serve alive).
+  jarvis autostart [off] Register (or remove) a login task so serve runs from boot.
+  jarvis integrate [off] Install (or remove) the 'Ask Jarvis' right-click menu entry.
+  jarvis ask <file> [q]  Ask about a file (used by the right-click menu).
+
+INNER STATE (what it knows and is thinking)
+  jarvis mind            Consolidated inner state (learnings, goals, causal, nudges, watch).
+  jarvis learnings       What it has learned about you.
+  jarvis goals           Its own hypotheses and goals.
+  jarvis causal          Its causal record + prediction calibration.
+  jarvis nudges          Proactive nudges it has raised.
+  jarvis reflect | proact | pursue   Run one reflection / sensing / goal-pursuit tick now.
+
+RELIABILITY & COST
+  jarvis eval            Run the scored reliability suite (incl. injection red-team).
+  jarvis eval trend      Show the eval score over time (regression tracking).
+  jarvis cost            Token usage and estimated spend across every path.
+  jarvis suggest         Mine your activity log for routines and suggestions.
+  jarvis digest          Write a daily digest from your activity.
+
+PRIVACY & SAFETY
+  jarvis privacy         Exactly what is stored and what (if anything) leaves the device.
+  jarvis grant <cap> <m> Grant a capability for N minutes (auto-approve on clean turns).
+  jarvis grants          List active capability grants.
+
+OTHER
+  jarvis consolidate [days] | dataset [sft] [out] | hear-test [secs] | once | help
+
+Env knobs: OPENROUTER_MODEL / _MODEL_FAST / _VISION_MODEL, HEAR_CHUNK_SECS,
+JARVIS_COST_PER_MTOK, MCP_ALWAYS / MCP_ALWAYS_MAX, PROACT_SECS, JARVIS_MAX_STEPS."
+    );
+}
+
 fn run_setup() -> Result<()> {
     use std::io::{stdin, stdout, Write};
     let prompt = |q: &str| -> String {

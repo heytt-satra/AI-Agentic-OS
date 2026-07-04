@@ -1677,3 +1677,12 @@ causal empty, a pending nudge) - correct and readable.
 **Consistency:** same data, two surfaces (HUD panel + terminal), one set of accessors. The
 scattered learnings/goals/causal/nudges commands still exist for focused views; `jarvis mind` is
 the at-a-glance whole.
+
+### 2026-07-03 - Improvement: `jarvis help` - discoverable command list
+**Discoverability.** The command surface grew a lot (mind, eval trend, setup --local, and new env
+knobs) but there was no way to SEE it - `jarvis help` just fell into the REPL. Now it prints a
+grouped command reference (Setup & Run / Inner State / Reliability & Cost / Privacy & Safety /
+Other) plus the env knobs. Handled early (before the first-run wizard and provider boot), so it
+works with no API key configured - a brand-new user can orient before setting anything up.
+**Verified:** build clean; cargo test 39 passed; `jarvis help` with OPENROUTER_API_KEY unset
+prints the full grouped list (no wizard, no key needed).
