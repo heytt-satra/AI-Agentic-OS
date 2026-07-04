@@ -27,6 +27,19 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         // irreversible
         "delete_path" => (true, field("path"), format!("DELETE {}", field("path"))),
 
+        // force-quitting a process ends it immediately (unsaved work lost)
+        "kill_process" => {
+            let who = if !field("name").is_empty() {
+                field("name")
+            } else {
+                match v.get("pid").and_then(|x| x.as_u64()) {
+                    Some(pid) => format!("PID {pid}"),
+                    None => "a process".to_string(),
+                }
+            };
+            (true, who.clone(), format!("KILL process {who}"))
+        }
+
         // shell: only the dangerous ones
         "run_shell" => {
             let cmd = field("command");
@@ -138,6 +151,17 @@ mod tests {
         let r = assess("run_shell", r#"{"command":"paypal-cli send-money --to x --amount 50"}"#);
         assert!(r.needs_approval);
         assert!(r.label.starts_with("SPEND"));
+    }
+
+    #[test]
+    fn killing_a_process_needs_approval_and_names_the_target() {
+        let r = assess("kill_process", r#"{"name":"spotify"}"#);
+        assert!(r.needs_approval);
+        assert!(r.label.contains("KILL") && r.label.contains("spotify"));
+        // pid is an integer - the label must still name it, not print "PID "
+        let r = assess("kill_process", r#"{"pid":4321}"#);
+        assert!(r.needs_approval);
+        assert!(r.label.contains("4321"), "label was: {}", r.label);
     }
 
     #[test]

@@ -1770,3 +1770,22 @@ the project folder and it returned the real matches (jarvis.db, -wal, -shm, jarv
 reminders, window management, and file finder - each gated per turn (zero cost when unrelated),
 each built to the zero-install rule (pure-Rust deps or PowerShell, no native runtime libs), and
 each verified beyond compiling.
+
+### 2026-07-03 - New capability: process management (list + kill, with approval)
+**Completes the system-awareness story.** system_status shows aggregate health; this shows the
+culprits and lets you end one.
+- list_processes: top processes by memory, aggregated BY NAME (so Chrome's dozen processes show as
+  one line 'chrome x12') with total memory + CPU%. Read-only. Answers 'what's using my memory/CPU',
+  'why is my machine slow'. (sysinfo, already a dep.)
+- kill_process: force-quit by PID (exact, preferred) or name (ends all matches). Destructive, so
+  it's wired into the safety policy - always asks approval with a clear 'KILL process X' label
+  (fixed to name an integer PID correctly, not print 'PID ').
+**Wiring:** definitions + dispatch + relevant_definitions gating (process/running/kill/close/quit/
+frozen/slow keywords) + a policy arm for approval.
+**Verified:** build clean; cargo test 44 passed (1 new - kill_process needs approval and names the
+target for both a name and an integer pid). End-to-end: asked 'what is using the most memory' and
+the agent called list_processes and named the real top consumer. kill_process was NOT run live (it
+would end real processes on the user's machine) but its approval gate and matching are covered.
+**Six new device capabilities this session:** clipboard read/write, system status, background
+reminders, window management, file finder, and process management - a real jump in what the OS
+agent can do about the actual machine, all gated per turn and verified beyond compiling.

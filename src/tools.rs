@@ -160,6 +160,12 @@ pub fn definitions() -> Vec<Tool> {
         // ── file finder
         f("find_files", "Find files on this machine by a piece of their NAME (e.g. 'resume', 'budget', '.pdf'). Searches the user's Desktop, Documents, Downloads, and home folder (or a folder you name) recursively, skipping system/build noise. Use for 'where's my X', 'find my file called Y', 'do I have a file about Z'. Returns matching paths.",
           serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"part of the filename to match (case-insensitive)"},"folder":{"type":"string","description":"optional folder to search instead (natural location like 'downloads' or a path)"}},"required":["name"]})),
+
+        // ── process management
+        f("list_processes", "List the top running processes by memory use (name, PID, memory, CPU%). Use when the user asks 'what's using my memory/CPU', 'what's running', or 'why is my machine slow'.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("kill_process", "Force-quit a running process by name or PID (e.g. 'close spotify', 'kill the frozen chrome'). Requires approval - it ends the program immediately and unsaved work is lost. Prefer the PID from list_processes to hit the exact one; a name ends ALL matching processes.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"process name to kill (ends all matches), e.g. 'spotify'"},"pid":{"type":"integer","description":"exact process id to kill (preferred; from list_processes)"}},"required":[]})),
     ]
 }
 
@@ -205,6 +211,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["system", "cpu", "memory", "ram", "disk", "storage", "battery", "how's my", "hows my", "machine", "resources", "uptime", "performance"]) {
         keep.extend(["system_status"]);
+    }
+    if hit(&["process", "running", "task", "kill", "close ", "quit", "force quit", "frozen", "not responding", "using my", "slow", "end task"]) {
+        keep.extend(["list_processes", "kill_process"]);
     }
     if hit(&["remind", "reminder", "timer", "alarm", "in an hour", "minutes", "later", "notify me"]) {
         keep.extend(["remind_set", "remind_list", "remind_cancel"]);
@@ -383,6 +392,8 @@ pub async fn execute(
         "list_windows" => list_windows(),
         "focus_window" => focus_window(args_json),
         "find_files" => find_files(args_json),
+        "list_processes" => list_processes(),
+        "kill_process" => kill_process(args_json),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1612,6 +1623,74 @@ fn find_files(args: &str) -> String {
         out.push_str("  (showing the first 40 matches; narrow the name for fewer)\n");
     }
     out
+}
+
+// ── process management ──────────────────────────────────────────────────────
+fn list_processes() -> String {
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.refresh_cpu_usage();
+
+    // Aggregate by name so a multi-process app (Chrome) shows as one line.
+    use std::collections::HashMap;
+    let mut agg: HashMap<String, (u64, f32, usize)> = HashMap::new(); // name -> (mem, cpu, count)
+    for (_pid, p) in sys.processes() {
+        let name = p.name().to_string_lossy().to_string();
+        let e = agg.entry(name).or_insert((0, 0.0, 0));
+        e.0 += p.memory();
+        e.1 += p.cpu_usage();
+        e.2 += 1;
+    }
+    let mut rows: Vec<(String, u64, f32, usize)> = agg.into_iter().map(|(n, (m, c, k))| (n, m, c, k)).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let gib = |b: u64| b as f64 / 1_073_741_824.0;
+    let mut out = String::from("Top processes by memory:\n");
+    for (name, mem, cpu, count) in rows.into_iter().take(12) {
+        let procs = if count > 1 { format!(" x{count}") } else { String::new() };
+        out.push_str(&format!("  {name}{procs}: {:.2} GiB, {:.0}% CPU\n", gib(mem), cpu));
+    }
+    out
+}
+
+fn kill_process(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { name: Option<String>, pid: Option<u32> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    // By PID: kill exactly that one.
+    if let Some(pid) = a.pid {
+        return match sys.process(sysinfo::Pid::from_u32(pid)) {
+            Some(p) => {
+                if p.kill() { format!("Killed process {} (PID {pid}).", p.name().to_string_lossy()) }
+                else { format!("ERROR: could not kill PID {pid} (permission or it already exited).") }
+            }
+            None => format!("No running process with PID {pid}."),
+        };
+    }
+
+    // By name: end all matching processes (case-insensitive substring).
+    let Some(name) = a.name.as_deref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) else {
+        return "ERROR: give a process name or a pid to kill.".to_string();
+    };
+    let mut killed = 0;
+    let mut hit = String::new();
+    for (_pid, p) in sys.processes() {
+        if p.name().to_string_lossy().to_lowercase().contains(&name) {
+            if hit.is_empty() { hit = p.name().to_string_lossy().to_string(); }
+            if p.kill() { killed += 1; }
+        }
+    }
+    if killed == 0 {
+        format!("No running process matching '{name}' (nothing killed).")
+    } else {
+        format!("Killed {killed} process(es) matching '{}' ({hit}).", name)
+    }
 }
 
 // Best-effort battery read. sysinfo doesn't expose battery, so on Windows we ask
