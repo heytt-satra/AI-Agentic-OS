@@ -72,6 +72,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]})),
         f("ingest_path", "Read a file or all the text/code/PDF files in a folder, split them into chunks, embed them locally, and store them so you can semantically search them later. Use to load the user's documents, notes, PDFs, or a codebase into Jarvis's knowledge.", str_prop("path", "file or folder path")),
         f("search_docs", "Semantically search the files you have ingested with ingest_path and return the most relevant chunks with their source. Use to answer questions from the user's own documents/code.", str_prop("query", "what to look for")),
+        f("read_image", "Look at an IMAGE FILE on disk (png/jpg/etc.) with the vision model and read its text or describe it. Use for 'what does this receipt/screenshot say', 'read the text in photo.png', 'describe this image'. Different from see_screen (the live screen) - this is a saved file.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"path to the image file (natural locations like 'desktop/shot.png' work)"},"question":{"type":"string","description":"optional: what to look for; defaults to reading all text and describing it"}},"required":["path"]})),
         f("learn", "Save a DURABLE thing you have learned about the user or their work, so you REMEMBER it in future sessions (not just this chat). Call this whenever the user states a lasting preference, fact, or correction, or when you notice a stable pattern - e.g. 'prefers concise answers', 'their company is Lensr', 'dislikes em dashes', 'deploys on Fridays'. Write ONE clear sentence. Do NOT save one-off or transient details. If it is similar to something already learned, it is reinforced automatically.",
           serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"the durable learning, one clear sentence"},"kind":{"type":"string","description":"preference | fact | heuristic (default fact)"}},"required":["text"]})),
         f("goal_update", "Resolve one of YOUR OWN hypotheses/goals (the ones shown to you under 'Your OWN current hypotheses/goals') once the user responds to it. status: 'confirmed' if the user agreed a hypothesis is true (ALSO call learn to remember the confirmed fact), 'done' if you completed a goal, or 'dropped' if the user said no or it is not useful.",
@@ -272,6 +274,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     if hit(&["document", "pdf", "ingest", "my files", "my notes", "search my", "knowledge"]) {
         keep.extend(["ingest_path", "search_docs"]);
     }
+    if hit(&["image", "photo", "picture", "receipt", "screenshot", ".png", ".jpg", ".jpeg", "ocr", "read the text", "what does this say", "scan"]) {
+        keep.extend(["read_image"]);
+    }
     if hit(&["code", "compile", "build", "program", "rust", "python", "script", "project", "function", "bug"]) {
         keep.extend(["code_new_project", "code_write_file", "code_read_file", "code_list", "code_open", "code_exec"]);
     }
@@ -361,6 +366,7 @@ pub async fn execute(
         "recall_activity" => recall_activity(args_json, mem).await,
         "ingest_path" => ingest_path(args_json, mem).await,
         "search_docs" => search_docs(args_json, mem).await,
+        "read_image" => read_image(args_json).await,
         "learn" => {
             #[derive(Deserialize)]
             struct LearnArg { text: String, kind: Option<String> }
@@ -2326,6 +2332,40 @@ async fn see_screen(args: &str) -> String {
     let answer = vision_ask(&data_url, &a.question).await;
     if answer.starts_with("ERROR") { return answer; }
     format!("Screen analysis: {answer}")
+}
+
+// Read/understand an image FILE via the vision model (OCR + describe). Loads the
+// file, wraps it as a data URL, and asks the vision model. Images only - PDFs and
+// text go through ingest_path/read_doc_text.
+async fn read_image(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { path: String, question: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let resolved = resolve_path(&a.path);
+    let p = std::path::Path::new(&resolved);
+    if !p.is_file() {
+        return format!("ERROR: no image file at {}", a.path);
+    }
+    let mime = match p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        _ => return format!("ERROR: {} is not a supported image (use png/jpg/gif/webp/bmp). For PDFs/text use ingest_path.", a.path),
+    };
+    let bytes = match std::fs::read(p) { Ok(b) => b, Err(e) => return format!("ERROR reading {}: {e}", a.path) };
+    if bytes.len() > 12 * 1024 * 1024 {
+        return format!("ERROR: {} is too large to send to the vision model ({}MB).", a.path, bytes.len() / 1_048_576);
+    }
+    use base64::Engine as _;
+    let data_url = format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+    let prompt = a.question.as_deref().filter(|q| !q.trim().is_empty()).unwrap_or(
+        "Read ALL text visible in this image exactly (transcribe it), then briefly describe what the image shows. If there is no text, just describe it.",
+    );
+    let answer = vision_ask(&data_url, prompt).await;
+    if answer.starts_with("ERROR") { return answer; }
+    format!("Image ({}): {answer}", a.path)
 }
 
 // ── see-then-act: screenshot, ask vision for coordinates, then click ─────────

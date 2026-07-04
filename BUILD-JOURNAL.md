@@ -1897,3 +1897,18 @@ secret_list returns NAMES only, never values.
    chat -> `jarvis secret wifi` printed the exact value -> `jarvis secret rm wifi` deleted it.
 **Wiring:** secrets table + memory ops, tools + gating (secret/password/pin/api key/token/vault),
 CLI commands, help entry. cargo test 45 passed. Test secret cleaned up after.
+
+### 2026-07-03 - New capability: read_image (OCR / understand an image file)
+**Vision on saved files, not just the live screen.** read_image loads an image file (png/jpg/gif/
+webp/bmp), wraps it as a data URL, and asks the vision model to transcribe its text and describe
+it. For 'what does this receipt say', 'read the text in screenshot.png', 'describe this photo'.
+Complements see_screen (live screen) and ingest_path/read_doc_text (PDFs/text). Guards: rejects
+non-image extensions with a pointer to ingest_path, and refuses files over 12MB.
+**Wiring:** definition + async dispatch + relevant_definitions gating (image/photo/receipt/ocr/
+read the text/.png/.jpg keywords).
+**Verified:** build clean; cargo test 45 passed; end-to-end - generated a PNG containing 'JARVIS
+OCR 42' and the agent read it back EXACTLY. (First attempts in the primary session mis-fired
+because memory recall pulled in an earlier failed-screenshot turn and the model hallucinated the
+image was missing - a memory-context quirk, not a read_image bug; a clean-context run confirmed
+the tool works perfectly.)
+**Two new domains this round:** an encrypted secrets vault and image OCR - both verified end to end.
