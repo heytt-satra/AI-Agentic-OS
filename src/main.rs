@@ -435,8 +435,13 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some("eval") => {
-            // Pillar 1: the reliability instrument - run scored agent tasks.
-            run_eval(&provider, &mem).await;
+            // Pillar 1: the reliability instrument. `jarvis eval` runs the scored
+            // suite; `jarvis eval trend` shows the recorded score-over-time instead.
+            if matches!(std::env::args().nth(2).as_deref(), Some("trend") | Some("--trend") | Some("history")) {
+                run_eval_trend();
+            } else {
+                run_eval(&provider, &mem).await;
+            }
             return Ok(());
         }
         Some("cost") => {
@@ -1401,6 +1406,53 @@ fn record_eval_run(passed: i64, total: i64, pct: f64, cats: &[(String, i64, i64)
     let line = serde_json::json!({"ts": ts, "passed": passed, "total": total, "pct": pct, "categories": by_cat});
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("eval-history.jsonl") {
         let _ = writeln!(f, "{line}");
+    }
+}
+
+// Show the recorded eval score over time (roadmap 5.1) - "quality is a number
+// that must climb," made visible. Reads eval-history.jsonl and prints each run
+// with a tiny trend bar and the delta from the previous run.
+fn run_eval_trend() {
+    let content = match std::fs::read_to_string("eval-history.jsonl") {
+        Ok(c) => c,
+        Err(_) => {
+            println!("\nNo eval history yet. Run `jarvis eval` a few times to build a trend.");
+            return;
+        }
+    };
+    let runs: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if runs.is_empty() {
+        println!("\nNo eval runs recorded yet. Run `jarvis eval` to record one.");
+        return;
+    }
+    println!("\nEval score over time ({} run(s))\n===============================", runs.len());
+    let mut prev: Option<f64> = None;
+    for r in &runs {
+        let pct = r.get("pct").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let passed = r.get("passed").and_then(|x| x.as_i64()).unwrap_or(0);
+        let total = r.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
+        // A 20-cell bar so the trend is visible at a glance.
+        let filled = ((pct / 100.0) * 20.0).round() as usize;
+        let bar: String = "#".repeat(filled) + &"-".repeat(20 - filled.min(20));
+        let delta = match prev {
+            Some(p) if pct > p + 0.5 => format!(" (up {:+.0})", pct - p),
+            Some(p) if pct < p - 0.5 => format!(" (DOWN {:+.0})", pct - p),
+            Some(_) => " (flat)".to_string(),
+            None => String::new(),
+        };
+        println!("  [{bar}] {pct:>3.0}%  {passed}/{total}{delta}");
+        prev = Some(pct);
+    }
+    // Simple direction over the whole history.
+    if let (Some(first), Some(last)) = (runs.first(), runs.last()) {
+        let f = first.get("pct").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let l = last.get("pct").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let word = if l > f + 0.5 { "climbing" } else if l < f - 0.5 { "regressing" } else { "holding" };
+        println!("\nOverall: {f:.0}% -> {l:.0}% ({word} across the recorded history).");
     }
 }
 

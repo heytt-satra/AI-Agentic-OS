@@ -1614,3 +1614,15 @@ the CORE/sections split).
 **Session arc:** every turn is now cheaper (tool trim + persona trim), self-correcting (HUD
 degenerate retry), and fully visible (per-turn + session tokens, latency, and $ - all counted in
 one ledger). Cost is lower AND legible end to end.
+
+### 2026-07-03 - Improvement: `jarvis eval trend` - the regression line made visible
+**Completing 5.1's "quality is a number that climbs."** Each eval run appended to
+eval-history.jsonl, but the only way to SEE the trend was opening the file. Now `jarvis eval
+trend` (also `history` / `--trend`) reads that log and prints the score over time: a 20-cell bar
+per run, the delta from the previous run (up/DOWN/flat), and an overall first->last direction
+(climbing / regressing / holding). `jarvis eval` still runs the suite; the subcommand just views.
+**Verified:** build clean; cargo test 38 passed; seeded a 4-run history (50 -> 75 -> 62 -> 100)
+and confirmed the viewer renders the bars, per-run deltas (+25, DOWN -12, +38), and "Overall: 50%
+-> 100% (climbing)". Cleaned up the seed file after.
+**5.1 is now a full loop:** run -> categorized score + injection red-team -> append to history ->
+`eval trend` to watch it climb. The CI-quality-number pitch is demoable end to end.
