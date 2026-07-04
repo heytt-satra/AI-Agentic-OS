@@ -288,6 +288,12 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                 messages.push(Message::system(live));
             }
         }
+        // Per-turn persona trim (parity with the REPL): only the domain sections
+        // this message needs, so trivial turns keep the base prompt lean.
+        let secs = crate::persona_sections(&user_text);
+        if !secs.is_empty() {
+            messages.push(Message::system(secs));
+        }
         messages.push(Message::user(&user_text));
         st.mem.log("user", &user_text).await;
 

@@ -1536,3 +1536,27 @@ to watch the un-draw live, but the gate is the shared unit-tested predicate and 
 mirrors the proven REPL path.
 **Result:** the "kills the ok garbage" guarantee from Phase 0/1.2 now holds on the surface users
 actually use.
+
+### 2026-07-03 - Improvement: per-turn PERSONA trim (the 1.1 follow-on cost lever)
+**The gap 1.1 left open.** Tool-trimming cut the per-turn TOOL tokens, but the journal flagged the
+other half: "the persona + per-turn context injections... a separate future trim." The full
+persona (~2860 tokens) plus the always-on OUTREACH_GUIDE were baked into messages[0] and sent on
+EVERY turn - including "what is 2+2?" - even though the code/GUI/agents/outreach guidance is dead
+weight on a trivial turn.
+**What shipped:** split the monolithic PERSONA into a lean always-on CORE (identity, writing
+style, act-don't-narrate, learn-across-sessions, curiosity/goals, causal memory, honesty,
+verify, safety - the behavior-shaping essentials) plus five DOMAIN SECTIONS (P_CODE, P_GUI,
+P_AGENTS, P_WEB, P_LEADS + OUTREACH_GUIDE). The interactive loops (REPL + HUD) now set
+messages[0] = CORE and inject persona_sections(user_text) each turn - the same keyword-gated
+approach as tools::relevant_definitions - so a turn gets exactly the guidance it needs, and a
+topic shift mid-conversation pulls the right sections because it's recomputed per turn. One-shot
+contexts that have no per-turn loop (sub-agents, heartbeat, SFT export) use full_persona() so
+they stay ready for anything; the digest call stays on lean CORE (it only writes). trim_messages
+preserves whatever messages[0] was, so the lean base survives trimming.
+**Measured:** a trivial turn's system prompt dropped from ~2861 tokens to ~922 - about 1,938
+tokens saved (67%) EVERY trivial turn, stacking on top of the 1.1 tool-trim. Code/GUI/outreach
+turns are unchanged in capability (they pull their section). No behavior lost: CORE keeps every
+safety/honesty/self-direction directive; domains are additive.
+**Verified:** build clean; cargo test 38 passed (1 new - trivial msg -> no sections, code msg ->
+P_CODE only, outreach msg -> leads + full OUTREACH method, full_persona has everything, lean base
+has only CORE). is_degenerate and the mind panel unaffected.
