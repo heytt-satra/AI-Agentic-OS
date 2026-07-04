@@ -142,6 +142,14 @@ pub fn definitions() -> Vec<Tool> {
           str_prop("text", "the text to place on the clipboard")),
         f("system_status", "Report this machine's live health: CPU load, memory used/total, disk free/total, battery level and charging state (if present), and uptime. Use when the user asks 'how's my system', 'am I low on memory/disk/battery', or before a heavy task.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
+
+        // ── reminders (one-off, fire in the background)
+        f("remind_set", "Set a one-off reminder that fires in the background after N minutes (a desktop notification + a nudge). Use for 'remind me in 20 minutes to X', 'in an hour, tell me to Y'. Requires Jarvis to be running in the background (jarvis serve or daemon) when it comes due.",
+          serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"minutes from now until it fires"},"text":{"type":"string","description":"what to remind the user about"}},"required":["minutes","text"]})),
+        f("remind_list", "List the user's pending (not-yet-fired) reminders with their id and how long until each fires.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("remind_cancel", "Cancel a pending reminder by its id (from remind_list).",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
     ]
 }
 
@@ -181,6 +189,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["system", "cpu", "memory", "ram", "disk", "storage", "battery", "how's my", "hows my", "machine", "resources", "uptime", "performance"]) {
         keep.extend(["system_status"]);
+    }
+    if hit(&["remind", "reminder", "timer", "alarm", "in an hour", "minutes", "later", "notify me"]) {
+        keep.extend(["remind_set", "remind_list", "remind_cancel"]);
     }
     if hit(&["watch", "video", "hear", "listen", "playing", "subtitle", "transcri"]) {
         keep.extend(["watch_start", "watch_stop", "watch_status"]);
@@ -350,6 +361,9 @@ pub async fn execute(
         "clipboard_read" => clipboard_read(),
         "clipboard_write" => clipboard_write(args_json),
         "system_status" => system_status(),
+        "remind_set" => remind_set(args_json, mem).await,
+        "remind_list" => remind_list(mem).await,
+        "remind_cancel" => remind_cancel(args_json, mem).await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1346,6 +1360,78 @@ fn system_status() -> String {
         None => out.push_str("  Battery: none (desktop / not reported)\n"),
     }
     out
+}
+
+// ── reminders ───────────────────────────────────────────────────────────────
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+async fn remind_set(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { minutes: i64, text: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if a.minutes <= 0 {
+        return "ERROR: minutes must be positive (how long from now to remind you).".to_string();
+    }
+    let text = a.text.trim();
+    if text.is_empty() {
+        return "ERROR: reminder text is empty.".to_string();
+    }
+    let due = unix_now() + a.minutes * 60;
+    let id = mem.reminder_add(due, text).await;
+    if id < 0 {
+        return "ERROR: could not save the reminder.".to_string();
+    }
+    format!("Reminder #{id} set for {} minute(s) from now: {text}. I'll notify you (keep Jarvis running in the background).", a.minutes)
+}
+
+async fn remind_list(mem: &crate::memory::MemoryHandle) -> String {
+    let rows = mem.reminders_list().await;
+    if rows.is_empty() {
+        return "No pending reminders.".to_string();
+    }
+    let now = unix_now();
+    let mut out = String::from("Pending reminders:\n");
+    for (id, due, text) in rows {
+        let mins = ((due - now).max(0) + 59) / 60; // round up to whole minutes
+        out.push_str(&format!("  #{id} in ~{mins} min: {text}\n"));
+    }
+    out
+}
+
+async fn remind_cancel(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { id: i64 }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.reminder_cancel(a.id).await {
+        format!("Cancelled reminder #{}.", a.id)
+    } else {
+        format!("No pending reminder #{} to cancel.", a.id)
+    }
+}
+
+// Best-effort desktop notification (Windows balloon; no-op elsewhere). Spawned
+// detached so it never blocks the caller; used to surface a fired reminder even
+// when the HUD isn't focused.
+pub fn notify_desktop(title: &str, text: &str) {
+    if !cfg!(windows) {
+        return;
+    }
+    // Sanitize single quotes so they can't break out of the PowerShell string.
+    let t = title.replace('\'', " ");
+    let b = text.replace('\'', " ").chars().take(200).collect::<String>();
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $n = New-Object System.Windows.Forms.NotifyIcon; \
+         $n.Icon = [System.Drawing.SystemIcons]::Information; \
+         $n.Visible = $true; \
+         $n.ShowBalloonTip(8000, '{t}', '{b}', 'Info'); \
+         Start-Sleep -Seconds 9; $n.Dispose()"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .spawn();
 }
 
 // Best-effort battery read. sysinfo doesn't expose battery, so on Windows we ask

@@ -118,6 +118,13 @@ fn spawn_scheduler(provider: Provider, mem: MemoryHandle) {
                 }
                 mem.schedule_mark_run(id, now + every.max(60)).await;
             }
+            // One-off reminders that have come due: fire a desktop notification and
+            // queue a nudge so it also shows in the mind panel / next turn.
+            for (id, text) in mem.reminders_due(now).await {
+                crate::tools::notify_desktop("Jarvis reminder", &text);
+                mem.nudge_add(&format!("Reminder: {text}")).await;
+                eprintln!("[reminder] fired #{id}: {text}");
+            }
         }
     });
 }

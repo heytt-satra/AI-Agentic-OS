@@ -58,6 +58,11 @@ enum MemCmd {
     ScheduleRemove { id: i64, reply: oneshot::Sender<bool> },
     ScheduleDue { now: i64, reply: oneshot::Sender<Vec<(i64, String, i64)>> },
     ScheduleMarkRun { id: i64, next_run: i64 },
+    // One-off reminders.
+    ReminderAdd { due_ts: i64, text: String, reply: oneshot::Sender<i64> },
+    ReminderList { reply: oneshot::Sender<Vec<(i64, i64, String)>> }, // (id, due_ts, text) pending
+    ReminderCancel { id: i64, reply: oneshot::Sender<bool> },
+    ReminderDue { now: i64, reply: oneshot::Sender<Vec<(i64, String)>> }, // fires + marks them
     // User-defined agents (gap 4).
     AgentCreate { name: String, instructions: String, reply: oneshot::Sender<bool> },
     AgentList { reply: oneshot::Sender<Vec<(String, String)>> },
@@ -410,6 +415,29 @@ impl MemoryHandle {
         let _ = self.tx.send(MemCmd::ScheduleMarkRun { id, next_run }).await;
     }
 
+    // ── one-off reminders ───────────────────────────────────────────────────
+    pub async fn reminder_add(&self, due_ts: i64, text: &str) -> i64 {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ReminderAdd { due_ts, text: text.to_string(), reply }).await.is_err() { return -1; }
+        rx.await.unwrap_or(-1)
+    }
+    pub async fn reminders_list(&self) -> Vec<(i64, i64, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ReminderList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn reminder_cancel(&self, id: i64) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ReminderCancel { id, reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+    /// Return reminders now due (id, text) and atomically mark them fired.
+    pub async fn reminders_due(&self, now: i64) -> Vec<(i64, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::ReminderDue { now, reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+
     // ── user-defined agents (gap 4) ─────────────────────────────────────────
     pub async fn agent_create(&self, name: &str, instructions: &str) -> bool {
         let (reply, rx) = oneshot::channel();
@@ -728,6 +756,11 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS schedules (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             agent TEXT NOT NULL, every_secs INTEGER NOT NULL, next_run INTEGER NOT NULL
+         );
+         -- One-off reminders: fire once at due_ts. fired=1 after it has been raised.
+         CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+            due_ts INTEGER NOT NULL, text TEXT NOT NULL, fired INTEGER NOT NULL DEFAULT 0
          );
          -- Document RAG: chunks of the user's ingested files + their embeddings.
          CREATE TABLE IF NOT EXISTS documents (
@@ -1051,6 +1084,37 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
         }
         MemCmd::ScheduleMarkRun { id, next_run } => {
             let _ = conn.execute("UPDATE schedules SET next_run=?2 WHERE id=?1", params![id, next_run]);
+        }
+        MemCmd::ReminderAdd { due_ts, text, reply } => {
+            let _ = conn.execute(
+                "INSERT INTO reminders (ts, due_ts, text, fired) VALUES (?1, ?2, ?3, 0)",
+                params![now_secs(), due_ts, text],
+            );
+            let _ = reply.send(conn.last_insert_rowid());
+        }
+        MemCmd::ReminderList { reply } => {
+            let rows = (|| -> Result<Vec<(i64, i64, String)>> {
+                let mut stmt = conn.prepare("SELECT id, due_ts, text FROM reminders WHERE fired=0 ORDER BY due_ts ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::ReminderCancel { id, reply } => {
+            let n = conn.execute("DELETE FROM reminders WHERE id=?1 AND fired=0", params![id]).unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
+        MemCmd::ReminderDue { now, reply } => {
+            // Read the due, un-fired ones, then mark them fired so they raise once.
+            let rows = (|| -> Result<Vec<(i64, String)>> {
+                let mut stmt = conn.prepare("SELECT id, text FROM reminders WHERE fired=0 AND due_ts <= ?1")?;
+                let r = stmt.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            for (id, _) in &rows {
+                let _ = conn.execute("UPDATE reminders SET fired=1 WHERE id=?1", params![id]);
+            }
+            let _ = reply.send(rows);
         }
         MemCmd::AgentCreate { name, instructions, reply } => {
             let ok = conn.execute(

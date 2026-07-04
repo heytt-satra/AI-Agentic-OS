@@ -1709,3 +1709,26 @@ GiB, disk 126/475 GiB free, uptime 51h, battery 93%).
 **Why these:** they're genuinely useful daily (paste-in/paste-out workflows, "am I low on
 disk/battery before this heavy task"), self-contained, and testable - the right kind of new
 surface to add to a device-controlling agent.
+
+### 2026-07-03 - New capability: background reminders (fire as notification + nudge)
+**"Remind me in 20 minutes to X" - now real.** A personal agent should be able to hold a timer
+for you and reach you when it comes due, even if the window isn't focused.
+**Data layer:** a reminders table (id, due_ts, text, fired) + memory ops reminder_add /
+reminders_list / reminder_cancel / reminders_due(now) - the last atomically returns the due,
+un-fired reminders and marks them fired so each raises exactly once (mirrors the schedules
+pattern already in the codebase).
+**Tools:** remind_set (minutes from now + text), remind_list (pending, with ~minutes-until), and
+remind_cancel (by id). Gated in relevant_definitions by remind/timer/alarm/notify keywords.
+**Firing:** the serve/daemon background scheduler (already ticking every 60s for scheduled
+agents) now also checks reminders_due; for each it (a) fires a desktop notification via
+notify_desktop() - a Windows NotifyIcon balloon spawned detached, no new dependency, no-op on
+other OS - and (b) queues a nudge so the reminder also shows in the mind panel and next turn.
+Reminders therefore need Jarvis running in the background (serve/daemon), which is the intended
+always-on mode; the tool text says so.
+**Verified end-to-end, not just built:** set "remind me in 1 minute to test fire" via the agent
+(stored as #3), ran `jarvis serve`, and at the scheduler tick the log showed `[reminder] fired
+#3: test fire` and a nudge `Reminder: test fire` was created - the full path set -> stored -> due
+-> fired -> notification + nudge works. remind_set/list also verified through the agent (IDs,
+~minutes-until). cargo test 41 passed. (The critic sometimes re-runs remind_set thinking a future
+reminder 'isn't done' - a pre-existing critic quirk, not a tool bug; the reminder itself is
+correct.)
