@@ -1956,3 +1956,17 @@ and memory" and "bookmark X as Y" now return WITHOUT the false "verifying: not d
 tool, the critic still flagged "no tools were called" and the retry made it actually run - exactly
 right. Net: fewer wasted retries + no double-execution, without weakening the critic on real
 multi-step tasks (there the tool output would still show incomplete work).
+
+### 2026-07-03 - New capability: media_control + a critic-evidence refinement
+**Media and volume control.** media_control drives the keyboard media keys via enigo (already the
+input layer): play_pause, next, previous, stop, volume_up/down (repeatable with 'times'), mute.
+Works with whatever is playing (Spotify, YouTube, a video). For 'pause the music', 'next song',
+'turn it up', 'mute'. Gated by music/play/volume/track/media keywords.
+**Refinement to yesterday's critic fix:** the tool EVIDENCE passed to the critic was OVERWRITTEN
+per tool call, so a multi-step turn (volume down THEN up) only handed the critic the last call - and
+it flagged "only shows volume up, not down first". Replaced with append_evidence(): tool outputs
+now ACCUMULATE (bounded to the most recent ~1800 chars on a char boundary) so the critic sees the
+whole turn. Verified: the same 'lower then raise the volume' turn that mis-flagged before now
+returns cleanly, and the net-zero volume test confirms media_control actually fires the keys.
+**Verified:** build clean; cargo test 45 passed; media_control exercised end-to-end (volume down
+then up = no net change, agent confirmed); multi-tool critic false-flag gone.

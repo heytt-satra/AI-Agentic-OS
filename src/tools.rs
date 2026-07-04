@@ -188,6 +188,10 @@ pub fn definitions() -> Vec<Tool> {
         f("speak", "Say text out loud through the computer's speakers using the OS text-to-speech voice. Use when the user asks you to 'read this out loud', 'say X', 'read me the news', or wants a hands-free spoken answer. This is separate from the reply text - use it in addition to answering.",
           str_prop("text", "the text to speak aloud")),
 
+        // ── media / volume control
+        f("media_control", "Control media playback and volume via the keyboard media keys: play/pause, next/previous track, stop, volume up/down/mute. Works with whatever is playing (Spotify, YouTube, a video, etc.). Use for 'pause the music', 'next song', 'turn it up', 'mute'. Pass 'times' to repeat a volume step.",
+          serde_json::json!({"type":"object","properties":{"action":{"type":"string","description":"one of: play_pause, next, previous, stop, volume_up, volume_down, mute"},"times":{"type":"integer","description":"repeat count for volume_up/volume_down (default 1)"}},"required":["action"]})),
+
         // ── encrypted secrets vault
         f("secret_set", "Save a secret (password, PIN, API key, wifi password, door code) ENCRYPTED on this device, under a short name. Use when the user says 'remember my X password', 'store this key as Y'. Stored with AES-256 so a stolen database file can't read it.",
           serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"a short name to file it under, e.g. 'wifi', 'github token'"},"value":{"type":"string","description":"the secret value to encrypt and store"}},"required":["name","value"]})),
@@ -264,6 +268,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["speak", "say ", "read this", "read it", "read me", "out loud", "aloud", "read the", "tell me out"]) {
         keep.extend(["speak"]);
+    }
+    if hit(&["music", "song", "track", "play", "pause", "volume", "louder", "quieter", "mute", "next", "skip", "media", "spotify", "turn it up", "turn it down"]) {
+        keep.extend(["media_control"]);
     }
     if hit(&["secret", "password", "passcode", "pin", "api key", "token", "credential", "wifi password", "code for", "vault", "store this key"]) {
         keep.extend(["secret_set", "secret_get", "secret_list", "secret_remove"]);
@@ -466,6 +473,7 @@ pub async fn execute(
         "network_info" => network_info().await,
         "recent_files" => recent_files(args_json),
         "speak" => speak(args_json),
+        "media_control" => media_control(args_json),
         "secret_set" => secret_set(args_json, mem).await,
         "secret_get" => secret_get(args_json, mem).await,
         "secret_list" => secret_list(mem).await,
@@ -1936,6 +1944,33 @@ fn speak(args: &str) -> String {
         }
         Err(e) => format!("ERROR: could not start voice output: {e}"),
     }
+}
+
+// ── media / volume control ──────────────────────────────────────────────────
+fn media_control(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { action: String, times: Option<u32> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let act = a.action.trim().to_lowercase().replace([' ', '-'], "_");
+    let (key, label) = match act.as_str() {
+        "play_pause" | "play" | "pause" | "toggle" => (Key::MediaPlayPause, "play/pause"),
+        "next" | "next_track" | "skip" => (Key::MediaNextTrack, "next track"),
+        "previous" | "prev" | "previous_track" | "back" => (Key::MediaPrevTrack, "previous track"),
+        "stop" => (Key::MediaStop, "stop"),
+        "volume_up" | "louder" | "up" => (Key::VolumeUp, "volume up"),
+        "volume_down" | "quieter" | "down" => (Key::VolumeDown, "volume down"),
+        "mute" | "unmute" => (Key::VolumeMute, "mute toggle"),
+        other => return format!("ERROR: unknown media action '{other}'. Use play_pause, next, previous, stop, volume_up, volume_down, or mute."),
+    };
+    let mut enigo = match new_enigo() { Ok(e) => e, Err(e) => return e };
+    // Volume steps are small, so allow repeating; playback actions fire once.
+    let is_volume = matches!(key, Key::VolumeUp | Key::VolumeDown);
+    let n = if is_volume { a.times.unwrap_or(1).clamp(1, 20) } else { 1 };
+    for _ in 0..n {
+        let _ = enigo.key(key, Direction::Click);
+        if is_volume { std::thread::sleep(std::time::Duration::from_millis(30)); }
+    }
+    if is_volume && n > 1 { format!("Sent {label} x{n}.") } else { format!("Sent {label}.") }
 }
 
 // ── encrypted secrets vault ─────────────────────────────────────────────────

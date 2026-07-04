@@ -859,6 +859,20 @@ async fn main() -> Result<()> {
 // cheap call per completed turn; disable with JARVIS_CRITIC=off. Deliberately
 // conservative: only blocks on a clear INCOMPLETE verdict, never on ambiguity, so
 // it adds reliability without false stalls.
+// Accumulate a turn's tool outputs (for the critic), keeping it bounded so a
+// chatty turn can't blow the prompt. Each result is truncated; the running block
+// is trimmed from the front to the most recent ~1800 chars.
+fn append_evidence(evidence: &mut String, name: &str, result: &str) {
+    let line = format!("[{name}] {}\n", result.chars().take(400).collect::<String>());
+    evidence.push_str(&line);
+    if evidence.len() > 1800 {
+        let start = evidence.len() - 1800;
+        // Cut on a char boundary.
+        let cut = evidence.char_indices().find(|(i, _)| *i >= start).map(|(i, _)| i).unwrap_or(0);
+        *evidence = evidence[cut..].to_string();
+    }
+}
+
 async fn critic_verify(provider: &Provider, task: &str, answer: &str, evidence: &str) -> Option<String> {
     if std::env::var("JARVIS_CRITIC").unwrap_or_default().to_lowercase() == "off" {
         return None;
@@ -1019,7 +1033,7 @@ pub async fn run_subagent(
                     tools::execute(&name, &args, mem, provider, depth + 1).await
                 };
                 mem.log_audit(&name, &args, "subagent", tools::result_ok(&result)).await;
-                evidence = format!("[{name}] {}", result.chars().take(400).collect::<String>());
+                append_evidence(&mut evidence, &name, &result);
                 messages.push(Message::tool_result(call.id, result));
             }
             continue;
@@ -1758,7 +1772,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
                     tainted = true; // read untrusted web -> later risky actions re-ask
                 }
                 mem.log("tool", &result).await;
-                evidence = format!("[{name}] {}", result.chars().take(400).collect::<String>());
+                append_evidence(&mut evidence, &name, &result);
                 messages.push(Message::tool_result(call.id, result));
             }
             continue;
