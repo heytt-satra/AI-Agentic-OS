@@ -63,6 +63,11 @@ enum MemCmd {
     ReminderList { reply: oneshot::Sender<Vec<(i64, i64, String)>> }, // (id, due_ts, text) pending
     ReminderCancel { id: i64, reply: oneshot::Sender<bool> },
     ReminderDue { now: i64, reply: oneshot::Sender<Vec<(i64, String)>> }, // fires + marks them
+    // Encrypted secrets vault (value stored as ciphertext).
+    SecretSet { name: String, value: String, reply: oneshot::Sender<bool> },
+    SecretGet { name: String, reply: oneshot::Sender<Option<String>> },
+    SecretList { reply: oneshot::Sender<Vec<String>> },
+    SecretRemove { name: String, reply: oneshot::Sender<bool> },
     // User-defined agents (gap 4).
     AgentCreate { name: String, instructions: String, reply: oneshot::Sender<bool> },
     AgentList { reply: oneshot::Sender<Vec<(String, String)>> },
@@ -438,6 +443,31 @@ impl MemoryHandle {
         rx.await.unwrap_or_default()
     }
 
+    // ── encrypted secrets vault ─────────────────────────────────────────────
+    /// Store (or overwrite) a secret. `value` MUST already be ciphertext.
+    pub async fn secret_set(&self, name: &str, value: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SecretSet { name: name.to_string(), value: value.to_string(), reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+    /// Fetch a secret's stored (encrypted) value by name.
+    pub async fn secret_get(&self, name: &str) -> Option<String> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SecretGet { name: name.to_string(), reply }).await.is_err() { return None; }
+        rx.await.ok().flatten()
+    }
+    /// List secret NAMES only (never values).
+    pub async fn secret_list(&self) -> Vec<String> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SecretList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn secret_remove(&self, name: &str) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::SecretRemove { name: name.to_string(), reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+
     // ── user-defined agents (gap 4) ─────────────────────────────────────────
     pub async fn agent_create(&self, name: &str, instructions: &str) -> bool {
         let (reply, rx) = oneshot::channel();
@@ -761,6 +791,11 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             due_ts INTEGER NOT NULL, text TEXT NOT NULL, fired INTEGER NOT NULL DEFAULT 0
+         );
+         -- Encrypted secrets vault: value is AES-256-GCM ciphertext ('enc:...'),
+         -- so a stolen DB file never reveals a secret. Keyed by a friendly name.
+         CREATE TABLE IF NOT EXISTS secrets (
+            name TEXT PRIMARY KEY, value TEXT NOT NULL, ts INTEGER NOT NULL
          );
          -- Document RAG: chunks of the user's ingested files + their embeddings.
          CREATE TABLE IF NOT EXISTS documents (
@@ -1115,6 +1150,29 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 let _ = conn.execute("UPDATE reminders SET fired=1 WHERE id=?1", params![id]);
             }
             let _ = reply.send(rows);
+        }
+        MemCmd::SecretSet { name, value, reply } => {
+            let ok = conn.execute(
+                "INSERT OR REPLACE INTO secrets (name, value, ts) VALUES (?1, ?2, ?3)",
+                params![name, value, now_secs()],
+            ).is_ok();
+            let _ = reply.send(ok);
+        }
+        MemCmd::SecretGet { name, reply } => {
+            let v = conn.query_row("SELECT value FROM secrets WHERE name=?1", params![name], |r| r.get::<_, String>(0)).ok();
+            let _ = reply.send(v);
+        }
+        MemCmd::SecretList { reply } => {
+            let rows = (|| -> Result<Vec<String>> {
+                let mut stmt = conn.prepare("SELECT name FROM secrets ORDER BY name ASC")?;
+                let r = stmt.query_map([], |r| r.get::<_, String>(0))?.filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::SecretRemove { name, reply } => {
+            let n = conn.execute("DELETE FROM secrets WHERE name=?1", params![name]).unwrap_or(0);
+            let _ = reply.send(n > 0);
         }
         MemCmd::AgentCreate { name, instructions, reply } => {
             let ok = conn.execute(

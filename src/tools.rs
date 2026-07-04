@@ -183,6 +183,16 @@ pub fn definitions() -> Vec<Tool> {
         // ── voice output
         f("speak", "Say text out loud through the computer's speakers using the OS text-to-speech voice. Use when the user asks you to 'read this out loud', 'say X', 'read me the news', or wants a hands-free spoken answer. This is separate from the reply text - use it in addition to answering.",
           str_prop("text", "the text to speak aloud")),
+
+        // ── encrypted secrets vault
+        f("secret_set", "Save a secret (password, PIN, API key, wifi password, door code) ENCRYPTED on this device, under a short name. Use when the user says 'remember my X password', 'store this key as Y'. Stored with AES-256 so a stolen database file can't read it.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"a short name to file it under, e.g. 'wifi', 'github token'"},"value":{"type":"string","description":"the secret value to encrypt and store"}},"required":["name","value"]})),
+        f("secret_get", "Retrieve a stored secret's value by its name (decrypts it). This is the USER'S OWN data on their OWN machine - when THEY ask for it ('what's my X password', 'get my Y key'), retrieve it and give it to them plainly. Do NOT refuse or lecture; it is theirs. (Naturally, only surface it when they actually ask.)",
+          str_prop("name", "the name the secret was stored under")),
+        f("secret_list", "List the NAMES of stored secrets (never their values), so the user can see what's saved.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("secret_remove", "Delete a stored secret by name.",
+          str_prop("name", "the name of the secret to delete")),
     ]
 }
 
@@ -240,6 +250,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["speak", "say ", "read this", "read it", "read me", "out loud", "aloud", "read the", "tell me out"]) {
         keep.extend(["speak"]);
+    }
+    if hit(&["secret", "password", "passcode", "pin", "api key", "token", "credential", "wifi password", "code for", "vault", "store this key"]) {
+        keep.extend(["secret_set", "secret_get", "secret_list", "secret_remove"]);
     }
     if hit(&["process", "running", "task", "kill", "close ", "quit", "force quit", "frozen", "not responding", "using my", "slow", "end task"]) {
         keep.extend(["list_processes", "kill_process"]);
@@ -428,6 +441,10 @@ pub async fn execute(
         "network_info" => network_info().await,
         "recent_files" => recent_files(args_json),
         "speak" => speak(args_json),
+        "secret_set" => secret_set(args_json, mem).await,
+        "secret_get" => secret_get(args_json, mem).await,
+        "secret_list" => secret_list(mem).await,
+        "secret_remove" => secret_remove(args_json, mem).await,
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1889,6 +1906,53 @@ fn speak(args: &str) -> String {
             format!("Speaking aloud: \"{preview}{}\"", if text.chars().count() > 60 { "..." } else { "" })
         }
         Err(e) => format!("ERROR: could not start voice output: {e}"),
+    }
+}
+
+// ── encrypted secrets vault ─────────────────────────────────────────────────
+async fn secret_set(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String, value: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let name = a.name.trim();
+    if name.is_empty() || a.value.is_empty() {
+        return "ERROR: both a name and a value are required.".to_string();
+    }
+    // Encrypt BEFORE it touches the database, so the DB only ever holds ciphertext.
+    let enc = crate::crypto::encrypt(&a.value);
+    if mem.secret_set(name, &enc).await {
+        format!("Saved '{name}' encrypted. Ask me for it any time; it's unreadable in the database.")
+    } else {
+        "ERROR: could not save the secret.".to_string()
+    }
+}
+
+async fn secret_get(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    match mem.secret_get(a.name.trim()).await {
+        Some(enc) => format!("{}: {}", a.name.trim(), crate::crypto::decrypt(&enc)),
+        None => format!("No secret stored under '{}'. Use secret_list to see saved names.", a.name.trim()),
+    }
+}
+
+async fn secret_list(mem: &crate::memory::MemoryHandle) -> String {
+    let names = mem.secret_list().await;
+    if names.is_empty() {
+        return "No secrets stored yet.".to_string();
+    }
+    format!("Stored secrets (names only):\n{}", names.iter().map(|n| format!("  - {n}")).collect::<Vec<_>>().join("\n"))
+}
+
+async fn secret_remove(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.secret_remove(a.name.trim()).await {
+        format!("Deleted the secret '{}'.", a.name.trim())
+    } else {
+        format!("No secret named '{}' to delete.", a.name.trim())
     }
 }
 

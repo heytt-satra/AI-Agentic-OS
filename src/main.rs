@@ -516,6 +516,41 @@ async fn main() -> Result<()> {
             println!("hear-test is Windows-only (WASAPI loopback).");
             return Ok(());
         }
+        Some("secrets") => {
+            // Deterministic vault access (no model): list stored secret names.
+            let names = mem.secret_list().await;
+            if names.is_empty() {
+                println!("No secrets stored. Ask Jarvis to 'store my X password as ...' to add one.");
+            } else {
+                println!("\nStored secrets (names only)\n===========================");
+                for n in names { println!("  - {n}"); }
+                println!("\nRetrieve one with: jarvis secret <name>");
+            }
+            return Ok(());
+        }
+        Some("secret") => {
+            // Deterministic vault access (no model): `jarvis secret <name>` prints
+            // the decrypted value; `jarvis secret rm <name>` deletes it.
+            let arg2 = std::env::args().nth(2).unwrap_or_default();
+            if arg2.trim().is_empty() {
+                println!("usage: jarvis secret <name>   |   jarvis secret rm <name>   (list: jarvis secrets)");
+                return Ok(());
+            }
+            if arg2 == "rm" || arg2 == "remove" || arg2 == "delete" {
+                let name = std::env::args().nth(3).unwrap_or_default();
+                if mem.secret_remove(name.trim()).await {
+                    println!("Deleted secret '{}'.", name.trim());
+                } else {
+                    println!("No secret named '{}'.", name.trim());
+                }
+                return Ok(());
+            }
+            match mem.secret_get(arg2.trim()).await {
+                Some(enc) => println!("{}", crypto::decrypt(&enc)),
+                None => println!("No secret named '{}'. See: jarvis secrets", arg2.trim()),
+            }
+            return Ok(());
+        }
         Some("mind") => {
             // The terminal twin of the HUD mind panel: one consolidated view of
             // Jarvis's inner state (learnings, goals, causal record + calibration,
@@ -1140,6 +1175,8 @@ PRIVACY & SAFETY
   jarvis privacy         Exactly what is stored and what (if anything) leaves the device.
   jarvis grant <cap> <m> Grant a capability for N minutes (auto-approve on clean turns).
   jarvis grants          List active capability grants.
+  jarvis secrets         List names in the encrypted secrets vault.
+  jarvis secret <name>   Print a stored secret (decrypted); `secret rm <name>` deletes it.
 
 OTHER
   jarvis consolidate [days] | dataset [sft] [out] | hear-test [secs] | once | help

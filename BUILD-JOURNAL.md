@@ -1876,3 +1876,24 @@ battery shell-outs).
 **Eleven new capabilities this session:** clipboard read/write, system status, reminders, window
 management, file finder, process management, screenshot, network info, recent files, recoverable
 delete, and voice output - plus the ambient HUD machine readout and an accurate README.
+
+### 2026-07-03 - New capability: encrypted secrets vault
+**A place for passwords/keys that survives DB theft.** New tools secret_set / secret_get /
+secret_list / secret_remove, plus deterministic CLI (jarvis secrets, jarvis secret <name>,
+jarvis secret rm <name>). Values are encrypted with the existing AES-256-GCM (crypto.rs) BEFORE
+they touch the database, so the secrets table only ever holds 'enc:...' ciphertext - verified:
+after storing a test secret the plaintext was NOT in the secrets table and an enc: blob was.
+secret_list returns NAMES only, never values.
+**Two honest findings from testing, both handled:**
+1) The value is encrypted at rest, BUT if the user TYPES a secret into the open chat, that message
+   is logged plaintext in the messages table (the conversation log isn't encrypted). So the
+   at-rest guarantee covers the vault column, not a secret that was also typed in chat. Noted
+   plainly rather than oversold; a fuller fix (encrypting the message log) is a separate change.
+2) The cheap default model (gemini-2.5-flash) over-refuses to READ BACK a stored password even
+   when it's the user's own data on their own machine - a model safety-tuning quirk that made the
+   vault frustrating via chat. Strengthened secret_get's description to authorize retrieval of the
+   user's own data, AND added a deterministic CLI (jarvis secret <name>) that bypasses the model
+   entirely - guaranteed retrieval regardless of model behavior. Verified end-to-end: store via
+   chat -> `jarvis secret wifi` printed the exact value -> `jarvis secret rm wifi` deleted it.
+**Wiring:** secrets table + memory ops, tools + gating (secret/password/pin/api key/token/vault),
+CLI commands, help entry. cargo test 45 passed. Test secret cleaned up after.
