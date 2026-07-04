@@ -26,6 +26,8 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
     let (needs_approval, salient, label) = match tool {
         // irreversible
         "delete_path" => (true, field("path"), format!("DELETE {}", field("path"))),
+        // recoverable (goes to the Recycle Bin) but still removes the file
+        "recycle_path" => (true, field("path"), format!("move to Recycle Bin: {}", field("path"))),
 
         // force-quitting a process ends it immediately (unsaved work lost)
         "kill_process" => {
@@ -151,6 +153,13 @@ mod tests {
         let r = assess("run_shell", r#"{"command":"paypal-cli send-money --to x --amount 50"}"#);
         assert!(r.needs_approval);
         assert!(r.label.starts_with("SPEND"));
+    }
+
+    #[test]
+    fn recycle_needs_approval_but_reads_as_recoverable() {
+        let r = assess("recycle_path", r#"{"path":"desktop/old.txt"}"#);
+        assert!(r.needs_approval);
+        assert!(r.label.contains("Recycle Bin") && !r.label.contains("DELETE"));
     }
 
     #[test]

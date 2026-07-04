@@ -25,7 +25,8 @@ pub fn definitions() -> Vec<Tool> {
         f("write_file", "Create or overwrite a text file at a path. Requires approval.",
           serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})),
         f("list_dir", "List the files and folders in a directory.", str_prop("path", "directory path (use '.' for current)")),
-        f("delete_path", "Delete a file or folder. Requires approval. Irreversible.", str_prop("path", "path to delete")),
+        f("delete_path", "Permanently delete a file or folder. Requires approval. Irreversible - prefer recycle_path unless the user explicitly wants it gone for good.", str_prop("path", "path to delete")),
+        f("recycle_path", "Move a file or folder to the Recycle Bin (recoverable). PREFER THIS over delete_path for 'delete X' / 'get rid of Y' / 'remove Z' - the user can restore it if wrong. Requires approval.", str_prop("path", "path to send to the Recycle Bin")),
         f("open_path", "Open an app, file, or URL with the OS default handler. Requires approval.", str_prop("target", "app name, file path, or URL")),
         f("run_shell", "Run any shell command on this machine (PowerShell on Windows). Requires approval. This is the universal tool — file ops, apps, system settings, installs, automation.", str_prop("command", "the command")),
         f("open_app", "Launch an application by name (e.g. 'notepad', 'chrome', 'code'). Resolves via the OS so it works for installed apps. Requires approval. Use this for apps; use open_path for files/URLs.", str_prop("name", "application name")),
@@ -203,7 +204,7 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     let hit = |kws: &[&str]| kws.iter().any(|k| m.contains(k));
     let mut keep: HashSet<&str> = [
         // core: always available
-        "read_file", "write_file", "list_dir", "delete_path", "run_shell", "open_path",
+        "read_file", "write_file", "list_dir", "delete_path", "recycle_path", "run_shell", "open_path",
         "open_app", "install_software", "wait", "web_search", "news_search", "fetch_url",
         "recall_activity", "learn",
     ]
@@ -379,6 +380,7 @@ pub async fn execute(
         "write_file" => write_file(args_json),
         "list_dir" => list_dir(args_json),
         "delete_path" => delete_path(args_json),
+        "recycle_path" => recycle_path(args_json),
         "open_path" => open_path(args_json),
         "run_shell" => run_shell(args_json),
         "open_app" => open_app(args_json),
@@ -885,6 +887,36 @@ fn delete_path(args: &str) -> String {
     match r {
         Ok(()) => format!("deleted {}", a.path),
         Err(e) => format!("ERROR deleting {}: {e}", a.path),
+    }
+}
+
+// Recoverable delete: send a file/folder to the Recycle Bin so a mistake can be
+// undone. On Windows we use the VisualBasic FileIO API (SendToRecycleBin) via
+// PowerShell - no extra dependency. On other platforms we can't guarantee a
+// trash, so we refuse rather than silently doing a permanent delete.
+fn recycle_path(args: &str) -> String {
+    let a: PathArg = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let resolved = resolve_path(&a.path);
+    let p = std::path::Path::new(&resolved);
+    if !p.exists() {
+        return format!("ERROR: no such file or folder: {}", a.path);
+    }
+    if !cfg!(windows) {
+        return "ERROR: recycle_path is Windows-only for now; use delete_path (permanent) if you really want it gone.".to_string();
+    }
+    let is_dir = p.is_dir();
+    // Absolute, backslash path for the Shell API; escape single quotes.
+    let win_path = resolved.replace('/', "\\").replace('\'', "''");
+    let method = if is_dir { "DeleteDirectory" } else { "DeleteFile" };
+    let extra = if is_dir { ", 'DoNothing'" } else { "" };
+    let script = format!(
+        "Add-Type -AssemblyName Microsoft.VisualBasic; \
+         [Microsoft.VisualBasic.FileIO.FileSystem]::{method}('{win_path}', 'OnlyErrorDialogs', 'SendToRecycleBin'{extra})"
+    );
+    match std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).output() {
+        Ok(o) if o.status.success() => format!("Moved {} to the Recycle Bin (restore it from there if needed).", a.path),
+        Ok(o) => format!("ERROR recycling {}: {}", a.path, String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
+        Err(e) => format!("ERROR recycling {}: {e}", a.path),
     }
 }
 

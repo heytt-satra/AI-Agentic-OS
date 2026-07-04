@@ -1842,3 +1842,22 @@ never blocks the async executor. Added as a "machine" field on /mind; the panel 
 MEM Y%". Battery and the full breakdown stay on the system_status tool (on demand).
 **Verified:** build clean; cargo test 44 passed; booted serve and confirmed /mind returns real
 values ({"cpu":8,"mem":64}) and the HUD ships the Machine row + its updater.
+
+### 2026-07-03 - New capability: recycle_path (recoverable delete)
+**Safer deletes by default.** delete_path is permanent; a wrong "delete X" was unrecoverable.
+recycle_path sends a file/folder to the Recycle Bin instead - fully restorable - and the tool
+descriptions now steer the model to PREFER it for ordinary "delete/remove/get rid of" requests,
+reserving delete_path for "gone for good". No new dependency: on Windows it uses the VisualBasic
+FileIO SendToRecycleBin API via PowerShell; on other OSes it refuses (rather than silently doing a
+permanent delete) until a trash path is wired.
+**Safety:** still approval-gated, but with a gentler, honest label ("move to Recycle Bin: X" vs
+"DELETE X") so the user sees it's recoverable. Added to the core always-available tool set beside
+delete_path.
+**Verified:** build clean; cargo test 45 passed (1 new - recycle needs approval and reads as
+recoverable, not DELETE). End-to-end: asked the agent to recycle a throwaway file; the approval
+prompt showed the Recycle Bin label, and after approval the file was moved to the Recycle Bin
+(confirmed GONE from disk, restorable from the bin).
+**Ten new capabilities this session** (clipboard, system status, reminders, windows, file finder,
+processes, screenshot, network, recent files, recoverable delete) plus the ambient HUD machine
+readout and an accurate README - a broad, verified expansion of what the OS agent safely does to
+the real machine.
