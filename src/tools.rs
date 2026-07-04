@@ -1509,6 +1509,59 @@ pub fn quick_machine() -> (f32, u64) {
     (cpu, mem_pct)
 }
 
+// Structured machine snapshot for the HUD device panel: (cpu%, mem_pct,
+// battery% or None, disk_free_pct or None, uptime_secs). Blocking - call via
+// spawn_blocking.
+pub fn machine_snapshot() -> (f32, u64, Option<u32>, Option<u64>, u64) {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+    let cpu = sys.global_cpu_usage();
+    let mem_pct = if sys.total_memory() > 0 { 100 * sys.used_memory() / sys.total_memory() } else { 0 };
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disk_free_pct = disks.iter().max_by_key(|d| d.total_space()).and_then(|d| {
+        if d.total_space() > 0 { Some(100 * d.available_space() / d.total_space()) } else { None }
+    });
+    let battery = battery_status().and_then(|s| s.trim_end_matches('%').parse::<u32>().ok());
+    (cpu, mem_pct, battery, disk_free_pct, System::uptime())
+}
+
+// Top processes by memory, aggregated by name, for the HUD device panel:
+// (name, mem_bytes, cpu%, count). Blocking - call via spawn_blocking.
+pub fn top_processes(n: usize) -> Vec<(String, u64, f32, usize)> {
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.refresh_cpu_usage();
+    use std::collections::HashMap;
+    let mut agg: HashMap<String, (u64, f32, usize)> = HashMap::new();
+    for (_pid, p) in sys.processes() {
+        let name = p.name().to_string_lossy().to_string();
+        let e = agg.entry(name).or_insert((0, 0.0, 0));
+        e.0 += p.memory();
+        e.1 += p.cpu_usage();
+        e.2 += 1;
+    }
+    let mut rows: Vec<(String, u64, f32, usize)> = agg.into_iter().map(|(nm, (m, c, k))| (nm, m, c, k)).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.truncate(n);
+    rows
+}
+
+// User-initiated focus/kill from the device panel (the user clicking a button is
+// direct intent, so these bypass the agent-approval policy).
+pub fn focus_window_by_name(name: &str) -> String {
+    focus_window(&serde_json::json!({"name": name}).to_string())
+}
+pub fn kill_process_by_name(name: &str) -> String {
+    kill_process(&serde_json::json!({"name": name}).to_string())
+}
+
 fn system_status() -> String {
     use sysinfo::System;
     let mut sys = System::new_all();
@@ -1625,7 +1678,7 @@ pub fn notify_desktop(title: &str, text: &str) {
 // ── window management ───────────────────────────────────────────────────────
 // Collect (app, title) for every visible, non-minimized window, skipping our own
 // HUD. Deduped, so multiple captures of the same window don't repeat.
-fn open_windows() -> Vec<(String, String)> {
+pub(crate) fn open_windows() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let Ok(windows) = xcap::Window::all() else { return out };
     for w in windows {

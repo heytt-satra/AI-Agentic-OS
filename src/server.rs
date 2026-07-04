@@ -86,6 +86,9 @@ pub async fn serve(provider: Provider, mem: MemoryHandle) -> Result<()> {
         .route("/mind", get(mind))
         .route("/goal", post(goal_action))
         .route("/nudge", post(nudge_action))
+        // Device panel: live machine/windows/processes + one-click focus/kill.
+        .route("/device", get(device))
+        .route("/device/action", post(device_action))
         .with_state(state);
 
     let addr = "127.0.0.1:7878";
@@ -216,6 +219,49 @@ async fn nudge_action(State(st): State<AppState>, Json(req): Json<NudgeReq>) -> 
     };
     let ok = st.mem.nudge_react(req.id, reaction).await;
     Json(serde_json::json!({"ok": ok}))
+}
+
+// The device panel snapshot: machine health, open windows, top processes. The
+// blocking sysinfo/window reads run on the blocking pool so the executor is free.
+async fn device(State(_st): State<AppState>) -> Json<serde_json::Value> {
+    let (cpu, mem, batt, disk, up) = tokio::task::spawn_blocking(crate::tools::machine_snapshot).await.unwrap_or((0.0, 0, None, None, 0));
+    let procs = tokio::task::spawn_blocking(|| crate::tools::top_processes(8)).await.unwrap_or_default();
+    let windows = tokio::task::spawn_blocking(crate::tools::open_windows).await.unwrap_or_default();
+
+    let gib = |b: u64| (b as f64 / 1_073_741_824.0 * 10.0).round() / 10.0;
+    let processes: Vec<_> = procs.iter().map(|(name, m, c, count)| {
+        serde_json::json!({"name": name, "gib": gib(*m), "cpu": c.round() as i64, "count": count})
+    }).collect();
+    let wins: Vec<_> = windows.iter().take(14).map(|(app, title)| serde_json::json!({"app": app, "title": title})).collect();
+
+    Json(serde_json::json!({
+        "cpu": cpu.round() as i64,
+        "mem": mem,
+        "battery": batt,
+        "disk_free": disk,
+        "uptime_h": up / 3600,
+        "uptime_m": (up % 3600) / 60,
+        "processes": processes,
+        "windows": wins,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct DeviceReq {
+    kind: String, // "focus" | "kill"
+    name: String,
+}
+
+// A user clicking focus/kill in the panel is direct intent, so these run without
+// the agent-approval gate (that gate is for the AGENT acting autonomously).
+async fn device_action(State(_st): State<AppState>, Json(req): Json<DeviceReq>) -> Json<serde_json::Value> {
+    let name = req.name.clone();
+    let msg = match req.kind.as_str() {
+        "focus" => tokio::task::spawn_blocking(move || crate::tools::focus_window_by_name(&name)).await.unwrap_or_else(|_| "ERROR".into()),
+        "kill" => tokio::task::spawn_blocking(move || crate::tools::kill_process_by_name(&name)).await.unwrap_or_else(|_| "ERROR".into()),
+        _ => return Json(serde_json::json!({"ok": false, "error": "bad action"})),
+    };
+    Json(serde_json::json!({"ok": !msg.starts_with("ERROR"), "message": msg}))
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(st): State<AppState>) -> Response {
@@ -651,11 +697,29 @@ const INDEX_HTML: &str = r##"<!doctype html>
     background:linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
     border-left:1px solid var(--line);
   }
-  .mind .cap{flex:0 0 auto; display:flex; align-items:center; justify-content:space-between;
-    padding:22px 20px 14px; font-size:11px; letter-spacing:.42em; color:var(--amber);
+  .mind .cap{flex:0 0 auto; display:flex; align-items:center; gap:16px;
+    padding:22px 20px 14px; font-size:11px; letter-spacing:.42em;
     font-weight:600; text-transform:uppercase}
-  .mind .cap .live{font-size:8.5px; letter-spacing:.2em; color:var(--faint); font-weight:400}
+  .mind .cap .tab{color:var(--faint); cursor:pointer; transition:color .15s}
+  .mind .cap .tab.on{color:var(--amber)}
+  .mind .cap .tab:hover{color:var(--amber-dim)}
+  .mind .cap .live{margin-left:auto; font-size:8.5px; letter-spacing:.2em; color:var(--faint); font-weight:400}
   .mind .cap .live.on{color:var(--cyan)}
+  /* device panel */
+  .dstat{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:16px}
+  .dstat .cell{border:1px solid var(--line2); border-radius:3px; padding:10px 12px}
+  .dstat .cell .l{font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint)}
+  .dstat .cell .n{font-size:15px; color:var(--cyan); margin-top:4px}
+  .drow{display:flex; align-items:center; gap:8px; padding:7px 0; border-bottom:1px solid var(--line2)}
+  .drow:last-child{border-bottom:0}
+  .drow .info{flex:1; min-width:0}
+  .drow .nm{font-size:11px; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .drow .sub{font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted)}
+  .drow button{font-family:var(--mono); font-size:8.5px; letter-spacing:.1em; text-transform:uppercase;
+    padding:5px 9px; background:transparent; color:var(--muted); border:1px solid var(--line);
+    border-radius:3px; cursor:pointer; transition:.15s; white-space:nowrap}
+  .drow button.focus:hover{border-color:var(--cyan); color:var(--cyan)}
+  .drow button.kill:hover{border-color:var(--red); color:var(--red)}
   .mindBody{flex:1; overflow-y:auto; padding:0 20px 24px;
     scrollbar-width:thin; scrollbar-color:var(--line) transparent}
   .mindBody::-webkit-scrollbar{width:7px}
@@ -775,9 +839,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
       </footer>
     </section>
     <aside class="mind">
-      <div class="cap">Mind <span class="live" id="mindLive">standby</span></div>
+      <div class="cap">
+        <span class="tab on" id="tabMind">Mind</span>
+        <span class="tab" id="tabDevice">Device</span>
+        <span class="live" id="mindLive">standby</span>
+      </div>
       <div class="mindBody" id="mindBody">
         <div class="sec"><div class="empty">Waking up…</div></div>
+      </div>
+      <div class="mindBody" id="deviceBody" style="display:none">
+        <div class="sec"><div class="empty">Reading the machine…</div></div>
       </div>
     </aside>
   </div>
@@ -972,6 +1043,54 @@ async function reactNudge(id, action){
 }
 refreshMind();
 mindTimer=setInterval(refreshMind, 5000); // keep the mind live while the HUD is open
+
+// ── device panel: live machine/windows/processes with one-click focus/kill
+const deviceBody=document.getElementById('deviceBody'),
+      tabMind=document.getElementById('tabMind'), tabDevice=document.getElementById('tabDevice');
+let activeTab='mind';
+function renderDevice(d){
+  const cell=(l,n)=>'<div class="cell"><div class="l">'+l+'</div><div class="n">'+n+'</div></div>';
+  let html='<div class="dstat">'
+    + cell('CPU', d.cpu+'%')
+    + cell('Memory', d.mem+'%')
+    + cell('Disk free', (d.disk_free==null?'—':d.disk_free+'%'))
+    + cell('Battery', (d.battery==null?'—':d.battery+'%'))
+    + '</div>';
+  html += '<div style="font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-top:8px">Up '+d.uptime_h+'h '+d.uptime_m+'m</div>';
+
+  html += sec('Top processes', (d.processes||[]).map(p=>
+    '<div class="drow"><div class="info"><div class="nm">'+esc(p.name)+(p.count>1?' <span class="sub">x'+p.count+'</span>':'')+'</div>'+
+    '<div class="sub">'+p.gib+' GiB · '+p.cpu+'% CPU</div></div>'+
+    '<button class="kill" onclick="deviceAct(\'kill\',\''+esc(p.name).replace(/'/g,"")+'\',this)">Kill</button></div>'
+  ).join(''));
+
+  html += sec('Windows', (d.windows||[]).map(w=>{
+    const label = w.title && w.title.length ? w.title : w.app;
+    return '<div class="drow"><div class="info"><div class="nm">'+esc(label)+'</div><div class="sub">'+esc(w.app)+'</div></div>'+
+    '<button class="focus" onclick="deviceAct(\'focus\',\''+esc(w.app).replace(/'/g,"")+'\',this)">Focus</button></div>';
+  }).join(''));
+  deviceBody.innerHTML=html;
+}
+async function refreshDevice(){
+  if(activeTab!=='device') return;
+  try{ const r=await fetch('/device'); if(r.ok) renderDevice(await r.json()); }catch(e){}
+}
+async function deviceAct(kind, name, btn){
+  if(kind==='kill' && !confirm('Force-quit '+name+'? Unsaved work will be lost.')) return;
+  if(btn){ btn.textContent='…'; btn.disabled=true; }
+  try{ await fetch('/device/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,name})}); }catch(e){}
+  setTimeout(refreshDevice, 400);
+}
+function switchTab(t){
+  activeTab=t;
+  const onMind=t==='mind';
+  tabMind.classList.toggle('on',onMind); tabDevice.classList.toggle('on',!onMind);
+  mindBody.style.display=onMind?'':'none'; deviceBody.style.display=onMind?'none':'';
+  if(!onMind) refreshDevice();
+}
+tabMind.onclick=()=>switchTab('mind');
+tabDevice.onclick=()=>switchTab('device');
+setInterval(refreshDevice, 4000);
 
 // ── approval modal
 const apWrap=document.getElementById('approvalWrap'),

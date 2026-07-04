@@ -2020,3 +2020,23 @@ state still applies - check with the tools instead.
 context that previously made the model hallucinate a missing image, read_image now reads the file
 correctly ('RECALL FIX 77'). Targeted, low-risk (prompt framing only), fixes a real hallucination
 class.
+
+### 2026-07-03 - New surface: HUD Device panel (the machine's control room)
+**A higher-leverage build than another leaf tool.** The right rail now has TWO tabs - MIND and
+DEVICE - and the Device tab is the device-control counterpart to the mind panel: it makes the new
+system/window/process tools a visible, clickable surface.
+**Shows, live (polls /device every 4s):** a stat grid (CPU%, memory%, disk-free%, battery%) plus
+uptime; Top processes (aggregated by name, memory + CPU, e.g. 'chrome.exe x12') each with a Kill
+button (JS confirm first); and open Windows each with a Focus button.
+**Backend:** GET /device returns the structured snapshot (machine_snapshot + top_processes +
+open_windows, all via spawn_blocking so the ~200ms sysinfo sample never blocks the executor).
+POST /device/action {kind, name} focuses or kills - and deliberately BYPASSES the agent-approval
+policy, because a user clicking a button is direct intent (the policy gate is for the AGENT acting
+on its own); kill still asks a browser confirm.
+**Design:** DESIGN.md-faithful - amber tabs, cyan stat values (live data), red only on the Kill
+hover.
+**Verified:** build clean; cargo test 46 passed; booted serve and confirmed GET /device returns
+real values (CPU 10%, mem 66%, battery 93%, disk-free 26%, uptime 53h; top procs chrome/Code/Memory
+Compression; windows Explorer/Chrome), POST /device/action rejects a bad kind and reports a focus
+miss, and the served HUD ships the tabs + renderDevice + deviceAct wiring. The two right-rail
+surfaces (Mind, Device) now cover both what Jarvis is THINKING and what the MACHINE is doing.
