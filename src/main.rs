@@ -1391,7 +1391,7 @@ async fn run_dataset_export(mem: &MemoryHandle, out_path: &str) {
 // models fall into: empty, a bare acknowledgement ("ok") that answers nothing, or a
 // wrong-language refusal (non-Latin reply when the user wrote in Latin script). Real
 // short answers like "4" or "Yes" are NOT degenerate.
-fn is_degenerate(user: &str, content: &str) -> bool {
+pub(crate) fn is_degenerate(user: &str, content: &str) -> bool {
     let c = content.trim();
     if c.is_empty() {
         return true;

@@ -297,6 +297,7 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
         let mut answered = false;
         let turn_start = std::time::Instant::now();
         let mut turn_tokens: u64 = 0;
+        let mut degen_retried = false; // allow exactly one degenerate-reply re-ask
         let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         'turn: for _ in 0..max_steps() {
             // Streamed model call: content tokens go to the browser live.
@@ -368,6 +369,17 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             }
 
             let answer = reply.message.content.unwrap_or_else(|| "(no answer)".into());
+            // Degenerate-reply guard (parity with the REPL path): if the model
+            // streamed an empty / "ok"-class / wrong-language non-answer, discard
+            // the partial bubble in the browser and re-ask once for a real answer.
+            if !degen_retried && crate::is_degenerate(&user_text, &answer) {
+                degen_retried = true;
+                let _ = send(&mut socket, serde_json::json!({"type":"retry"})).await;
+                messages.push(Message::user(
+                    "Your previous reply was empty or a non-answer. Answer the request directly, completely, and in English now.".to_string(),
+                ));
+                continue;
+            }
             st.mem.log("assistant", &answer).await;
             // Content was already streamed as deltas; just finalize the bubble.
             let ms = turn_start.elapsed().as_millis() as u64;
@@ -808,6 +820,7 @@ function connect(){
     else if(m.type==='state'){ if(m.state!=='speaking') setState(m.state); }
     else if(m.type==='tool'){ flashTool(m.name); }
     else if(m.type==='delta'){ if(!cur){cur=addMsg('jarvis','Jarvis');curRaw='';} curRaw+=m.text; cur.textContent=plainify(curRaw); setState('speaking'); log.scrollTop=log.scrollHeight; }
+    else if(m.type==='retry'){ if(cur){const b=cur.closest('.msg'); if(b)b.remove();} cur=null; curRaw=''; setState('thinking'); }
     else if(m.type==='done'){ speak(plainify(curRaw)); cur=null; curRaw=''; setState('idle'); refreshMind(); }
     else if(m.type==='answer'){ const txt=plainify(m.text); typewriter(addMsg('jarvis','Jarvis'), txt); speak(txt); refreshMind(); }
     else if(m.type==='meter'){ const s=(m.ms/1000).toFixed(1); const tk=m.tokens>0?(m.tokens+' tok'):'— tok'; meterEl.textContent=tk+' · '+s+'s'; }

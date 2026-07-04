@@ -1512,3 +1512,27 @@ logic is standard signtool usage with a clean no-cert fallback. This is the "[BU
 into the release pipeline once you have the cert" item from the roadmap, done.
 **Owner action to activate:** buy a code-signing cert, add WINDOWS_CERT_BASE64 +
 WINDOWS_CERT_PASSWORD as repo secrets. Then every tagged release is signed automatically.
+
+### 2026-07-03 - Improvement: degenerate-reply retry now covers the streaming HUD path
+**Closing a known gap.** Phase 1.2 added a degenerate-reply guard (empty / "ok"-class /
+wrong-language non-answers get one auto re-ask), but only on the REPL + heartbeat path - the
+journal explicitly deferred the streaming HUD as "trickier mid-stream." The HUD is the PRIMARY
+surface and exactly where the cheap fast-tier model can still emit garbage, so this was the most
+worthwhile existing thing to harden.
+**Why it was trickier:** in the HUD path the answer is streamed to the browser token-by-token, so
+by the time we can judge it degenerate, the bad text ("ok") is already on screen. A retry has to
+also un-draw it.
+**What shipped:** is_degenerate is now pub(crate) and shared (no logic fork). In the HUD turn
+loop, after the final answer, if it's degenerate and we haven't retried yet: send a new `retry`
+event, push the same one-line re-ask nudge used by the REPL, and continue the loop once. The
+browser handles `retry` by removing the partial bubble (cur is the inner .body span, so we remove
+its .closest('.msg') parent - a real bug I caught and fixed) and returning to the THINKING state;
+the fresh answer then streams into a clean bubble. Capped at one retry via degen_retried, exactly
+like the REPL.
+**Verified:** build clean; cargo test 37 passed (is_degenerate itself is already unit-tested -
+empty/ok/Chinese-vs-English true, "4"/"Yes"/real sentences false); booted `jarvis serve` and
+confirmed the served HUD ships the retry handler. Can't force a real model degeneracy on demand
+to watch the un-draw live, but the gate is the shared unit-tested predicate and the control flow
+mirrors the proven REPL path.
+**Result:** the "kills the ok garbage" guarantee from Phase 0/1.2 now holds on the surface users
+actually use.
