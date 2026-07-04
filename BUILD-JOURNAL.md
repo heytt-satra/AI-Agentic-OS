@@ -1996,3 +1996,13 @@ project', 'unzip this download'.
 **Verified:** build clean; cargo test 46 passed; end-to-end round-trip - zipped a folder with known
 content, extracted it, and confirmed the file came back byte-identical ('hello archive content'),
 with the folder structure preserved.
+
+### 2026-07-03 - New capability: weather (key-free, reliable)
+**Weather that just works.** The weather tool fetches current conditions + feels-like, humidity, and
+wind from wttr.in - key-free plaintext, so it's far more reliable than scraping a web_search result.
+Optional location (wttr.in geolocates by IP when omitted); handles unknown places and offline
+gracefully. Tool text steers the model to prefer it over web_search for weather.
+**Wiring:** definition + async dispatch + gating (weather/rain/forecast/temperature/umbrella/
+degrees keywords). 8s timeout, metric units.
+**Verified:** build clean; cargo test 46 passed; end-to-end - 'weather in Mumbai' returned real
+conditions (rainy 26C, feels 29C, 94% humidity, wind 38 km/h).

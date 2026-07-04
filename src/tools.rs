@@ -180,6 +180,10 @@ pub fn definitions() -> Vec<Tool> {
         f("network_info", "Report this machine's network: local IP, Wi-Fi network name (SSID) if on Wi-Fi, and public IP (best-effort). Use for 'what's my IP', 'am I online', 'what wifi am I on'.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
 
+        // ── weather
+        f("weather", "Get the current weather and a short forecast for a place (or the user's location if none given). Use for 'what's the weather', 'will it rain', 'weather in Tokyo'. Reliable and key-free - prefer this over web_search for weather.",
+          serde_json::json!({"type":"object","properties":{"location":{"type":"string","description":"city or place, e.g. 'Mumbai'; omit to use the user's current location"}},"required":[]})),
+
         // ── recent files (by modification time)
         f("recent_files", "List the files the user changed most RECENTLY across their Desktop, Documents, and Downloads (or a folder you name), newest first. Use for 'what did I work on recently', 'my latest downloads', 'the file I just saved'. Different from find_files (which searches by name).",
           serde_json::json!({"type":"object","properties":{"folder":{"type":"string","description":"optional folder to look in (natural location like 'downloads' or a path)"},"count":{"type":"integer","description":"how many to return (default 12)"}},"required":[]})),
@@ -273,6 +277,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["network", "ip", "wifi", "wi-fi", "online", "internet", "connected", "ssid", "offline"]) {
         keep.extend(["network_info"]);
+    }
+    if hit(&["weather", "rain", "temperature", "forecast", "sunny", "cold outside", "hot outside", "umbrella", "how's it outside", "degrees"]) {
+        keep.extend(["weather"]);
     }
     if hit(&["speak", "say ", "read this", "read it", "read me", "out loud", "aloud", "read the", "tell me out"]) {
         keep.extend(["speak"]);
@@ -485,6 +492,7 @@ pub async fn execute(
         "kill_process" => kill_process(args_json),
         "screenshot_save" => screenshot_save(args_json),
         "network_info" => network_info().await,
+        "weather" => weather(args_json).await,
         "recent_files" => recent_files(args_json),
         "speak" => speak(args_json),
         "media_control" => media_control(args_json),
@@ -2165,6 +2173,34 @@ async fn bookmark_remove(args: &str, mem: &crate::memory::MemoryHandle) -> Strin
         format!("Removed bookmark '{}'.", a.name.trim())
     } else {
         format!("No bookmark named '{}'.", a.name.trim())
+    }
+}
+
+// ── weather ─────────────────────────────────────────────────────────────────
+// Current conditions + a compact 3-day outlook from wttr.in (key-free plaintext).
+// Empty location lets wttr.in geolocate by IP.
+async fn weather(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { location: Option<String> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let loc = a.location.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("");
+    // URL-encode spaces so multi-word places work.
+    let loc_enc = loc.replace(' ', "+");
+    // format=3 -> "Place: cond +temp"; the short numeric form is compact + parseable.
+    let url = format!("https://wttr.in/{loc_enc}?format=%l:+%c+%t,+feels+%f,+%h+humidity,+wind+%w&m");
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(8))
+        .user_agent("curl/8").build() { Ok(c) => c, Err(e) => return format!("ERROR: {e}") };
+    match client.get(&url).send().await {
+        Ok(r) => {
+            let s = r.status();
+            let body = r.text().await.unwrap_or_default();
+            let t = body.trim();
+            if !s.is_success() || t.is_empty() || t.to_lowercase().contains("unknown location") {
+                return format!("Couldn't get weather for '{}' (unknown place or the service is down). Try a nearby city.", if loc.is_empty() { "your location" } else { loc });
+            }
+            format!("Weather - {t}")
+        }
+        Err(_) => "Couldn't reach the weather service (are you online?).".to_string(),
     }
 }
 
