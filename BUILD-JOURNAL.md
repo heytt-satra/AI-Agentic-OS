@@ -2040,3 +2040,13 @@ real values (CPU 10%, mem 66%, battery 93%, disk-free 26%, uptime 53h; top procs
 Compression; windows Explorer/Chrome), POST /device/action rejects a bad kind and reports a focus
 miss, and the served HUD ships the tabs + renderDevice + deviceAct wiring. The two right-rail
 surfaces (Mind, Device) now cover both what Jarvis is THINKING and what the MACHINE is doing.
+
+### 2026-07-03 - Visual QA: Device panel confirmed in a real browser
+**Drove the HUD in a headless browser (gstack /browse) to see the Device panel render, not just
+assume it.** Loaded http://127.0.0.1:7878, clicked the DEVICE tab, waited for the stat grid, and
+screenshotted. It renders exactly as designed: the MIND|DEVICE tab switcher (Device active, amber),
+a 2x2 stat grid with cyan values (CPU 32%, Memory 67%, Disk free 26%, Battery 93%) and 'UP 53H 44M',
+Top processes aggregated by name with counts and per-row KILL buttons (chrome.exe x29 4.7 GiB,
+Code.exe x14 34% CPU, ...), and a Windows list with FOCUS buttons. DESIGN.md-faithful (amber system,
+cyan live data, red only on Kill hover). The left rail's ambient machine widget showed CPU 36% ·
+MEM 67% simultaneously. Both right-rail surfaces - Mind and Device - are now real and verified.
