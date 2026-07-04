@@ -174,6 +174,10 @@ pub fn definitions() -> Vec<Tool> {
         // ── network info
         f("network_info", "Report this machine's network: local IP, Wi-Fi network name (SSID) if on Wi-Fi, and public IP (best-effort). Use for 'what's my IP', 'am I online', 'what wifi am I on'.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
+
+        // ── recent files (by modification time)
+        f("recent_files", "List the files the user changed most RECENTLY across their Desktop, Documents, and Downloads (or a folder you name), newest first. Use for 'what did I work on recently', 'my latest downloads', 'the file I just saved'. Different from find_files (which searches by name).",
+          serde_json::json!({"type":"object","properties":{"folder":{"type":"string","description":"optional folder to look in (natural location like 'downloads' or a path)"},"count":{"type":"integer","description":"how many to return (default 12)"}},"required":[]})),
     ]
 }
 
@@ -216,6 +220,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["find", "where's", "wheres", "where is", "locate", "my file", "a file", "file called", "file named", "search my", "do i have"]) {
         keep.extend(["find_files"]);
+    }
+    if hit(&["recent", "recently", "latest", "just saved", "just downloaded", "worked on", "last file", "newest"]) {
+        keep.extend(["recent_files"]);
     }
     if hit(&["clipboard", "copy", "copied", "paste", "clip "]) {
         keep.extend(["clipboard_read", "clipboard_write"]);
@@ -410,6 +417,7 @@ pub async fn execute(
         "kill_process" => kill_process(args_json),
         "screenshot_save" => screenshot_save(args_json),
         "network_info" => network_info().await,
+        "recent_files" => recent_files(args_json),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1637,6 +1645,63 @@ fn find_files(args: &str) -> String {
     }
     if results.len() >= MAX_RESULTS {
         out.push_str("  (showing the first 40 matches; narrow the name for fewer)\n");
+    }
+    out
+}
+
+// Recently-modified files across the user's common folders (or a given one),
+// newest first. Same bounded, noise-skipping walk as find_files but ranked by
+// modification time instead of name.
+fn recent_files(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { folder: Option<String>, count: Option<usize> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let want = a.count.unwrap_or(12).clamp(1, 40);
+
+    let roots: Vec<std::path::PathBuf> = match a.folder.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(f) => vec![std::path::PathBuf::from(resolve_path(f))],
+        None => [dirs::desktop_dir(), dirs::document_dir(), dirs::download_dir()]
+            .into_iter().flatten().collect(),
+    };
+
+    const MAX_DIRS: usize = 30_000;
+    let mut files: Vec<(String, std::time::SystemTime, u64)> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
+    for r in roots {
+        if r.is_dir() && !seen.contains(&r) { seen.push(r.clone()); stack.push(r); }
+    }
+    let mut visited = 0usize;
+    while let Some(dir) = stack.pop() {
+        visited += 1;
+        if visited > MAX_DIRS { break; }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if ft.is_dir() {
+                if !skip_dir(&fname) { stack.push(entry.path()); }
+            } else if let Ok(md) = entry.metadata() {
+                if let Ok(modified) = md.modified() {
+                    files.push((entry.path().to_string_lossy().replace('\\', "/"), modified, md.len()));
+                }
+            }
+        }
+    }
+    if files.is_empty() {
+        return "No files found in the searched folders.".to_string();
+    }
+    files.sort_by(|x, y| y.1.cmp(&x.1)); // newest first
+    let now = std::time::SystemTime::now();
+    let ago = |t: std::time::SystemTime| -> String {
+        let secs = now.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+        if secs < 3600 { format!("{}m ago", secs / 60) }
+        else if secs < 86_400 { format!("{}h ago", secs / 3600) }
+        else { format!("{}d ago", secs / 86_400) }
+    };
+    let mut out = String::from("Recently changed files:\n");
+    for (p, t, _sz) in files.into_iter().take(want) {
+        out.push_str(&format!("  {p}  ({})\n", ago(t)));
     }
     out
 }

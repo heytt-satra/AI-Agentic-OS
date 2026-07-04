@@ -1816,3 +1816,18 @@ flaky in CI; the end-to-end run is the meaningful check.
 **Eight new device capabilities this session** (clipboard, system status, reminders, windows, file
 finder, processes, screenshot, network) - the OS agent now genuinely knows and controls the
 machine: its clipboard, resources, files, windows, processes, screen, and network.
+
+### 2026-07-03 - New capability: recent_files (by modification time)
+**The recency complement to find_files.** find_files searches by name; recent_files answers "what
+did I just work on / download / save" by ranking the user's Desktop/Documents/Downloads (or a given
+folder) newest-first with a human "Xm/Xh/Xd ago". Same bounded, noise-skipping walk (reuses
+skip_dir + the 30k-dir cap) so it stays fast.
+**Wiring:** definition + dispatch + relevant_definitions gating (recent/latest/just saved/worked
+on/newest keywords).
+**Verified:** build clean; cargo test 44 passed; end-to-end - asked for the 5 most recently changed
+files in the project folder and the agent returned exactly the files being edited right now
+(tools.rs 0m ago, BUILD-JOURNAL.md 1m ago, policy.rs 8m ago) - correct recency ranking.
+**Nine new device capabilities this session:** clipboard, system status, reminders, windows, file
+finder, processes, screenshot, network, and recent files. The OS agent's grasp of the actual
+machine - its clipboard, resources, files (by name AND recency), windows, processes, screen, and
+network - is now broad and each piece is verified beyond compiling.
