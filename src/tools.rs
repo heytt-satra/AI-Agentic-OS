@@ -179,6 +179,10 @@ pub fn definitions() -> Vec<Tool> {
         // ── recent files (by modification time)
         f("recent_files", "List the files the user changed most RECENTLY across their Desktop, Documents, and Downloads (or a folder you name), newest first. Use for 'what did I work on recently', 'my latest downloads', 'the file I just saved'. Different from find_files (which searches by name).",
           serde_json::json!({"type":"object","properties":{"folder":{"type":"string","description":"optional folder to look in (natural location like 'downloads' or a path)"},"count":{"type":"integer","description":"how many to return (default 12)"}},"required":[]})),
+
+        // ── voice output
+        f("speak", "Say text out loud through the computer's speakers using the OS text-to-speech voice. Use when the user asks you to 'read this out loud', 'say X', 'read me the news', or wants a hands-free spoken answer. This is separate from the reply text - use it in addition to answering.",
+          str_prop("text", "the text to speak aloud")),
     ]
 }
 
@@ -233,6 +237,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["network", "ip", "wifi", "wi-fi", "online", "internet", "connected", "ssid", "offline"]) {
         keep.extend(["network_info"]);
+    }
+    if hit(&["speak", "say ", "read this", "read it", "read me", "out loud", "aloud", "read the", "tell me out"]) {
+        keep.extend(["speak"]);
     }
     if hit(&["process", "running", "task", "kill", "close ", "quit", "force quit", "frozen", "not responding", "using my", "slow", "end task"]) {
         keep.extend(["list_processes", "kill_process"]);
@@ -420,6 +427,7 @@ pub async fn execute(
         "screenshot_save" => screenshot_save(args_json),
         "network_info" => network_info().await,
         "recent_files" => recent_files(args_json),
+        "speak" => speak(args_json),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1848,6 +1856,39 @@ fn screenshot_save(args: &str) -> String {
     match xcap::image::DynamicImage::ImageRgba8(img).save(&path) {
         Ok(()) => format!("Saved a {w}x{h} screenshot to {path}"),
         Err(e) => format!("ERROR: could not save screenshot to {path}: {e}"),
+    }
+}
+
+// ── voice output ────────────────────────────────────────────────────────────
+// Speak text aloud via the OS TTS. On Windows, System.Speech through PowerShell
+// (no dependency); spawned detached so the turn continues while it speaks. The
+// spawned process lives until the utterance finishes. No-op elsewhere for now.
+fn speak(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { text: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let text = a.text.trim();
+    if text.is_empty() {
+        return "ERROR: nothing to speak.".to_string();
+    }
+    if !cfg!(windows) {
+        return "Voice output is Windows-only for now (I answered in text).".to_string();
+    }
+    // Cap length and escape quotes so the utterance can't break the script.
+    let safe: String = text.replace('\'', " ").chars().take(600).collect();
+    let script = format!(
+        "Add-Type -AssemblyName System.Speech; \
+         (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{safe}')"
+    );
+    match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .spawn()
+    {
+        Ok(_) => {
+            let preview: String = text.chars().take(60).collect();
+            format!("Speaking aloud: \"{preview}{}\"", if text.chars().count() > 60 { "..." } else { "" })
+        }
+        Err(e) => format!("ERROR: could not start voice output: {e}"),
     }
 }
 

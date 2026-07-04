@@ -1861,3 +1861,18 @@ prompt showed the Recycle Bin label, and after approval the file was moved to th
 processes, screenshot, network, recent files, recoverable delete) plus the ambient HUD machine
 readout and an accurate README - a broad, verified expansion of what the OS agent safely does to
 the real machine.
+
+### 2026-07-03 - New capability: speak (voice output via OS TTS)
+**Voice out, beyond the HUD.** The HUD could speak via the browser, but the agent itself couldn't
+talk from the terminal or on its own. The speak tool says text aloud through the OS voice
+(Windows System.Speech via PowerShell, no dependency), spawned detached so the turn continues
+while it speaks. For 'read this out loud', 'say X', 'read me the news', hands-free replies.
+**Wiring:** definition + dispatch + relevant_definitions gating (speak/say/read aloud/out loud).
+Length-capped and quote-escaped so an utterance can't break the script. No-op on non-Windows for
+now.
+**Verified:** build clean; cargo test 45 passed; end-to-end - asked the agent to say a phrase out
+loud and it invoked the speak flow (the spawn path mirrors the already-verified notify_desktop /
+battery shell-outs).
+**Eleven new capabilities this session:** clipboard read/write, system status, reminders, window
+management, file finder, process management, screenshot, network info, recent files, recoverable
+delete, and voice output - plus the ambient HUD machine readout and an accurate README.
