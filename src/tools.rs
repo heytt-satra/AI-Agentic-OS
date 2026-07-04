@@ -201,6 +201,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("secret_remove", "Delete a stored secret by name.",
           str_prop("name", "the name of the secret to delete")),
+        f("generate_password", "Generate a strong random password (from the OS secure RNG, unambiguous characters). Use for 'make me a password', 'generate a secure passphrase'. Offer to save it with secret_set if it's for a specific account.",
+          serde_json::json!({"type":"object","properties":{"length":{"type":"integer","description":"length (default 20; clamped 8-128)"},"symbols":{"type":"boolean","description":"include symbols (default true)"}},"required":[]})),
 
         // ── bookmarks / quick-links
         f("bookmark_add", "Save a named quick-link to a URL, file, or folder so the user can open it later by name. Use for 'bookmark this as X', 'save this link as Y', 'remember my dashboard is <url>'.",
@@ -274,6 +276,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["secret", "password", "passcode", "pin", "api key", "token", "credential", "wifi password", "code for", "vault", "store this key"]) {
         keep.extend(["secret_set", "secret_get", "secret_list", "secret_remove"]);
+    }
+    if hit(&["password", "passphrase", "generate", "random", "strong pass", "make me a pass"]) {
+        keep.extend(["generate_password"]);
     }
     if hit(&["bookmark", "quick link", "quick-link", "save this link", "save this as", "open my", "go to my", "shortcut"]) {
         keep.extend(["bookmark_add", "bookmark_open", "bookmark_list", "bookmark_remove"]);
@@ -478,6 +483,7 @@ pub async fn execute(
         "secret_get" => secret_get(args_json, mem).await,
         "secret_list" => secret_list(mem).await,
         "secret_remove" => secret_remove(args_json, mem).await,
+        "generate_password" => generate_password(args_json),
         "bookmark_add" => bookmark_add(args_json, mem).await,
         "bookmark_open" => bookmark_open(args_json, mem).await,
         "bookmark_list" => bookmark_list(mem).await,
@@ -1971,6 +1977,14 @@ fn media_control(args: &str) -> String {
         if is_volume { std::thread::sleep(std::time::Duration::from_millis(30)); }
     }
     if is_volume && n > 1 { format!("Sent {label} x{n}.") } else { format!("Sent {label}.") }
+}
+
+fn generate_password(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { length: Option<usize>, symbols: Option<bool> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let pw = crate::crypto::random_password(a.length.unwrap_or(20), a.symbols.unwrap_or(true));
+    format!("Generated password: {pw}\n(Want me to save it? Ask me to store it as a secret under a name.)")
 }
 
 // ── encrypted secrets vault ─────────────────────────────────────────────────

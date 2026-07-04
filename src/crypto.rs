@@ -73,9 +73,42 @@ pub fn decrypt(stored: &str) -> String {
     }
 }
 
+/// A cryptographically strong random password from the OS RNG. Uses an
+/// unambiguous character set (no 0/O/1/l/I) plus optional symbols. Length is
+/// clamped to [8, 128].
+pub fn random_password(len: usize, symbols: bool) -> String {
+    use aes_gcm::aead::rand_core::RngCore;
+    let mut charset: Vec<u8> = Vec::new();
+    charset.extend_from_slice(b"ABCDEFGHJKLMNPQRSTUVWXYZ"); // no I, O
+    charset.extend_from_slice(b"abcdefghijkmnpqrstuvwxyz"); // no l
+    charset.extend_from_slice(b"23456789"); // no 0, 1
+    if symbols {
+        charset.extend_from_slice(b"!@#$%^&*-_=+?");
+    }
+    let len = len.clamp(8, 128);
+    let mut buf = vec![0u8; len];
+    OsRng.fill_bytes(&mut buf);
+    buf.into_iter().map(|b| charset[b as usize % charset.len()] as char).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_length_and_charset() {
+        let p = random_password(24, true);
+        assert_eq!(p.chars().count(), 24);
+        // never contains the ambiguous characters we excluded
+        assert!(!p.contains(['0', 'O', '1', 'l', 'I']));
+        // length clamps
+        assert_eq!(random_password(2, false).chars().count(), 8);
+        assert_eq!(random_password(9999, false).chars().count(), 128);
+        // no-symbols variant is alphanumeric only
+        assert!(random_password(40, false).chars().all(|c| c.is_ascii_alphanumeric()));
+        // two draws differ (astronomically unlikely to collide)
+        assert_ne!(random_password(20, true), random_password(20, true));
+    }
 
     #[test]
     fn roundtrip() {

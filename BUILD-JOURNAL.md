@@ -1970,3 +1970,18 @@ whole turn. Verified: the same 'lower then raise the volume' turn that mis-flagg
 returns cleanly, and the net-zero volume test confirms media_control actually fires the keys.
 **Verified:** build clean; cargo test 45 passed; media_control exercised end-to-end (volume down
 then up = no net change, agent confirmed); multi-tool critic false-flag gone.
+
+### 2026-07-03 - New capability: generate_password (+ composes with the vault)
+**Password manager, completed.** generate_password makes a cryptographically strong password from
+the OS secure RNG (crypto::random_password, reusing the aes-gcm OsRng), using an unambiguous
+character set (no 0/O/1/l/I) plus optional symbols, length clamped to [8,128]. It naturally
+composes with the vault: 'make me a password for X and save it' -> generate + secret_set.
+**Wiring:** crypto::random_password + a pure unit test (length, charset exclusions, clamping,
+alphanumeric-only variant, two draws differ); tool definition + dispatch + gating (password/
+passphrase/generate/random keywords).
+**Verified:** build clean; cargo test 46 passed (1 new). End-to-end of the whole password-manager
+flow: asked for a 16-char password stored under 'gentest', then `jarvis secret gentest` printed it
+('nJy6E*yd3VnkeX2h' - 16 chars, unambiguous set, includes a symbol), then removed it. Generate ->
+store -> retrieve -> delete all work together.
+**Capability count this session keeps climbing** - now with a genuine on-device password manager
+(generate + AES-256 vault + deterministic CLI), all verified end to end.
