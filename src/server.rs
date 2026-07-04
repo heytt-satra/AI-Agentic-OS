@@ -161,6 +161,8 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         .collect();
     let nudges: Vec<_> = pending.iter().take(6).map(|(id, t)| serde_json::json!({"id": id, "text": t})).collect();
     let (calib, scored) = st.mem.causal_calibration().await;
+    // Ambient machine readout (off the async executor - the CPU sample sleeps).
+    let (cpu, mem_pct) = tokio::task::spawn_blocking(crate::tools::quick_machine).await.unwrap_or((0.0, 0));
     // Live watch feed: the most recent things Jarvis is seeing/hearing right now.
     let feed: Vec<_> = crate::watch::recent_feed(8)
         .into_iter()
@@ -176,6 +178,7 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         "watching": crate::watch::is_active(),
         "watch": crate::watch::status(),
         "feed": feed,
+        "machine": {"cpu": cpu.round() as i64, "mem": mem_pct},
     }))
 }
 
@@ -747,6 +750,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         <div class="row"><span class="k">Voice</span><span class="v toggle" id="voice">OFF</span></div>
         <div class="row"><span class="k">Last turn</span><span class="v" id="meter" style="color:var(--cyan)">—</span></div>
         <div class="row"><span class="k">Session</span><span class="v" id="session" style="color:var(--cyan)">—</span></div>
+        <div class="row"><span class="k">Machine</span><span class="v" id="machine" style="color:var(--cyan)">—</span></div>
       </div>
       <div class="hint">On your machine. <b>Private by default.</b><br/>Ask me to do anything.</div>
     </aside>
@@ -787,7 +791,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 const log=document.getElementById('log'), input=document.getElementById('in'),
       toolEl=document.getElementById('tool'), connEl=document.getElementById('conn'),
       modelEl=document.getElementById('model'), stateEl=document.getElementById('state'),
-      meterEl=document.getElementById('meter'), sessionEl=document.getElementById('session');
+      meterEl=document.getElementById('meter'), sessionEl=document.getElementById('session'),
+      machineEl=document.getElementById('machine');
 let state='idle';
 let cur=null, curRaw=''; // the live answer bubble + its raw accumulated text
 function plainify(s){return s.replace(/\*\*/g,'').replace(/__/g,'').replace(/—/g,' - ').replace(/–/g,'-').replace(/^#{1,6}\s*/gm,'').replace(/^\s*[\*\-]\s+/gm,'- ');}
@@ -891,6 +896,9 @@ function renderMind(d){
   // Watching status: cyan when live, muted otherwise.
   mindLive.textContent = d.watching ? 'watching' : 'idle';
   mindLive.className = 'live'+(d.watching?' on':'');
+
+  // Ambient machine readout in the left panel.
+  if(d.machine){ machineEl.textContent = 'CPU '+d.machine.cpu+'% · MEM '+d.machine.mem+'%'; }
 
   // Live watch feed (top, only while watching): what Jarvis is seeing/hearing now
   if(d.watching && d.feed && d.feed.length){

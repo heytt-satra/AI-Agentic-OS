@@ -1375,6 +1375,21 @@ fn clipboard_write(args: &str) -> String {
     }
 }
 
+// A cheap CPU% + memory% snapshot for the HUD's ambient machine readout. Kept
+// light (no process enumeration, no battery shell-out) so it's safe to poll every
+// few seconds. Blocking (~200ms for the CPU sample) - call via spawn_blocking.
+pub fn quick_machine() -> (f32, u64) {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+    let cpu = sys.global_cpu_usage();
+    let mem_pct = if sys.total_memory() > 0 { 100 * sys.used_memory() / sys.total_memory() } else { 0 };
+    (cpu, mem_pct)
+}
+
 fn system_status() -> String {
     use sysinfo::System;
     let mut sys = System::new_all();

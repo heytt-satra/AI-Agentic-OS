@@ -1831,3 +1831,14 @@ files in the project folder and the agent returned exactly the files being edite
 finder, processes, screenshot, network, and recent files. The OS agent's grasp of the actual
 machine - its clipboard, resources, files (by name AND recency), windows, processes, screen, and
 network - is now broad and each piece is verified beyond compiling.
+
+### 2026-07-03 - Improvement: ambient machine readout in the HUD
+**A live "Machine" row for the OS HUD.** With the system-awareness tools in, the HUD now shows an
+ambient CPU/MEM readout in the left status panel (cyan, a live-data signal), updating with the 5s
+mind poll - so an always-on OS surface shows the machine's pulse without asking.
+**Done cleanly:** a light quick_machine() helper (CPU% + memory% only - no process enumeration, no
+per-poll battery shell-out) computed via tokio::task::spawn_blocking so its ~200ms CPU sample
+never blocks the async executor. Added as a "machine" field on /mind; the panel renders "CPU X% ·
+MEM Y%". Battery and the full breakdown stay on the system_status tool (on demand).
+**Verified:** build clean; cargo test 44 passed; booted serve and confirmed /mind returns real
+values ({"cpu":8,"mem":64}) and the HUD ships the Machine row + its updater.
