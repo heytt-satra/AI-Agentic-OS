@@ -773,8 +773,20 @@ async fn main() -> Result<()> {
         mem.log("user", input).await;
 
         // ── run the agent on this turn ──────────────────────────────────────
-        match run_turn(&provider, &mem, &mut messages).await {
-            Ok(answer) => println!("Jarvis: {}\n", plainify(&answer)),
+        // Usage instrument (parity with the HUD meter): the ledger delta across
+        // this turn IS the turn's token count, and we time the wall-clock.
+        let (_, tok_before) = mem.usage_total().await;
+        let t0 = std::time::Instant::now();
+        let outcome = run_turn(&provider, &mem, &mut messages).await;
+        let secs_elapsed = t0.elapsed().as_secs_f64();
+        let (_, tok_after) = mem.usage_total().await;
+        match outcome {
+            Ok(answer) => {
+                println!("Jarvis: {}", plainify(&answer));
+                let turn_tok = (tok_after - tok_before).max(0);
+                let tk = if turn_tok > 0 { format!("{turn_tok} tok") } else { "— tok".to_string() };
+                println!("  ({tk} · {secs_elapsed:.1}s)\n");
+            }
             Err(e) => println!("Jarvis: (something went wrong: {e})\n"),
         }
 

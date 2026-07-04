@@ -1626,3 +1626,18 @@ and confirmed the viewer renders the bars, per-run deltas (+25, DOWN -12, +38), 
 -> 100% (climbing)". Cleaned up the seed file after.
 **5.1 is now a full loop:** run -> categorized score + injection red-team -> append to history ->
 `eval trend` to watch it climb. The CI-quality-number pitch is demoable end to end.
+
+### 2026-07-03 - Improvement: REPL usage meter (parity with the HUD)
+**Terminal parity.** The HUD shows per-turn + session tokens/latency; the REPL (where power users
+live) showed nothing. Now each REPL turn prints a compact "(N tok · Xs)" line under the answer.
+**How:** the persistent usage ledger delta across the run_turn call IS the turn's token count (add_usage
+is recorded inside run_turn), and we time the wall-clock - no new bookkeeping, just a before/after
+usage_total() and an Instant.
+**Verified:** build clean; smoke-tested a trivial REPL turn - "Jarvis: 42" then "(21893 tok ·
+7.7s)".
+**Instrument earned its keep immediately:** ~22k tokens for "6 times 7" is high, and since the
+persona trim (CORE ~922) and tool trim already landed, the culprit is almost certainly the MCP
+tool definitions - which are still sent IN FULL every turn (relevant_definitions trims local tools
+but always includes all MCP tools). That's the next real cost lever the meter just made visible:
+trim MCP tools per turn the same way local tools are. Noting it here as the highest-value
+follow-on; not doing it blind right now (needs the live MCP set to test against).
