@@ -42,6 +42,13 @@ fn tuned_proact_secs(base: u64, acted: i64, dismissed: i64) -> u64 {
     ((base as f64 * factor) as u64).clamp(300, 7200)
 }
 
+// Rough session cost in USD from token count, using the same JARVIS_COST_PER_MTOK
+// knob as `jarvis cost` (default $0.30/M). A blended-rate estimate, not a bill.
+fn session_cost_usd(tokens: u64) -> f64 {
+    let rate: f64 = std::env::var("JARVIS_COST_PER_MTOK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.30);
+    tokens as f64 / 1_000_000.0 * rate
+}
+
 #[derive(Clone)]
 struct AppState {
     provider: Provider,
@@ -401,7 +408,10 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             let ms = turn_start.elapsed().as_millis() as u64;
             session_tokens += turn_tokens;
             session_turns += 1;
-            let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms,"session":session_tokens,"turns":session_turns})).await;
+            // Fold HUD tokens into the persistent usage ledger so `jarvis cost`
+            // finally counts the streaming path too.
+            st.mem.add_usage(st.provider.model(), turn_tokens).await;
+            let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms,"session":session_tokens,"turns":session_turns,"usd":session_cost_usd(session_tokens)})).await;
             let _ = send(&mut socket, serde_json::json!({"type":"done"})).await;
             answered = true;
             break;
@@ -424,7 +434,8 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                     let ms = turn_start.elapsed().as_millis() as u64;
                     session_tokens += turn_tokens;
                     session_turns += 1;
-                    let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms,"session":session_tokens,"turns":session_turns})).await;
+                    st.mem.add_usage(st.provider.model(), turn_tokens).await;
+                    let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms,"session":session_tokens,"turns":session_turns,"usd":session_cost_usd(session_tokens)})).await;
                     let _ = send(&mut socket, serde_json::json!({"type":"answer","text":answer})).await;
                 }
                 Err(_) => {
@@ -854,7 +865,7 @@ function connect(){
     else if(m.type==='done'){ speak(plainify(curRaw)); cur=null; curRaw=''; setState('idle'); refreshMind(); }
     else if(m.type==='answer'){ const txt=plainify(m.text); typewriter(addMsg('jarvis','Jarvis'), txt); speak(txt); refreshMind(); }
     else if(m.type==='meter'){ const s=(m.ms/1000).toFixed(1); const tk=m.tokens>0?(m.tokens+' tok'):'— tok'; meterEl.textContent=tk+' · '+s+'s';
-      if(m.session!==undefined){ const st=m.session>=1000?(m.session/1000).toFixed(1)+'k':m.session; sessionEl.textContent=st+' tok · '+m.turns+(m.turns==1?' turn':' turns'); } }
+      if(m.session!==undefined){ const st=m.session>=1000?(m.session/1000).toFixed(1)+'k':m.session; let txt=st+' tok · '+m.turns+(m.turns==1?' turn':' turns'); if(m.usd!==undefined && m.usd>0){ txt+=' · ~$'+(m.usd<0.01?m.usd.toFixed(4):m.usd.toFixed(3)); } sessionEl.textContent=txt; } }
     else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; setState('idle'); }
     else if(m.type==='approval'){ showApproval(m); }
   };

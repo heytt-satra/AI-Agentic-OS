@@ -1595,3 +1595,22 @@ models), but the plumbing and rendering are in and covered end-to-end.
 **Mind panel now shows, live:** what it's watching (SEE/HEAR + confidence), what it's learned,
 its hypotheses/goals (one-click confirm/drop), its causal record + calibration %, and pending
 nudges (act/dismiss) - the full "this looks like a mind" surface the roadmap's 3.1 called for.
+
+### 2026-07-03 - Improvement: HUD tokens now counted in cost + live session $ estimate
+**Two loose ends closed.** (1) `jarvis cost` explicitly noted "the streaming HUD path is not yet
+counted" - stale since 1.3 gave us real HUD token counts. (2) The session meter showed tokens but
+not money.
+**What shipped:** the HUD turn loop now calls mem.add_usage(model, turn_tokens) on every answered
+turn (both the normal and step-limit paths), so the streaming path finally lands in the same
+persistent usage ledger as the REPL/sub-agents/eval/digest. `jarvis cost` and its note were
+updated accordingly (no double-count: the HUD path recorded usage nowhere before). The meter
+event also carries a session USD estimate via session_cost_usd() - the same JARVIS_COST_PER_MTOK
+knob `jarvis cost` uses (default $0.30/M) - and the HUD "Session" row now reads e.g. "3.2k tok · 5
+turns · ~$0.001". Framed as ~estimate (a blended rate, not a bill).
+**Verified:** build clean; cargo test 38 passed; served HUD ships the USD handling; `jarvis cost`
+prints the corrected note and a real total. End-to-end smoke test of the earlier persona refactor
+also passed (a trivial REPL turn answered "51" cleanly on gemini-2.5-flash - no regression from
+the CORE/sections split).
+**Session arc:** every turn is now cheaper (tool trim + persona trim), self-correcting (HUD
+degenerate retry), and fully visible (per-turn + session tokens, latency, and $ - all counted in
+one ledger). Cost is lower AND legible end to end.

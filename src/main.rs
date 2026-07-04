@@ -440,8 +440,8 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some("cost") => {
-            // Pillar 8: token usage accounting (REPL + sub-agent + eval paths;
-            // the streaming HUD path does not report usage yet).
+            // Pillar 8: token usage accounting across every path that records
+            // usage - REPL, sub-agents, eval, digest, and the streaming HUD.
             let (calls, tokens) = mem.usage_total().await;
             let rate: f64 = std::env::var("JARVIS_COST_PER_MTOK").ok()
                 .and_then(|v| v.parse().ok()).unwrap_or(0.30);
@@ -450,7 +450,7 @@ async fn main() -> Result<()> {
             println!("LLM calls recorded: {calls}");
             println!("Total tokens:       {tokens}");
             println!("Est. cost:          ${est:.4}  (at ${rate}/M tokens; set JARVIS_COST_PER_MTOK for your model)");
-            println!("Note: covers REPL, sub-agents, eval, digest. The streaming HUD path is not yet counted.");
+            println!("Note: covers REPL, sub-agents, eval, digest, and the streaming HUD path.");
             return Ok(());
         }
         Some("grant") => {
