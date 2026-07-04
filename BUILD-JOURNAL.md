@@ -1560,3 +1560,19 @@ safety/honesty/self-direction directive; domains are additive.
 **Verified:** build clean; cargo test 38 passed (1 new - trivial msg -> no sections, code msg ->
 P_CODE only, outreach msg -> leads + full OUTREACH method, full_persona has everything, lean base
 has only CORE). is_degenerate and the mind panel unaffected.
+
+### 2026-07-03 - Improvement: session usage instrument in the HUD
+**Rounding out 1.3.** The meter showed only the LAST turn's tokens+latency. With every turn now
+measured (and the persona/tool trims making cost move), the natural next step is a running SESSION
+total so you can watch cumulative usage over a working session, not just the last exchange.
+**What shipped:** handle_socket accumulates session_tokens + session_turns across the whole HUD
+connection; both meter emissions (the normal answer path and the step-limit fallback) now carry
+session + turns alongside the per-turn numbers. New "Session" row in the status panel (cyan, a
+live-data signal per DESIGN.md) shows e.g. "3.2k tok · 5 turns", formatted with a k-suffix past a
+thousand.
+**Verified:** build clean; cargo test 38 passed; booted `jarvis serve` and confirmed the served
+HUD ships both the session row and its meter handler. Purely additive - no behavior change to the
+turn loop, just two counters and an extra field on an event that already fires.
+**Cost-lever recap (this session):** tool trim (1.1) + degenerate retry now on the HUD + persona
+trim (~1,938 tok/trivial turn) + the meter/session instrument to SEE it all. Cost is now both
+lower and visible end-to-end on the primary surface.

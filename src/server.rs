@@ -208,6 +208,10 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
     .await;
 
     let mut messages = vec![Message::system(crate::system_prompt())];
+    // Session usage instrument: cumulative tokens + turn count across this HUD
+    // connection, so cost is visible over the whole session, not just last turn.
+    let mut session_tokens: u64 = 0;
+    let mut session_turns: u64 = 0;
 
     // Continuous-learning spine: load the stable profile so the HUD session, like
     // the REPL, starts already knowing the user.
@@ -389,7 +393,9 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
             st.mem.log("assistant", &answer).await;
             // Content was already streamed as deltas; just finalize the bubble.
             let ms = turn_start.elapsed().as_millis() as u64;
-            let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms})).await;
+            session_tokens += turn_tokens;
+            session_turns += 1;
+            let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms,"session":session_tokens,"turns":session_turns})).await;
             let _ = send(&mut socket, serde_json::json!({"type":"done"})).await;
             answered = true;
             break;
@@ -410,7 +416,9 @@ async fn handle_socket(mut socket: WebSocket, st: AppState) {
                     });
                     st.mem.log("assistant", &answer).await;
                     let ms = turn_start.elapsed().as_millis() as u64;
-                    let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms})).await;
+                    session_tokens += turn_tokens;
+                    session_turns += 1;
+                    let _ = send(&mut socket, serde_json::json!({"type":"meter","tokens":turn_tokens,"ms":ms,"session":session_tokens,"turns":session_turns})).await;
                     let _ = send(&mut socket, serde_json::json!({"type":"answer","text":answer})).await;
                 }
                 Err(_) => {
@@ -705,6 +713,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         <div class="row"><span class="k">Link</span><span class="v" id="conn"><span class="dot">&#9679;</span>CONNECTING</span></div>
         <div class="row"><span class="k">Voice</span><span class="v toggle" id="voice">OFF</span></div>
         <div class="row"><span class="k">Last turn</span><span class="v" id="meter" style="color:var(--cyan)">—</span></div>
+        <div class="row"><span class="k">Session</span><span class="v" id="session" style="color:var(--cyan)">—</span></div>
       </div>
       <div class="hint">On your machine. <b>Private by default.</b><br/>Ask me to do anything.</div>
     </aside>
@@ -745,7 +754,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 const log=document.getElementById('log'), input=document.getElementById('in'),
       toolEl=document.getElementById('tool'), connEl=document.getElementById('conn'),
       modelEl=document.getElementById('model'), stateEl=document.getElementById('state'),
-      meterEl=document.getElementById('meter');
+      meterEl=document.getElementById('meter'), sessionEl=document.getElementById('session');
 let state='idle';
 let cur=null, curRaw=''; // the live answer bubble + its raw accumulated text
 function plainify(s){return s.replace(/\*\*/g,'').replace(/__/g,'').replace(/—/g,' - ').replace(/–/g,'-').replace(/^#{1,6}\s*/gm,'').replace(/^\s*[\*\-]\s+/gm,'- ');}
@@ -829,7 +838,8 @@ function connect(){
     else if(m.type==='retry'){ if(cur){const b=cur.closest('.msg'); if(b)b.remove();} cur=null; curRaw=''; setState('thinking'); }
     else if(m.type==='done'){ speak(plainify(curRaw)); cur=null; curRaw=''; setState('idle'); refreshMind(); }
     else if(m.type==='answer'){ const txt=plainify(m.text); typewriter(addMsg('jarvis','Jarvis'), txt); speak(txt); refreshMind(); }
-    else if(m.type==='meter'){ const s=(m.ms/1000).toFixed(1); const tk=m.tokens>0?(m.tokens+' tok'):'— tok'; meterEl.textContent=tk+' · '+s+'s'; }
+    else if(m.type==='meter'){ const s=(m.ms/1000).toFixed(1); const tk=m.tokens>0?(m.tokens+' tok'):'— tok'; meterEl.textContent=tk+' · '+s+'s';
+      if(m.session!==undefined){ const st=m.session>=1000?(m.session/1000).toFixed(1)+'k':m.session; sessionEl.textContent=st+' tok · '+m.turns+(m.turns==1?' turn':' turns'); } }
     else if(m.type==='error'){ addMsg('err','Error').textContent=m.text; cur=null; setState('idle'); }
     else if(m.type==='approval'){ showApproval(m); }
   };
