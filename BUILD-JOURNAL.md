@@ -1686,3 +1686,26 @@ Other) plus the env knobs. Handled early (before the first-run wizard and provid
 works with no API key configured - a brand-new user can orient before setting anything up.
 **Verified:** build clean; cargo test 39 passed; `jarvis help` with OPENROUTER_API_KEY unset
 prints the full grouped list (no wizard, no key needed).
+
+### 2026-07-03 - New capability: device-awareness tools (clipboard + system status)
+**Building beyond the roadmap - real new device powers.** A personal OS-level agent should be
+able to touch the clipboard and know its own machine's health. Three new tools:
+- clipboard_read: read what the user last copied ("summarize what's in my clipboard", "what did I
+  just copy"). Caps at 4000 chars with a truncation note so a huge copy can't blow the context.
+- clipboard_write: put text ON the clipboard for the user to paste anywhere ("copy this for me").
+  Both use arboard, already a dependency (the activity watcher uses it), so no new native lib.
+- system_status: live CPU load, memory used/total, largest-disk free/total, uptime, and battery
+  level (via a Windows CIM query; None on desktops/other OS). Uses sysinfo - a PURE-RUST crate, so
+  it honors the zero-install rule (no native runtime lib, unlike onnxruntime which BUILD.md bans).
+**Wiring:** added to definitions(), the execute() dispatch, and relevant_definitions gating -
+clipboard/copy/paste keywords pull the clipboard tools; system/cpu/memory/disk/battery/uptime
+pull system_status - so they cost nothing on unrelated turns (consistent with the per-turn tool
+trim).
+**Verified:** builds clean (sysinfo is a chunky first compile, ~30 min, but pure Rust and cached
+after); cargo test 41 passed (2 new: clipboard_write rejects bad args before touching hardware;
+system_status always reports the CPU/Memory/Uptime fields). End-to-end: asked the running agent
+"how's my system doing" and it called system_status and reported real numbers (CPU 14%, 16.6/23.7
+GiB, disk 126/475 GiB free, uptime 51h, battery 93%).
+**Why these:** they're genuinely useful daily (paste-in/paste-out workflows, "am I low on
+disk/battery before this heavy task"), self-contained, and testable - the right kind of new
+surface to add to a device-controlling agent.
