@@ -510,6 +510,13 @@ async fn main() -> Result<()> {
             println!("hear-test is Windows-only (WASAPI loopback).");
             return Ok(());
         }
+        Some("mind") => {
+            // The terminal twin of the HUD mind panel: one consolidated view of
+            // Jarvis's inner state (learnings, goals, causal record + calibration,
+            // nudges, watch) instead of four separate commands.
+            run_mind(&mem).await;
+            return Ok(());
+        }
         Some("reflect") => {
             // Continuous-learning spine, Stage 2: distill durable learnings from
             // recent conversation + activity, on demand (also runs on the heartbeat).
@@ -1285,6 +1292,66 @@ fn upsert_env(content: &str, key: &str, value: &str) -> String {
 // Pillar 7 - proactivity. Mine the second-brain activity log for routines and
 // surface anticipatory suggestions. Read-only in v1 (the trigger engine that acts
 // on these, with approval, is the next step).
+// The terminal twin of the HUD live mind panel (roadmap 3.1). One consolidated
+// snapshot of Jarvis's inner state, reusing the same memory accessors the panel
+// polls, so terminal users get the same "this is a mind" view.
+async fn run_mind(mem: &MemoryHandle) {
+    println!("\nJARVIS - inner state\n====================");
+
+    if watch::is_active() {
+        println!("\nWATCHING NOW");
+        for (kind, marker, text) in watch::recent_feed(6) {
+            let mk = if marker.is_empty() { String::new() } else { format!(" ~{marker}") };
+            let t: String = text.replace('\n', " ").chars().take(80).collect();
+            println!("  [{kind}{mk}] {t}");
+        }
+    }
+
+    println!("\nLEARNED ABOUT YOU");
+    let learns = mem.top_learnings(10).await;
+    if learns.is_empty() {
+        println!("  (nothing yet - I learn as we work)");
+    } else {
+        for (k, t, c) in &learns {
+            println!("  - [{k}] {t} (conf {c:.2})");
+        }
+    }
+
+    println!("\nHYPOTHESES & GOALS");
+    let goals = mem.goals_list().await;
+    if goals.is_empty() {
+        println!("  (none yet - formed during reflection)");
+    } else {
+        for (id, kind, text, status) in goals.iter().take(12) {
+            println!("  #{id} [{kind}/{status}] {text}");
+        }
+    }
+
+    println!("\nCAUSAL RECORD");
+    let cstats = mem.causal_stats().await;
+    if cstats.is_empty() {
+        println!("  (no interventions recorded yet)");
+    } else {
+        for (tool, total, succ) in cstats.iter().take(12) {
+            let rate = if *total > 0 { 100 * succ / total } else { 0 };
+            println!("  {tool:<16} {succ}/{total} ({rate}%)");
+        }
+        let (calib, scored) = mem.causal_calibration().await;
+        if scored > 0 {
+            println!("  prediction calibration: {}% over {scored} scored", (calib * 100.0).round() as i64);
+        }
+    }
+
+    let pending = mem.nudges_pending().await;
+    if !pending.is_empty() {
+        println!("\nPENDING NUDGES");
+        for (_, text) in pending.iter().take(6) {
+            println!("  - {text}");
+        }
+    }
+    println!();
+}
+
 async fn run_suggest(mem: &MemoryHandle) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

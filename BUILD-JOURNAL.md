@@ -1662,3 +1662,18 @@ and the big-server savings can't be shown locally, but the decision logic is uni
 big-setup win is exactly what the meter pointed at.
 **Cost-lever set now complete:** local tools (1.1), persona (CORE+sections), AND MCP tools are all
 trimmed per turn - a trivial turn now carries only what it can actually use.
+
+### 2026-07-03 - Improvement: `jarvis mind` - the terminal twin of the live mind panel
+**Terminal parity for 3.1.** The HUD mind panel gives a consolidated inner-state view, but
+terminal users had to run four separate commands (learnings, goals, causal, nudges) and still
+couldn't see calibration or the live watch feed in one place. `jarvis mind` now prints the whole
+snapshot at once: what it's watching now (SEE/HEAR + trust markers, when active), what it's
+learned (with confidence), its hypotheses/goals with status, its causal record + prediction
+calibration %, and pending nudges - reusing the exact same memory accessors the /mind endpoint
+polls, so the two views can't drift.
+**Verified:** build clean; cargo test 39 passed; ran `jarvis mind` against the real DB and it
+printed the full consolidated state (7 learnings with confidence, 3 goals/hypotheses with status,
+causal empty, a pending nudge) - correct and readable.
+**Consistency:** same data, two surfaces (HUD panel + terminal), one set of accessors. The
+scattered learnings/goals/causal/nudges commands still exist for focused views; `jarvis mind` is
+the at-a-glance whole.
