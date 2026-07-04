@@ -1752,3 +1752,21 @@ AppActivate call.
 **Round summary:** four genuinely new device capabilities added and verified this session -
 clipboard read/write, system status, background reminders, and window management - each gated per
 turn so they cost nothing when unrelated.
+
+### 2026-07-03 - New capability: file finder (find_files)
+**"Where's my resume?" - answered.** A daily need the agent couldn't do well (list_dir is
+one-level; the model can't grep a drive). find_files searches by a piece of the filename across
+the user's Desktop, Documents, Downloads, and home folder (or a folder you name), recursively.
+**Safe + fast:** a bounded DFS with hard caps (<=30k dirs visited, <=40 results) so a huge tree
+can't hang a turn, and a skip list (node_modules, target, .git, AppData, Program Files, caches,
+dotfolders) so it returns USER files, not build/system noise. Results sorted biggest-first (the
+real document usually beats stray fragments), each with a human size.
+**Wiring:** definition + dispatch + relevant_definitions gating (find/where's/locate/my file/...).
+**Verified:** build clean; cargo test 43 passed (2 new - skip_dir excludes build/hidden dirs;
+find_files locates a file under a subfolder and correctly SKIPS a same-named copy inside a .git
+dir, returning exactly one match). End-to-end: asked the agent to find files named 'jarvis' in
+the project folder and it returned the real matches (jarvis.db, -wal, -shm, jarvis-dataset.jsonl).
+**Five new device capabilities this session:** clipboard read/write, system status, background
+reminders, window management, and file finder - each gated per turn (zero cost when unrelated),
+each built to the zero-install rule (pure-Rust deps or PowerShell, no native runtime libs), and
+each verified beyond compiling.

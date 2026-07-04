@@ -156,6 +156,10 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("focus_window", "Bring an open window to the front by a piece of its app name or title (e.g. 'chrome', 'notepad', part of a document title). Use for 'switch to X', 'bring up my browser', 'go to the Word document'. Then you can operate it.",
           str_prop("name", "part of the app name or window title to focus")),
+
+        // ── file finder
+        f("find_files", "Find files on this machine by a piece of their NAME (e.g. 'resume', 'budget', '.pdf'). Searches the user's Desktop, Documents, Downloads, and home folder (or a folder you name) recursively, skipping system/build noise. Use for 'where's my X', 'find my file called Y', 'do I have a file about Z'. Returns matching paths.",
+          serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"part of the filename to match (case-insensitive)"},"folder":{"type":"string","description":"optional folder to search instead (natural location like 'downloads' or a path)"}},"required":["name"]})),
     ]
 }
 
@@ -192,6 +196,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["window", "switch to", "bring up", "what's open", "whats open", "have open", "focus", "minimize", "alt tab", "front"]) {
         keep.extend(["list_windows", "focus_window"]);
+    }
+    if hit(&["find", "where's", "wheres", "where is", "locate", "my file", "a file", "file called", "file named", "search my", "do i have"]) {
+        keep.extend(["find_files"]);
     }
     if hit(&["clipboard", "copy", "copied", "paste", "clip "]) {
         keep.extend(["clipboard_read", "clipboard_write"]);
@@ -375,6 +382,7 @@ pub async fn execute(
         "remind_cancel" => remind_cancel(args_json, mem).await,
         "list_windows" => list_windows(),
         "focus_window" => focus_window(args_json),
+        "find_files" => find_files(args_json),
         "browse_url" => browse_url(args_json).await,
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
@@ -1524,6 +1532,86 @@ fn focus_window(args: &str) -> String {
         }
         Err(e) => format!("ERROR: could not focus window: {e}"),
     }
+}
+
+// ── file finder ─────────────────────────────────────────────────────────────
+// Directory names never worth descending into - build output, VCS, caches, and
+// the giant AppData tree - so a search stays fast and returns user files.
+fn skip_dir(name: &str) -> bool {
+    let n = name.to_lowercase();
+    matches!(n.as_str(),
+        "node_modules" | ".git" | "target" | "appdata" | "$recycle.bin" | ".cache"
+        | "__pycache__" | ".venv" | "venv" | ".next" | "dist" | "build" | ".gradle"
+        | "windows" | "program files" | "program files (x86)" | ".rustup" | ".cargo"
+    ) || n.starts_with('.')
+}
+
+fn find_files(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { name: String, folder: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let needle = a.name.trim().to_lowercase();
+    if needle.is_empty() {
+        return "ERROR: give part of a filename to search for.".to_string();
+    }
+
+    // Roots: an explicit folder, else the common user locations.
+    let roots: Vec<std::path::PathBuf> = match a.folder.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(f) => vec![std::path::PathBuf::from(resolve_path(f))],
+        None => [dirs::desktop_dir(), dirs::document_dir(), dirs::download_dir(), dirs::home_dir()]
+            .into_iter().flatten().collect(),
+    };
+
+    const MAX_RESULTS: usize = 40;
+    const MAX_DIRS: usize = 30_000; // hard cap so a huge tree can't hang the turn
+    let mut results: Vec<(String, u64)> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    let mut seen_roots: Vec<std::path::PathBuf> = Vec::new();
+    for r in roots {
+        if r.is_dir() && !seen_roots.contains(&r) {
+            seen_roots.push(r.clone());
+            stack.push(r);
+        }
+    }
+    let mut dirs_visited = 0usize;
+    'walk: while let Some(dir) = stack.pop() {
+        dirs_visited += 1;
+        if dirs_visited > MAX_DIRS {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if ft.is_dir() {
+                if !skip_dir(&fname) {
+                    stack.push(path);
+                }
+            } else if fname.to_lowercase().contains(&needle) {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                results.push((path.to_string_lossy().replace('\\', "/"), size));
+                if results.len() >= MAX_RESULTS {
+                    break 'walk;
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return format!("No files matching '{}' found in the searched folders.", a.name);
+    }
+    // Biggest first tends to surface the "real" document over stray fragments.
+    results.sort_by(|x, y| y.1.cmp(&x.1));
+    let kb = |b: u64| if b >= 1_048_576 { format!("{:.1} MB", b as f64 / 1_048_576.0) } else { format!("{} KB", (b / 1024).max(1)) };
+    let mut out = format!("Found {} file(s) matching '{}':\n", results.len(), a.name);
+    for (p, sz) in &results {
+        out.push_str(&format!("  {p}  ({})\n", kb(*sz)));
+    }
+    if results.len() >= MAX_RESULTS {
+        out.push_str("  (showing the first 40 matches; narrow the name for fewer)\n");
+    }
+    out
 }
 
 // Best-effort battery read. sysinfo doesn't expose battery, so on Windows we ask
@@ -3015,6 +3103,32 @@ mod tests {
         // exercises real hardware read; must always produce the labeled fields
         let s = system_status();
         assert!(s.contains("CPU:") && s.contains("Memory:") && s.contains("Uptime:"));
+    }
+
+    #[test]
+    fn skip_dir_excludes_build_and_hidden() {
+        assert!(skip_dir("node_modules") && skip_dir("target") && skip_dir(".git") && skip_dir("AppData"));
+        assert!(!skip_dir("Documents") && !skip_dir("my project"));
+    }
+
+    #[test]
+    fn find_files_locates_a_file_in_a_given_folder() {
+        // build a temp tree: root/sub/needle_findme.txt and a skipped .git dir
+        let root = std::env::temp_dir().join("jarvis_find_test_9f2a");
+        let sub = root.join("sub");
+        let _ = std::fs::create_dir_all(&sub);
+        let _ = std::fs::create_dir_all(root.join(".git"));
+        let _ = std::fs::write(sub.join("needle_findme.txt"), b"hi");
+        let _ = std::fs::write(root.join(".git").join("needle_findme.txt"), b"noise");
+
+        let args = format!(r#"{{"name":"needle_findme","folder":"{}"}}"#, root.to_string_lossy().replace('\\', "/"));
+        let out = find_files(&args);
+        assert!(out.contains("needle_findme.txt"), "got: {out}");
+        assert!(out.contains("sub"), "should find the one under sub/");
+        // the copy inside .git must be skipped -> exactly one match
+        assert!(out.contains("Found 1 file"), "got: {out}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
