@@ -198,6 +198,12 @@ pub fn definitions() -> Vec<Tool> {
         f("media_control", "Control media playback and volume via the keyboard media keys: play/pause, next/previous track, stop, volume up/down/mute. Works with whatever is playing (Spotify, YouTube, a video, etc.). Use for 'pause the music', 'next song', 'turn it up', 'mute'. Pass 'times' to repeat a volume step.",
           serde_json::json!({"type":"object","properties":{"action":{"type":"string","description":"one of: play_pause, next, previous, stop, volume_up, volume_down, mute"},"times":{"type":"integer","description":"repeat count for volume_up/volume_down (default 1)"}},"required":["action"]})),
 
+        // ── journal / daily notes
+        f("journal_add", "Append a timestamped entry to the user's daily journal (a markdown file per day in Documents/jarvis-journal). Use for 'note in my journal', 'jot this down', 'add to my log', 'journal that ...'. Different from learn (which is facts you remember to change your behavior) - this is the user's own diary/log.",
+          str_prop("text", "the journal entry to add")),
+        f("journal_read", "Read back the user's journal for a day. Use for 'what's in my journal', 'read my journal', 'what did I journal yesterday'. Defaults to today; pass a date (YYYY-MM-DD) or 'yesterday' for another day.",
+          serde_json::json!({"type":"object","properties":{"date":{"type":"string","description":"optional: 'today' (default), 'yesterday', or a YYYY-MM-DD date"}},"required":[]})),
+
         // ── encrypted secrets vault
         f("secret_set", "Save a secret (password, PIN, API key, wifi password, door code) ENCRYPTED on this device, under a short name. Use when the user says 'remember my X password', 'store this key as Y'. Stored with AES-256 so a stolen database file can't read it.",
           serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"a short name to file it under, e.g. 'wifi', 'github token'"},"value":{"type":"string","description":"the secret value to encrypt and store"}},"required":["name","value"]})),
@@ -288,6 +294,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     }
     if hit(&["music", "song", "track", "play", "pause", "volume", "louder", "quieter", "mute", "next", "skip", "media", "spotify", "turn it up", "turn it down"]) {
         keep.extend(["media_control"]);
+    }
+    if hit(&["journal", "diary", "jot", "log that", "note in my", "my log", "dear diary", "add to my log"]) {
+        keep.extend(["journal_add", "journal_read"]);
     }
     if hit(&["secret", "password", "passcode", "pin", "api key", "token", "credential", "wifi password", "code for", "vault", "store this key"]) {
         keep.extend(["secret_set", "secret_get", "secret_list", "secret_remove"]);
@@ -502,6 +511,8 @@ pub async fn execute(
         "recent_files" => recent_files(args_json),
         "speak" => speak(args_json),
         "media_control" => media_control(args_json),
+        "journal_add" => journal_add(args_json),
+        "journal_read" => journal_read(args_json),
         "secret_set" => secret_set(args_json, mem).await,
         "secret_get" => secret_get(args_json, mem).await,
         "secret_list" => secret_list(mem).await,
@@ -2063,6 +2074,62 @@ fn generate_password(args: &str) -> String {
     let a: A = serde_json::from_str(args).unwrap_or_default();
     let pw = crate::crypto::random_password(a.length.unwrap_or(20), a.symbols.unwrap_or(true));
     format!("Generated password: {pw}\n(Want me to save it? Ask me to store it as a secret under a name.)")
+}
+
+// ── journal / daily notes ───────────────────────────────────────────────────
+fn journal_dir() -> std::path::PathBuf {
+    let base = dirs::document_dir().or_else(dirs::home_dir).unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("jarvis-journal")
+}
+
+fn journal_add(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { text: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let text = a.text.trim();
+    if text.is_empty() {
+        return "ERROR: nothing to journal.".to_string();
+    }
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let time = now.format("%H:%M").to_string();
+    let dir = journal_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return format!("ERROR: could not create the journal folder: {e}");
+    }
+    let file = dir.join(format!("{date}.md"));
+    // Add a date header the first time the day's file is created.
+    let new_day = !file.exists();
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        Ok(mut f) => {
+            if new_day {
+                let _ = writeln!(f, "# {date}\n");
+            }
+            match writeln!(f, "- {time}  {text}") {
+                Ok(()) => format!("Added to your journal for {date}: \"{}\"", text.chars().take(80).collect::<String>()),
+                Err(e) => format!("ERROR writing the journal: {e}"),
+            }
+        }
+        Err(e) => format!("ERROR opening the journal: {e}"),
+    }
+}
+
+fn journal_read(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { date: Option<String> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let today = chrono::Local::now();
+    let date = match a.date.as_deref().map(|s| s.trim().to_lowercase()).as_deref() {
+        None | Some("") | Some("today") => today.format("%Y-%m-%d").to_string(),
+        Some("yesterday") => (today - chrono::Duration::days(1)).format("%Y-%m-%d").to_string(),
+        Some(d) => d.to_string(), // assume a YYYY-MM-DD the caller supplied
+    };
+    let file = journal_dir().join(format!("{date}.md"));
+    match std::fs::read_to_string(&file) {
+        Ok(s) if !s.trim().is_empty() => format!("Your journal for {date}:\n\n{}", s.trim()),
+        _ => format!("No journal entries for {date}."),
+    }
 }
 
 // ── encrypted secrets vault ─────────────────────────────────────────────────

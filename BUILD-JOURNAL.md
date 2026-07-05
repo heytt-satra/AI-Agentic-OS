@@ -2112,3 +2112,16 @@ with recall_activity. Broadened the keywords ('conversation', 'talked about', 'd
 history', ...); re-test: the agent called recall_conversation and returned 'Bluejay-Meridian' from
 past sessions. cargo test 46 passed. Lesson reinforced: per-turn tool gating must match how users
 actually phrase things, or a good tool stays invisible.
+
+### 2026-07-05 - New capability: journal / daily notes
+**A diary the agent keeps for you.** journal_add appends a timestamped entry to a per-day markdown
+file in Documents/jarvis-journal (adds a '# date' header on the first entry of a day); journal_read
+reads back today / yesterday / a given YYYY-MM-DD. Distinct from learn (facts the agent remembers to
+change its behavior) and secrets (encrypted values) - this is the user's OWN log. Uses chrono::Local
+(already a dep) for correct local date/time.
+**Wiring:** definitions + dispatch + gating (journal/diary/jot/log that/note in my keywords).
+**Verified end-to-end:** 'jot this in my journal: shipped the at-rest encryption today' wrote the
+exact file - Documents/jarvis-journal/2026-07-05.md containing '# 2026-07-05' + '- 22:50  shipped
+the at-rest encryption today, feeling good'. Note: on this machine Documents is OneDrive-redirected
+and dirs::document_dir() correctly followed it (the file landed in OneDrive/Documents, not a fake
+~/Documents) - good, that's the real Documents folder. cargo test 46 passed. Test entry cleaned up.
