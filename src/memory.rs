@@ -904,13 +904,24 @@ fn open_db(path: &str) -> Result<Connection> {
             let enc = crate::crypto::encrypt(args);
             let _ = conn.execute("UPDATE audit SET args=?1 WHERE id=?2", params![enc, id]);
         }
+        // And legacy ingested document chunks (the user's own file contents).
+        let plain_docs: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare("SELECT id, chunk FROM documents WHERE chunk NOT LIKE 'enc:%'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        for (id, chunk) in &plain_docs {
+            let enc = crate::crypto::encrypt(chunk);
+            let _ = conn.execute("UPDATE documents SET chunk=?1 WHERE id=?2", params![enc, id]);
+        }
         // Clear the plaintext keyword index (semantic search covers recall now).
         let fts_n: i64 = conn.query_row("SELECT count(*) FROM mem_fts", [], |r| r.get(0)).unwrap_or(0);
         if fts_n > 0 {
             let _ = conn.execute("DELETE FROM mem_fts", []);
         }
-        if !plain.is_empty() || !plain_audit.is_empty() {
-            eprintln!("[memory] encrypted {} message(s) + {} audit row(s) at rest", plain.len(), plain_audit.len());
+        if !plain.is_empty() || !plain_audit.is_empty() || !plain_docs.is_empty() {
+            eprintln!("[memory] encrypted {} message(s) + {} audit + {} doc chunk(s) at rest",
+                plain.len(), plain_audit.len(), plain_docs.len());
         }
     }
     Ok(conn)
@@ -1281,10 +1292,12 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
             let mut n = 0usize;
             if let Some(emb) = embedder {
                 for ch in &chunks {
+                    // Embed the plaintext, but store the chunk encrypted at rest
+                    // (ingested files can be sensitive; the vector drives search).
                     if let Ok(v) = emb.embed(ch) {
                         if conn.execute(
                             "INSERT INTO documents (ts, source, chunk, vec) VALUES (?1, ?2, ?3, ?4)",
-                            params![now_secs(), source, ch, vec_to_blob(&v)],
+                            params![now_secs(), source, crate::crypto::encrypt(ch), vec_to_blob(&v)],
                         ).is_ok() {
                             n += 1;
                         }
@@ -1312,7 +1325,7 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                                 }) {
                                     for (s, c, b) in rows.filter_map(|x| x.ok()) {
                                         vecs.push(blob_to_vec(&b));
-                                        meta.push((s, c));
+                                        meta.push((s, crate::crypto::decrypt(&c)));
                                     }
                                 }
                             }
@@ -1331,7 +1344,7 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                         }) {
                             let mut scored: Vec<(f32, String, String)> = rows
                                 .filter_map(|x| x.ok())
-                                .map(|(s, c, b)| (cosine(&qv, &blob_to_vec(&b)), s, c))
+                                .map(|(s, c, b)| (cosine(&qv, &blob_to_vec(&b)), s, crate::crypto::decrypt(&c)))
                                 .collect();
                             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                             for (score, s, c) in scored.into_iter().take(k.max(1) as usize) {

@@ -2079,3 +2079,19 @@ product, a stolen jarvis.db shouldn't be readable. Now it isn't.
   the next fix" - now it describes what's encrypted).
 **Note:** learnings/goals/nudges stay plaintext by design - they're the agent's own distilled
 knowledge it reads and reasons over every turn, not raw captured secrets.
+
+### 2026-07-05 - Privacy: ingested documents encrypted at rest too
+**Completing the at-rest encryption story.** After messages + audit, the last readable-content
+store was the documents table - chunks of the user's OWN ingested files (notes, PDFs, code), often
+the MOST sensitive data. Same embedding-search pattern as messages, so the same fix: doc_ingest now
+embeds the plaintext but stores the chunk as AES-256 ciphertext; both DocSearch read paths (the
+brute-force cosine scan and the cached HNSW/ANN index) decrypt the chunk on the way out. The
+startup migration also encrypts legacy document chunks.
+**Verified end-to-end:** ingested a file stating 'Zephyr Industries revenue was 4.2 million...',
+then search_docs returned that exact sentence (RAG unaffected), while the plaintext 'Zephyr
+Industries' is 0 hits in the DB file - the ingested content is encrypted at rest. cargo test 46
+passed.
+**At-rest encryption now covers:** conversations, tool-call args, the activity log, the secrets
+vault, AND ingested documents - every store of raw captured/user content. A stolen jarvis.db is
+unreadable; search and recall still work because they run on lossy on-device vectors. Only the
+agent's own distilled knowledge (learnings/goals/nudges) stays plaintext, by design.
