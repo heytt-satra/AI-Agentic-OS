@@ -35,6 +35,10 @@ Safe and private by default
   ones that could damage the OS, delete data, spend money, or kill a process; it
   remembers your choice. Untrusted web/file content is treated as data, never
   instructions.
+- Encrypted at rest: your conversations, tool-call arguments, activity log,
+  secrets vault, and ingested documents are stored as AES-256 ciphertext keyed to
+  this machine, so a stolen database file is unreadable. Search and recall still
+  work because they run on lossy on-device embeddings, not readable text.
 - `jarvis privacy` shows exactly what is stored and what (if anything) leaves the
   device. With a local model, nothing does.
 
