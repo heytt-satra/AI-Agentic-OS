@@ -2050,3 +2050,32 @@ Top processes aggregated by name with counts and per-row KILL buttons (chrome.ex
 Code.exe x14 34% CPU, ...), and a Windows list with FOCUS buttons. DESIGN.md-faithful (amber system,
 cyan live data, red only on Kill hover). The left rail's ambient machine widget showed CPU 36% ·
 MEM 67% simultaneously. Both right-rail surfaces - Mind and Device - are now real and verified.
+
+### 2026-07-05 - Privacy: message log + audit args now encrypted at rest
+**Closing the real plaintext gap I found while building the secrets vault.** The vault encrypted
+its own column, but a secret TYPED INTO CHAT still landed plaintext in the messages table, and
+secret_set's value landed plaintext in the audit table (tool args). For a "provably private"
+product, a stolen jarvis.db shouldn't be readable. Now it isn't.
+**What shipped:** message content and audit tool-args are encrypted with the existing AES-256-GCM
+(machine-keyed) BEFORE they touch the DB - same proven pattern already used for the activity log.
+- Log path encrypts content; audit path encrypts args. Reads (recent_dialog, semantic_search,
+  all_messages, all_audit, embedding backfill) decrypt.
+- The key question was SEARCH: relevance recall is EMBEDDING-based (semantic_search scores the
+  query against stored float vectors), and the vectors are computed from plaintext at log time but
+  are lossy and NOT reversible to text - so we stopped mirroring readable text into the FTS index
+  entirely. FTS (keyword) is only the fallback when embeddings are unavailable; it degrades to
+  empty rather than leaking.
+- One-time idempotent migration on startup encrypts legacy plaintext rows (WHERE content/args NOT
+  LIKE 'enc:%') in both tables and DELETEs the old plaintext FTS index. Backward compatible:
+  decrypt() passes non-'enc:' strings through, so any un-migrated row still reads.
+**Verified end-to-end, not just built:**
+- Migration ran: "encrypted 1604 message(s)" then "1156 audit row(s)" on the real DB.
+- After a WAL checkpoint, the test secret 'hunter2roost' (which had been in BOTH messages and audit
+  args) is now 0 hits in plaintext across all DB files; 2600+ 'enc:' blobs present.
+- CROSS-SESSION RECALL STILL WORKS: session 1 said "codename is Bluejay-Meridian"; a FRESH session
+  2 process recalled it exactly - proving encrypt-at-rest is transparent to the agent's memory
+  (decrypted on read, embeddings drive search).
+- cargo test 46 passed. `jarvis privacy` updated (it literally used to say "at-rest encryption is
+  the next fix" - now it describes what's encrypted).
+**Note:** learnings/goals/nudges stay plaintext by design - they're the agent's own distilled
+knowledge it reads and reasons over every turn, not raw captured secrets.

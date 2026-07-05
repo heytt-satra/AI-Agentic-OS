@@ -1149,7 +1149,10 @@ fn run_privacy() {
     println!("Stored locally (this machine only): {db}");
     println!("  - conversations, tool-call audit, durable tasks, leads, saved agents,");
     println!("    document embeddings, and the activity log (windows + clipboard).");
-    println!("  - NOTE: currently stored UNENCRYPTED (at-rest encryption is the next fix).");
+    println!("  - ENCRYPTED AT REST (AES-256): message content, tool-call args, the");
+    println!("    activity log, and the secrets vault are stored as ciphertext keyed to");
+    println!("    this machine, so a stolen database file is unreadable. Search still");
+    println!("    works via on-device embeddings (vectors, not readable text).");
     println!("\nSecond-brain tracking: {}", if tracking { "ON (foreground window + clipboard)" } else { "OFF" });
     println!("  toggle with JARVIS_TRACKING=off");
     println!("\nWhat leaves this device:");

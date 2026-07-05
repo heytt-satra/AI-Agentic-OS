@@ -880,16 +880,38 @@ fn open_db(path: &str) -> Result<Connection> {
     // errors if the column already exists, so we ignore the result.
     let _ = conn.execute("ALTER TABLE nudges ADD COLUMN reaction INTEGER NOT NULL DEFAULT 0", []);
 
-    // One-time backfill: if the FTS index is empty but we already have messages
-    // (from before this feature existed), index them now.
-    let fts_n: i64 = conn.query_row("SELECT count(*) FROM mem_fts", [], |r| r.get(0)).unwrap_or(0);
-    let msg_n: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap_or(0);
-    if fts_n == 0 && msg_n > 0 {
-        conn.execute(
-            "INSERT INTO mem_fts(rowid, role, content) SELECT id, role, content FROM messages",
-            [],
-        )
-        .context("backfilling FTS index")?;
+    // One-time privacy migration: encrypt any legacy PLAINTEXT message rows (those
+    // written before at-rest encryption) and drop the plaintext FTS index, which
+    // used to hold readable copies of every message. Idempotent: only rows not
+    // already 'enc:' are touched, so re-running (or a mix of old/new rows) is safe.
+    {
+        let plain: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare("SELECT id, content FROM messages WHERE content NOT LIKE 'enc:%'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        for (id, content) in &plain {
+            let enc = crate::crypto::encrypt(content);
+            let _ = conn.execute("UPDATE messages SET content=?1 WHERE id=?2", params![enc, id]);
+        }
+        // Same for legacy audit args (a stored secret's value, file contents, etc.).
+        let plain_audit: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare("SELECT id, args FROM audit WHERE args NOT LIKE 'enc:%'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        for (id, args) in &plain_audit {
+            let enc = crate::crypto::encrypt(args);
+            let _ = conn.execute("UPDATE audit SET args=?1 WHERE id=?2", params![enc, id]);
+        }
+        // Clear the plaintext keyword index (semantic search covers recall now).
+        let fts_n: i64 = conn.query_row("SELECT count(*) FROM mem_fts", [], |r| r.get(0)).unwrap_or(0);
+        if fts_n > 0 {
+            let _ = conn.execute("DELETE FROM mem_fts", []);
+        }
+        if !plain.is_empty() || !plain_audit.is_empty() {
+            eprintln!("[memory] encrypted {} message(s) + {} audit row(s) at rest", plain.len(), plain_audit.len());
+        }
     }
     Ok(conn)
 }
@@ -904,19 +926,20 @@ fn now_secs() -> i64 {
 fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::ann::AnnCache, cmd: MemCmd) {
     match cmd {
         MemCmd::Log { role, content } => {
+            // Encrypt message content AT REST (privacy: a stolen DB file is
+            // unreadable). Search still works because the semantic vector is
+            // computed from the PLAINTEXT and stored as a lossy float blob that
+            // can't be reversed to text - so we no longer mirror readable text
+            // into the FTS index at all.
+            let enc = crate::crypto::encrypt(&content);
             if conn
                 .execute(
                     "INSERT INTO messages (ts, role, content) VALUES (?1, ?2, ?3)",
-                    params![now_secs(), role, content],
+                    params![now_secs(), role, enc],
                 )
                 .is_ok()
             {
                 let id = conn.last_insert_rowid();
-                // Mirror into the FTS index (keyword fallback).
-                let _ = conn.execute(
-                    "INSERT INTO mem_fts(rowid, role, content) VALUES (?1, ?2, ?3)",
-                    params![id, role, content],
-                );
                 // Store a semantic vector for dialog turns (skip tool spam).
                 if let Some(emb) = embedder {
                     if role == "user" || role == "assistant" {
@@ -931,9 +954,12 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
             }
         }
         MemCmd::LogAudit { tool, args, decision, ok } => {
+            // Encrypt the args at rest - they can hold sensitive values (a secret
+            // being stored, file contents in write_file, etc.). tool/decision stay
+            // readable so `jarvis suggest` and audits still work without decryption.
             let _ = conn.execute(
                 "INSERT INTO audit (ts, tool, args, decision, ok) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![now_secs(), tool, args, decision, ok as i64],
+                params![now_secs(), tool, crate::crypto::encrypt(&args), decision, ok as i64],
             );
         }
         MemCmd::Count { reply } => {
@@ -1671,7 +1697,7 @@ fn query_tasks(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
 fn query_all_messages(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
     let mut stmt = conn.prepare("SELECT ts, role, content FROM messages ORDER BY id ASC")?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, crate::crypto::decrypt(&r.get::<_, String>(2)?))))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)
@@ -1682,7 +1708,7 @@ fn query_all_audit(conn: &Connection) -> Result<Vec<(i64, String, String, bool)>
     let mut stmt = conn.prepare("SELECT ts, tool, args, ok FROM audit ORDER BY id ASC")?;
     let rows = stmt
         .query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)? != 0))
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, crate::crypto::decrypt(&r.get::<_, String>(2)?), r.get::<_, i64>(3)? != 0))
         })?
         .filter_map(|r| r.ok())
         .collect();
@@ -1771,6 +1797,7 @@ fn backfill_embeddings(conn: &Connection, emb: &Embedder) {
     }
     eprintln!("[memory] backfilling {} embeddings (one time)...", rows.len());
     for (id, content) in rows {
+        let content = crate::crypto::decrypt(&content); // decrypt at-rest content before embedding
         if let Ok(v) = emb.embed(&content) {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO embeddings(rowid, vec) VALUES (?1, ?2)",
@@ -1802,6 +1829,7 @@ fn semantic_search(conn: &Connection, emb: &Embedder, query: &str, n: i64) -> Re
     let mut seen = std::collections::HashSet::new();
     for row in rows {
         let (role, content, blob) = row?;
+        let content = crate::crypto::decrypt(&content); // stored encrypted at rest
         if !seen.insert(content.clone()) {
             continue; // dedupe identical content
         }
@@ -1903,7 +1931,7 @@ fn query_recent_dialog(conn: &Connection, n: i64) -> Result<Vec<(String, String)
          ORDER BY id DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![n], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((row.get::<_, String>(0)?, crate::crypto::decrypt(&row.get::<_, String>(1)?)))
     })?;
     let mut out = Vec::new();
     for r in rows {
