@@ -72,6 +72,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]})),
         f("ingest_path", "Read a file or all the text/code/PDF files in a folder, split them into chunks, embed them locally, and store them so you can semantically search them later. Use to load the user's documents, notes, PDFs, or a codebase into Jarvis's knowledge.", str_prop("path", "file or folder path")),
         f("search_docs", "Semantically search the files you have ingested with ingest_path and return the most relevant chunks with their source. Use to answer questions from the user's own documents/code.", str_prop("query", "what to look for")),
+        f("recall_conversation", "Semantically search your PAST CONVERSATIONS with this user (across all previous sessions) and return the most relevant messages. Use when the user asks 'what did we discuss about X', 'what did I tell you earlier about Y', 'remind me what we decided on Z'. Different from recall_activity (their app usage) and search_docs (their files) - this searches what you two have TALKED about.",
+          serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"what to look for in past conversations"},"count":{"type":"integer","description":"how many messages to return (default 6)"}},"required":["query"]})),
         f("read_image", "Look at an IMAGE FILE on disk (png/jpg/etc.) with the vision model and read its text or describe it. Use for 'what does this receipt/screenshot say', 'read the text in photo.png', 'describe this image'. Different from see_screen (the live screen) - this is a saved file.",
           serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"path to the image file (natural locations like 'desktop/shot.png' work)"},"question":{"type":"string","description":"optional: what to look for; defaults to reading all text and describing it"}},"required":["path"]})),
         f("transcribe_file", "Transcribe an audio or video FILE to text (mp3, m4a, wav, mp4, etc.). Use for 'transcribe this recording', 'what does this voice memo say', 'get the text of this meeting'. Needs a transcription key (GROQ_API_KEY). Different from watch (live audio) - this is a saved file.",
@@ -317,6 +319,9 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     if hit(&["document", "pdf", "ingest", "my files", "my notes", "search my", "knowledge"]) {
         keep.extend(["ingest_path", "search_docs"]);
     }
+    if hit(&["conversation", "we discuss", "we talked", "we decided", "did i tell you", "did i say", "did i mention", "earlier", "last time", "remind me what", "did we", "talked about", "we said", "chat history", "look back"]) {
+        keep.extend(["recall_conversation"]);
+    }
     if hit(&["image", "photo", "picture", "receipt", "screenshot", ".png", ".jpg", ".jpeg", "ocr", "read the text", "what does this say", "scan"]) {
         keep.extend(["read_image"]);
     }
@@ -412,6 +417,7 @@ pub async fn execute(
         "recall_activity" => recall_activity(args_json, mem).await,
         "ingest_path" => ingest_path(args_json, mem).await,
         "search_docs" => search_docs(args_json, mem).await,
+        "recall_conversation" => recall_conversation(args_json, mem).await,
         "read_image" => read_image(args_json).await,
         "transcribe_file" => transcribe_file(args_json).await,
         "learn" => {
@@ -3829,6 +3835,29 @@ async fn search_docs(args: &str, mem: &crate::memory::MemoryHandle) -> String {
             .file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| src.clone());
         let snippet: String = chunk.chars().take(300).collect();
         out.push_str(&format!("\n[{name}] (score {score:.2})\n{snippet}\n"));
+    }
+    out
+}
+
+async fn recall_conversation(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { query: String, count: Option<i64> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let q = a.query.trim();
+    if q.is_empty() {
+        return "ERROR: give something to look for in past conversations.".to_string();
+    }
+    let k = a.count.unwrap_or(6).clamp(1, 20);
+    // Semantic search over the (encrypted-at-rest, decrypted-on-read) message log.
+    let hits = mem.search(q, k).await;
+    if hits.is_empty() {
+        return format!("I couldn't find anything about \"{q}\" in our past conversations.");
+    }
+    let mut out = format!("From our past conversations about \"{q}\":\n");
+    for (role, content) in hits {
+        let who = if role == "user" { "You" } else { "I" };
+        let snippet: String = content.replace('\n', " ").chars().take(240).collect();
+        out.push_str(&format!("\n[{who}] {snippet}"));
     }
     out
 }

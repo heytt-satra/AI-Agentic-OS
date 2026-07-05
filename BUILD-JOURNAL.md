@@ -2095,3 +2095,20 @@ passed.
 vault, AND ingested documents - every store of raw captured/user content. A stolen jarvis.db is
 unreadable; search and recall still work because they run on lossy on-device vectors. Only the
 agent's own distilled knowledge (learnings/goals/nudges) stays plaintext, by design.
+
+### 2026-07-05 - New capability: recall_conversation (search past chats)
+**Explicit memory search, distinct from the auto-recall.** Relevance recall silently injects the
+top-3 relevant past messages every turn; recall_conversation is a TOOL the user can invoke directly
+to search all prior sessions for a topic and get top-k results - 'what did we discuss about X',
+'remind me what we decided on Y'. Distinct from recall_activity (app usage) and search_docs (files):
+this searches what the two of you have TALKED about. Runs over the now-encrypted message log via the
+same embedding search (decrypted on read), so it doubles as a user-facing check that at-rest
+encryption is transparent.
+**Wiring:** definition + async dispatch + relevant_definitions gating.
+**Verified end-to-end - and it caught a real gating bug.** First test failed because my gate
+keywords ('previous conversation', 'our conversation') didn't match the natural phrasing 'past
+conversations', so the tool was never offered and the model fell back to auto-recall + confused it
+with recall_activity. Broadened the keywords ('conversation', 'talked about', 'did we', 'chat
+history', ...); re-test: the agent called recall_conversation and returned 'Bluejay-Meridian' from
+past sessions. cargo test 46 passed. Lesson reinforced: per-turn tool gating must match how users
+actually phrase things, or a good tool stays invisible.
