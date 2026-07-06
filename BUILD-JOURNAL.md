@@ -2142,3 +2142,25 @@ defs, not the ~50 it used to avoid).
 project codename' - phrasing that misses the recall_conversation keyword group - now works
 (returned 'Bluejay-Meridian') because the tool is always offered. Documented the semantic-selection
 ideal as the future fix.
+
+### 2026-07-05 - Robustness: semantic tool selection (the real fix)
+**Built the proper systemic fix, not just the always-on band-aid.** Per-turn tool gating was
+keyword-only, so any tool whose keywords missed the user's phrasing was invisible. Now tools are
+also selected by MEANING.
+**How:** the on-device embedding model (already used for memory) now also embeds the message and
+each tool's "name. description" (cached once in a tokio OnceCell via a new mem.embed()). Per turn we
+cosine-rank tools against the message and union the top-8 (cosine > 0.30) into the keyword+core set.
+The Embedder lives in the memory actor thread (candle models are !Sync), so embedding routes through
+a new MemCmd::Embed rather than a second model instance.
+**Safety-by-design:** PURELY ADDITIVE - it only ADDS semantically-relevant tools, never removes a
+keyword/core match, and if embeddings are unavailable it silently falls back to the old keyword
+behavior. The >0.30 floor + top-8 cap bound the extra tokens, so the cost trim holds (a trivial turn
+adds ~nothing because no tool description is that similar to "2+2").
+**Verified end-to-end - the money test:** 'should I wear a jacket if I go outside right now?' has
+ZERO weather keywords (no weather/rain/temperature/forecast/degrees), yet the agent called the
+weather tool and answered '27C, feels like 33C'. The keyword gate alone would never have offered it.
+cargo test 46 passed; the one-time ~90-tool embedding on first turn is fast enough that a cold-start
+turn still answered promptly.
+**Net:** all ~90 tools are now discoverable by meaning. Keyword gates remain as a cheap fast-path and
+for exact intent; the semantic layer is the safety net that ends the 'good tool stayed invisible'
+class of bug for good.

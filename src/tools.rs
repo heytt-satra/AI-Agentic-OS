@@ -250,7 +250,26 @@ pub async fn all_definitions() -> Vec<Tool> {
 // cuts thousands of tokens off trivial turns while keeping capability on real ones.
 // MCP tools (user-configured) are always included. Falls back to the full set if,
 // somehow, nothing is selected.
-pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
+// Cache of (tool name, description embedding), computed once from the on-device
+// model. Static so the &str names live long enough to add into `keep`.
+static TOOL_VECS: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>> = tokio::sync::OnceCell::const_new();
+
+async fn tool_vectors(mem: &crate::memory::MemoryHandle) -> &'static Vec<(String, Vec<f32>)> {
+    TOOL_VECS
+        .get_or_init(|| async {
+            let mut out = Vec::new();
+            for t in definitions() {
+                let text = format!("{}. {}", t.function.name, t.function.description);
+                if let Some(v) = mem.embed(&text).await {
+                    out.push((t.function.name.clone(), v));
+                }
+            }
+            out
+        })
+        .await
+}
+
+pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) -> Vec<Tool> {
     use std::collections::HashSet;
     let m = msg.to_lowercase();
     let hit = |kws: &[&str]| kws.iter().any(|k| m.contains(k));
@@ -357,6 +376,24 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
     if hit(&["task", "agent", "schedule", "remind", "every ", "delegate", "automate"]) {
         keep.extend(["task_add", "task_list", "task_done", "task_cancel", "agent_create", "agent_list", "agent_run", "agent_delete", "schedule_add", "schedule_list", "schedule_remove", "spawn_agent"]);
     }
+    // Semantic augmentation (robustness): also include the tools whose description
+    // is most similar to the message, so a phrasing the keyword gates miss still
+    // surfaces the right tool. PURELY ADDITIVE - it can only add, never hide a
+    // keyword/core match - and falls back to keyword-only if embeddings are off.
+    if let Some(qv) = mem.embed(msg).await {
+        let mut scored: Vec<(f32, &'static str)> = tool_vectors(mem)
+            .await
+            .iter()
+            .map(|(name, v)| (crate::embeddings::cosine(&qv, v), name.as_str()))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        for (score, name) in scored.into_iter().take(8) {
+            if score > 0.30 {
+                keep.insert(name);
+            }
+        }
+    }
+
     let mut defs: Vec<Tool> = definitions()
         .into_iter()
         .filter(|t| keep.contains(t.function.name.as_str()))

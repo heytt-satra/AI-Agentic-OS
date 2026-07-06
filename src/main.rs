@@ -1015,7 +1015,7 @@ pub async fn run_subagent(
     let mut recent: Vec<(String, std::collections::HashSet<String>, u32)> = Vec::new();
     let mut evidence = String::new(); // tool outputs this turn, for the critic
     for _ in 0..steps {
-        let reply = match provider.chat(&messages, Some(tools::relevant_definitions(task).await)).await {
+        let reply = match provider.chat(&messages, Some(tools::relevant_definitions(task, mem).await)).await {
             Ok(r) => r,
             Err(e) => return format!("ERROR: sub-agent ({role}) failed: {e}"),
         };
@@ -1748,7 +1748,7 @@ async fn run_turn(provider: &Provider, mem: &MemoryHandle, messages: &mut Vec<Me
     let provider = &routed;
     let steps = max_steps();
     for _step in 1..=steps {
-        let reply = provider.chat(messages, Some(tools::relevant_definitions(&task).await)).await?;
+        let reply = provider.chat(messages, Some(tools::relevant_definitions(&task, mem).await)).await?;
         messages.push(reply.message.clone());
         mem.add_usage(provider.model(), reply.tokens).await;
 

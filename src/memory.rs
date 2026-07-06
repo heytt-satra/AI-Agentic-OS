@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 
 // ── The messages we can send the actor ──────────────────────────────────────
 enum MemCmd {
+    Embed { text: String, reply: oneshot::Sender<Option<Vec<f32>>> }, // one-off embedding (tool selection)
     Log { role: String, content: String },
     LogAudit { tool: String, args: String, decision: String, ok: bool },
     Count { reply: oneshot::Sender<i64> },
@@ -286,6 +287,16 @@ impl MemoryHandle {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Embed a short text with the on-device model (for semantic tool selection).
+    /// None if embeddings are unavailable.
+    pub async fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::Embed { text: text.to_string(), reply }).await.is_err() {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 
     // Relevance recall: the N past dialog messages most relevant to `query`.
@@ -936,6 +947,10 @@ fn now_secs() -> i64 {
 
 fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::ann::AnnCache, cmd: MemCmd) {
     match cmd {
+        MemCmd::Embed { text, reply } => {
+            let v = embedder.and_then(|e| e.embed(&text).ok());
+            let _ = reply.send(v);
+        }
         MemCmd::Log { role, content } => {
             // Encrypt message content AT REST (privacy: a stolen DB file is
             // unreadable). Search still works because the semantic vector is
