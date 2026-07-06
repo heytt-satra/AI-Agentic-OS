@@ -147,6 +147,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("clipboard_write", "Put text ONTO the system clipboard so the user can paste it anywhere with Ctrl+V. Use when the user says 'copy this', 'put X on my clipboard', or when handing them a result to paste.",
           str_prop("text", "the text to place on the clipboard")),
+        f("clipboard_history", "Show recent things the user has COPIED (clipboard history from the second-brain log), newest first. Use for 'what did I copy earlier', 'get back the thing I copied before this', 'my clipboard history'. Different from clipboard_read (only the current clipboard).",
+          serde_json::json!({"type":"object","properties":{"count":{"type":"integer","description":"how many recent copies to show (default 10)"}},"required":[]})),
         f("system_status", "Report this machine's live health: CPU load, memory used/total, disk free/total, battery level and charging state (if present), and uptime. Use when the user asks 'how's my system', 'am I low on memory/disk/battery', or before a heavy task.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
 
@@ -301,8 +303,8 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     if hit(&["recent", "recently", "latest", "just saved", "just downloaded", "worked on", "last file", "newest"]) {
         keep.extend(["recent_files"]);
     }
-    if hit(&["clipboard", "copy", "copied", "paste", "clip "]) {
-        keep.extend(["clipboard_read", "clipboard_write"]);
+    if hit(&["clipboard", "copy", "copied", "paste", "clip ", "history", "earlier", "before this"]) {
+        keep.extend(["clipboard_read", "clipboard_write", "clipboard_history"]);
     }
     if hit(&["system", "cpu", "memory", "ram", "disk", "storage", "battery", "how's my", "hows my", "machine", "resources", "uptime", "performance"]) {
         keep.extend(["system_status"]);
@@ -538,6 +540,7 @@ pub async fn execute(
         "watch_status" => crate::watch::status(),
         "clipboard_read" => clipboard_read(),
         "clipboard_write" => clipboard_write(args_json),
+        "clipboard_history" => clipboard_history(args_json, mem).await,
         "system_status" => system_status(),
         "remind_set" => remind_set(args_json, mem).await,
         "remind_list" => remind_list(mem).await,
@@ -1551,6 +1554,35 @@ fn clipboard_write(args: &str) -> String {
         Ok(()) => format!("Copied {} chars to the clipboard - paste anywhere with Ctrl+V.", a.text.chars().count()),
         Err(e) => format!("ERROR: could not write clipboard: {e}"),
     }
+}
+
+// Recent clipboard copies from the second-brain activity log (kind='clipboard').
+// The log stores each distinct copy; we return the newest N, deduped.
+async fn clipboard_history(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { count: Option<usize> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let want = a.count.unwrap_or(10).clamp(1, 30);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let rows = mem.activity_since(now - 7 * 86_400, None).await; // (ts, kind, app, detail)
+    let mut seen = std::collections::HashSet::new();
+    let mut clips: Vec<String> = Vec::new();
+    for (_ts, kind, _app, detail) in rows.into_iter().rev() { // newest first
+        if kind != "clipboard" { continue; }
+        let d = detail.trim().to_string();
+        if d.is_empty() || !seen.insert(d.clone()) { continue; }
+        clips.push(d);
+        if clips.len() >= want { break; }
+    }
+    if clips.is_empty() {
+        return "No clipboard history yet (the second-brain tracker records what you copy while Jarvis is running).".to_string();
+    }
+    let mut out = format!("Recent clipboard copies (newest first), {} shown:\n", clips.len());
+    for (i, c) in clips.iter().enumerate() {
+        let one: String = c.replace('\n', " ").chars().take(120).collect();
+        out.push_str(&format!("  {}. {one}\n", i + 1));
+    }
+    out
 }
 
 // A cheap CPU% + memory% snapshot for the HUD's ambient machine readout. Kept

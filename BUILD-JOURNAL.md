@@ -2164,3 +2164,14 @@ turn still answered promptly.
 **Net:** all ~90 tools are now discoverable by meaning. Keyword gates remain as a cheap fast-path and
 for exact intent; the semantic layer is the safety net that ends the 'good tool stayed invisible'
 class of bug for good.
+
+### 2026-07-05 - New capability: clipboard_history
+**Get back what you copied earlier.** clipboard_read only sees the CURRENT clipboard; clipboard_history
+returns the recent distinct things the user copied, newest-first, from the second-brain activity log
+(kind='clipboard'). For 'what did I copy earlier', 'get back the thing I copied before this one'.
+Deduped, capped, 7-day window.
+**Nice bonus:** because the activity log is now encrypted at rest, this doubles as a user-facing
+confirmation that activity encryption round-trips - the clipboard entries come back readable.
+**Wiring:** definition + async dispatch + gating (clipboard/copied/history/earlier/before this).
+**Verified end-to-end:** copied 'GIRAFFE-CLIP-TWO' during a serve session (so the tracker logged it),
+then 'show my recent clipboard history' returned it in the list. cargo test 46 passed.
