@@ -2175,3 +2175,15 @@ confirmation that activity encryption round-trips - the clipboard entries come b
 **Wiring:** definition + async dispatch + gating (clipboard/copied/history/earlier/before this).
 **Verified end-to-end:** copied 'GIRAFFE-CLIP-TWO' during a serve session (so the tracker logged it),
 then 'show my recent clipboard history' returned it in the list. cargo test 46 passed.
+
+### 2026-07-05 - Enhancement: reminders accept clock times ("at 3pm", "tomorrow 9am")
+**Reminders were relative-only (in N minutes).** Now remind_set takes EITHER 'minutes' (relative) OR
+'at' (a clock time). parse_reminder_at (pure, unit-tested) understands '3pm', '15:30', '9am',
+'tomorrow 8am', 'at 5:30pm' via chrono::Local: builds the next matching local datetime, and if the
+time already passed today (and no 'tomorrow'), rolls to tomorrow. Handles 12am/12pm correctly and
+rejects garbage with a helpful message.
+**Wiring:** remind_set gained an 'at' field (text is now the only required field); definition updated
+to say "either minutes OR at".
+**Verified:** cargo test 47 passed (1 new - covers 3pm-today, 9am-rolls-to-tomorrow, 24h, explicit
+tomorrow, 12am/12pm, garbage). End-to-end: 'remind me at 3pm to call the bank' at 15:27 correctly
+scheduled it (3pm had passed, so tomorrow 3pm) and the agent confirmed. Test reminder cleaned up.
