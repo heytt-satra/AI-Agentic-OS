@@ -2187,3 +2187,17 @@ to say "either minutes OR at".
 **Verified:** cargo test 47 passed (1 new - covers 3pm-today, 9am-rolls-to-tomorrow, 24h, explicit
 tomorrow, 12am/12pm, garbage). End-to-end: 'remind me at 3pm to call the bank' at 15:27 correctly
 scheduled it (3pm had passed, so tomorrow 3pm) and the agent confirmed. Test reminder cleaned up.
+
+### 2026-07-05 - Enhancement: recurring reminders ("every day at 8am")
+**Reminders were one-off; now they can repeat.** remind_set gained an 'every' field ('daily',
+'hourly', 'weekly'). A repeat_secs column (idempotent ALTER migration; legacy rows default 0 =
+one-off) stores the interval. The scheduler's reminders_due now branches: a recurring reminder FIRES
+its notification and then re-arms - advancing due_ts to the next FUTURE occurrence (a while-loop so a
+scheduler that was down for several intervals catches up cleanly) instead of being marked fired. Bare
+recurring reminders ('every hour') get their first fire one interval out; combined with 'at' you get
+'every day at 8am'.
+**Verified end-to-end - the hard part being the re-arm:** set 'remind me every day at 8am to take my
+meds' (stored repeat_secs=86400), forced it past-due, ran a scheduler tick: log showed '[reminder]
+fired #5: Take your meds', and afterward the row was RE-ARMED (fired=0, due_ts advanced +86400 to the
+future) rather than done. One-off reminders still mark fired (branch on repeat_secs>0). cargo test 47
+passed. Test reminder cleaned up.

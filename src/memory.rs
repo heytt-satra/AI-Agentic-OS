@@ -60,7 +60,7 @@ enum MemCmd {
     ScheduleDue { now: i64, reply: oneshot::Sender<Vec<(i64, String, i64)>> },
     ScheduleMarkRun { id: i64, next_run: i64 },
     // One-off reminders.
-    ReminderAdd { due_ts: i64, text: String, reply: oneshot::Sender<i64> },
+    ReminderAdd { due_ts: i64, text: String, repeat_secs: i64, reply: oneshot::Sender<i64> },
     ReminderList { reply: oneshot::Sender<Vec<(i64, i64, String)>> }, // (id, due_ts, text) pending
     ReminderCancel { id: i64, reply: oneshot::Sender<bool> },
     ReminderDue { now: i64, reply: oneshot::Sender<Vec<(i64, String)>> }, // fires + marks them
@@ -436,10 +436,11 @@ impl MemoryHandle {
         let _ = self.tx.send(MemCmd::ScheduleMarkRun { id, next_run }).await;
     }
 
-    // ── one-off reminders ───────────────────────────────────────────────────
-    pub async fn reminder_add(&self, due_ts: i64, text: &str) -> i64 {
+    // ── reminders (one-off or recurring) ────────────────────────────────────
+    /// Add a reminder. repeat_secs = 0 for one-off, else the interval to re-fire.
+    pub async fn reminder_add(&self, due_ts: i64, text: &str, repeat_secs: i64) -> i64 {
         let (reply, rx) = oneshot::channel();
-        if self.tx.send(MemCmd::ReminderAdd { due_ts, text: text.to_string(), reply }).await.is_err() { return -1; }
+        if self.tx.send(MemCmd::ReminderAdd { due_ts, text: text.to_string(), repeat_secs, reply }).await.is_err() { return -1; }
         rx.await.unwrap_or(-1)
     }
     pub async fn reminders_list(&self) -> Vec<(i64, i64, String)> {
@@ -890,6 +891,8 @@ fn open_db(path: &str) -> Result<Connection> {
     // it (roadmap 5.2). reaction: 0 = pending, 1 = acted on, -1 = dismissed. SQLite
     // errors if the column already exists, so we ignore the result.
     let _ = conn.execute("ALTER TABLE nudges ADD COLUMN reaction INTEGER NOT NULL DEFAULT 0", []);
+    // Recurring reminders: seconds between repeats (0 = one-off).
+    let _ = conn.execute("ALTER TABLE reminders ADD COLUMN repeat_secs INTEGER NOT NULL DEFAULT 0", []);
 
     // One-time privacy migration: encrypt any legacy PLAINTEXT message rows (those
     // written before at-rest encryption) and drop the plaintext FTS index, which
@@ -1203,10 +1206,10 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
         MemCmd::ScheduleMarkRun { id, next_run } => {
             let _ = conn.execute("UPDATE schedules SET next_run=?2 WHERE id=?1", params![id, next_run]);
         }
-        MemCmd::ReminderAdd { due_ts, text, reply } => {
+        MemCmd::ReminderAdd { due_ts, text, repeat_secs, reply } => {
             let _ = conn.execute(
-                "INSERT INTO reminders (ts, due_ts, text, fired) VALUES (?1, ?2, ?3, 0)",
-                params![now_secs(), due_ts, text],
+                "INSERT INTO reminders (ts, due_ts, text, fired, repeat_secs) VALUES (?1, ?2, ?3, 0, ?4)",
+                params![now_secs(), due_ts, text, repeat_secs],
             );
             let _ = reply.send(conn.last_insert_rowid());
         }
@@ -1223,16 +1226,30 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
             let _ = reply.send(n > 0);
         }
         MemCmd::ReminderDue { now, reply } => {
-            // Read the due, un-fired ones, then mark them fired so they raise once.
-            let rows = (|| -> Result<Vec<(i64, String)>> {
-                let mut stmt = conn.prepare("SELECT id, text FROM reminders WHERE fired=0 AND due_ts <= ?1")?;
-                let r = stmt.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|x| x.ok()).collect();
+            // Due, un-fired reminders (with their repeat interval).
+            let rows: Vec<(i64, String, i64)> = (|| -> Result<Vec<(i64, String, i64)>> {
+                let mut stmt = conn.prepare("SELECT id, text, repeat_secs, due_ts FROM reminders WHERE fired=0 AND due_ts <= ?1")?;
+                let r = stmt.query_map(params![now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)))?
+                    .filter_map(|x| x.ok())
+                    .map(|(id, text, rep, _due)| (id, text, rep))
+                    .collect();
                 Ok(r)
             })().unwrap_or_default();
-            for (id, _) in &rows {
-                let _ = conn.execute("UPDATE reminders SET fired=1 WHERE id=?1", params![id]);
+            let mut out = Vec::new();
+            for (id, text, repeat) in rows {
+                if repeat > 0 {
+                    // Recurring: advance due_ts to the next FUTURE occurrence (catch
+                    // up if the scheduler was down for several intervals).
+                    let cur: i64 = conn.query_row("SELECT due_ts FROM reminders WHERE id=?1", params![id], |r| r.get(0)).unwrap_or(now);
+                    let mut nd = cur;
+                    while nd <= now { nd += repeat; }
+                    let _ = conn.execute("UPDATE reminders SET due_ts=?1 WHERE id=?2", params![nd, id]);
+                } else {
+                    let _ = conn.execute("UPDATE reminders SET fired=1 WHERE id=?1", params![id]);
+                }
+                out.push((id, text));
             }
-            let _ = reply.send(rows);
+            let _ = reply.send(out);
         }
         MemCmd::SecretSet { name, value, reply } => {
             let ok = conn.execute(

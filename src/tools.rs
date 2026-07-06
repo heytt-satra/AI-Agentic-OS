@@ -153,8 +153,8 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{},"required":[]})),
 
         // ── reminders (one-off, fire in the background)
-        f("remind_set", "Set a one-off reminder that fires in the background (a desktop notification + a nudge). Give EITHER 'minutes' (relative: 'in 20 minutes') OR 'at' (a clock time: '3pm', '15:30', 'tomorrow 9am'). Use for 'remind me in 20 minutes to X', 'remind me at 5pm to Y'. Requires Jarvis running in the background (jarvis serve or daemon) when it comes due.",
-          serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"minutes from now until it fires (use this OR 'at')"},"at":{"type":"string","description":"a clock time like '3pm', '15:30', or 'tomorrow 9am' (use this OR 'minutes')"},"text":{"type":"string","description":"what to remind the user about"}},"required":["text"]})),
+        f("remind_set", "Set a reminder that fires in the background (a desktop notification + a nudge). Give a time via 'minutes' (relative: 'in 20 minutes') OR 'at' (a clock time: '3pm', '15:30', 'tomorrow 9am'), and optionally 'every' to REPEAT ('daily', 'hourly', 'weekly') - e.g. 'remind me every day at 8am to take my meds'. Requires Jarvis running in the background (jarvis serve or daemon) when it comes due.",
+          serde_json::json!({"type":"object","properties":{"minutes":{"type":"integer","description":"minutes from now until the first fire"},"at":{"type":"string","description":"a clock time like '3pm', '15:30', or 'tomorrow 9am' for the first fire"},"every":{"type":"string","description":"optional recurrence: 'daily', 'hourly', or 'weekly'"},"text":{"type":"string","description":"what to remind the user about"}},"required":["text"]})),
         f("remind_list", "List the user's pending (not-yet-fired) reminders with their id and how long until each fires.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
         f("remind_cancel", "Cancel a pending reminder by its id (from remind_list).",
@@ -1740,15 +1740,26 @@ fn parse_reminder_at(now: chrono::DateTime<chrono::Local>, spec: &str) -> Option
     Some(dt)
 }
 
+// Parse a recurrence spec ("daily", "every hour", "weekly") to seconds. 0 = none.
+fn parse_repeat(spec: &str) -> i64 {
+    let s = spec.trim().to_lowercase();
+    if s.contains("hour") { 3600 }
+    else if s.contains("week") { 7 * 86_400 }
+    else if s.contains("day") || s == "daily" { 86_400 }
+    else { 0 }
+}
+
 async fn remind_set(args: &str, mem: &crate::memory::MemoryHandle) -> String {
     #[derive(Deserialize)]
-    struct A { minutes: Option<i64>, at: Option<String>, text: String }
+    struct A { minutes: Option<i64>, at: Option<String>, every: Option<String>, text: String }
     let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
     let text = a.text.trim();
     if text.is_empty() {
         return "ERROR: reminder text is empty.".to_string();
     }
-    // Prefer an explicit clock time ("at 3pm") over a relative "in N minutes".
+    let repeat = a.every.as_deref().map(parse_repeat).unwrap_or(0);
+    // First fire: prefer an explicit clock time, then relative minutes, then (for a
+    // bare recurring reminder like "every hour") one interval from now.
     let (due, when) = if let Some(at) = a.at.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         match parse_reminder_at(chrono::Local::now(), at) {
             Some(dt) => (dt.timestamp(), dt.format("%a %H:%M").to_string()),
@@ -1756,14 +1767,17 @@ async fn remind_set(args: &str, mem: &crate::memory::MemoryHandle) -> String {
         }
     } else if let Some(m) = a.minutes.filter(|m| *m > 0) {
         (unix_now() + m * 60, format!("in {m} minute(s)"))
+    } else if repeat > 0 {
+        (unix_now() + repeat, "at the next interval".to_string())
     } else {
-        return "ERROR: say when - either 'minutes' from now or an 'at' time like '3pm'.".to_string();
+        return "ERROR: say when - 'minutes' from now, an 'at' time like '3pm', or 'every day/hour'.".to_string();
     };
-    let id = mem.reminder_add(due, text).await;
+    let id = mem.reminder_add(due, text, repeat).await;
     if id < 0 {
         return "ERROR: could not save the reminder.".to_string();
     }
-    format!("Reminder #{id} set for {when}: {text}. I'll notify you (keep Jarvis running in the background).")
+    let rep = match repeat { 0 => String::new(), 3600 => ", repeating hourly".into(), 86_400 => ", repeating daily".into(), 604_800 => ", repeating weekly".into(), _ => String::new() };
+    format!("Reminder #{id} set for {when}{rep}: {text}. I'll notify you (keep Jarvis running in the background).")
 }
 
 async fn remind_list(mem: &crate::memory::MemoryHandle) -> String {
