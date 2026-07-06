@@ -2125,3 +2125,20 @@ exact file - Documents/jarvis-journal/2026-07-05.md containing '# 2026-07-05' + 
 the at-rest encryption today, feeling good'. Note: on this machine Documents is OneDrive-redirected
 and dirs::document_dir() correctly followed it (the file landed in OneDrive/Documents, not a fake
 ~/Documents) - good, that's the real Documents folder. cargo test 46 passed. Test entry cleaned up.
+
+### 2026-07-05 - Robustness: personal essentials always-on (fix tool-invisibility)
+**A systemic fix for a bug I hit twice.** Per-turn tool gating is keyword-based (roadmap 1.1's cost
+trim), so a tool whose keywords miss the user's phrasing is INVISIBLE - the model can't call what it
+isn't offered. recall_conversation demonstrated it: 'past conversations' didn't match the gate.
+**The right long-term fix is semantic tool selection (embed the message, rank tools by description
+similarity), but that's a heavy subsystem** - a second Embedder instance, cached tool embeddings,
+per-turn embedding latency, and quality that's hard to test. Not worth the risk to bolt on hastily.
+**Pragmatic fix shipped:** promote the highest-value, cheapest, most-unpredictably-phrased personal
+tools into the always-on core - clipboard_read/write, system_status, recall_conversation - so a
+phrasing mismatch can never hide them. The heavy/rare groups (leads, gui, code, browse, tasks, ~50
+tools) STILL gate on keywords, so the cost trim is preserved (a trivial turn adds ~4 cheap tool
+defs, not the ~50 it used to avoid).
+**Verified:** build clean; cargo test 46 passed; 'look through our past chats and tell me any
+project codename' - phrasing that misses the recall_conversation keyword group - now works
+(returned 'Bluejay-Meridian') because the tool is always offered. Documented the semantic-selection
+ideal as the future fix.

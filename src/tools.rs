@@ -259,6 +259,11 @@ pub async fn relevant_definitions(msg: &str) -> Vec<Tool> {
         "read_file", "write_file", "list_dir", "delete_path", "recycle_path", "run_shell", "open_path",
         "open_app", "install_software", "wait", "web_search", "news_search", "fetch_url",
         "recall_activity", "learn",
+        // personal essentials: high-value, cheap, and asked for with UNPREDICTABLE
+        // phrasing that keyword gates miss (we hit real "tool stayed invisible"
+        // bugs here). Always on so they can never be hidden by a phrasing mismatch.
+        // The heavier/rarer groups below still gate on keywords to keep turns cheap.
+        "clipboard_read", "clipboard_write", "system_status", "recall_conversation",
     ]
     .into_iter()
     .collect();
