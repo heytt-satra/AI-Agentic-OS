@@ -128,6 +128,25 @@ fn spawn_scheduler(provider: Provider, mem: MemoryHandle) {
                 mem.nudge_add(&format!("Reminder: {text}")).await;
                 eprintln!("[reminder] fired #{id}: {text}");
             }
+            // Web page watchers: re-check pages not looked at in the last ~10 min;
+            // alert once when the watched text appears (absent -> present flip).
+            let watch_interval: i64 = std::env::var("PAGE_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+            for (id, url, needle, label, was_present) in mem.page_watches_due(now - watch_interval).await {
+                if let Some(text) = crate::tools::fetch_page_text(&url).await {
+                    let present = text.to_lowercase().contains(&needle.to_lowercase());
+                    if present && !was_present {
+                        let what = if label.is_empty() { url.clone() } else { label.clone() };
+                        let msg = format!("'{needle}' just appeared on {what}");
+                        crate::tools::notify_desktop("Jarvis page watch", &msg);
+                        mem.nudge_add(&format!("Page watch: {msg} ({url})")).await;
+                        eprintln!("[page-watch] fired #{id}: {msg}");
+                    }
+                    mem.page_watch_update(id, present, now).await;
+                } else {
+                    // Fetch failed - just bump last_checked so we back off a cycle.
+                    mem.page_watch_update(id, was_present, now).await;
+                }
+            }
         }
     });
 }

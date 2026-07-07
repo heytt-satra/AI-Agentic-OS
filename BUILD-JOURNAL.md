@@ -2201,3 +2201,22 @@ meds' (stored repeat_secs=86400), forced it past-due, ran a scheduler tick: log 
 fired #5: Take your meds', and afterward the row was RE-ARMED (fired=0, due_ts advanced +86400 to the
 future) rather than done. One-off reminders still mark fired (branch on repeat_secs>0). cargo test 47
 passed. Test reminder cleaned up.
+
+### 2026-07-05 - New capability: web page watcher (proactive monitoring)
+**"Tell me when this page says X."** A genuinely proactive capability that ties the fetch, scheduler,
+and notification systems together. page_watch(url, contains, label?) registers a background monitor;
+page_watch_list / page_watch_stop manage them. The serve/daemon scheduler re-checks each active watch
+on a ~10-min cadence (PAGE_WATCH_SECS), fetches the page text, and fires a desktop notification + a
+mind-panel nudge the moment the watched text APPEARS (an absent->present flip). For 'watch this page
+for In Stock', 'tell me when tickets are available', 'alert me when this release page mentions v2'.
+**Low false-positives by design:** it watches for a SPECIFIC substring (case-insensitive), not raw
+page-diff, so dynamic content (ads, timestamps) doesn't trigger it. On register it records the CURRENT
+state, so if the text is already present it waits for the NEXT appearance rather than alerting
+immediately. was_present flips back when the text goes away, so it can re-alert. Fetch failures just
+back off a cycle. New page_watches table + 5 memory ops + a shared fetch_page_text() helper reused by
+the scheduler.
+**Verified end-to-end - including the hard transition path:** registered a watch on example.com for
+'example domain', forced was_present=0 (simulating it had been absent), ran a scheduler tick: the log
+showed '[page-watch] fired #1: example domain just appeared on https://example.com', a nudge was
+created, and was_present flipped to 1 (so it won't spam every tick). cargo test 47 passed. Test data
+cleaned up.

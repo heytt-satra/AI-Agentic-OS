@@ -64,6 +64,12 @@ enum MemCmd {
     ReminderList { reply: oneshot::Sender<Vec<(i64, i64, String)>> }, // (id, due_ts, text) pending
     ReminderCancel { id: i64, reply: oneshot::Sender<bool> },
     ReminderDue { now: i64, reply: oneshot::Sender<Vec<(i64, String)>> }, // fires + marks them
+    // Web page watchers.
+    PageWatchAdd { url: String, needle: String, label: String, was_present: bool, reply: oneshot::Sender<i64> },
+    PageWatchDue { before: i64, reply: oneshot::Sender<Vec<(i64, String, String, String, bool)>> }, // (id,url,needle,label,was_present)
+    PageWatchUpdate { id: i64, present: bool, checked: i64 },
+    PageWatchList { reply: oneshot::Sender<Vec<(i64, String, String, String)>> }, // (id,url,needle,label)
+    PageWatchStop { id: i64, reply: oneshot::Sender<bool> },
     // Encrypted secrets vault (value stored as ciphertext).
     SecretSet { name: String, value: String, reply: oneshot::Sender<bool> },
     SecretGet { name: String, reply: oneshot::Sender<Option<String>> },
@@ -460,6 +466,32 @@ impl MemoryHandle {
         rx.await.unwrap_or_default()
     }
 
+    // ── web page watchers ───────────────────────────────────────────────────
+    pub async fn page_watch_add(&self, url: &str, needle: &str, label: &str, was_present: bool) -> i64 {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::PageWatchAdd { url: url.into(), needle: needle.into(), label: label.into(), was_present, reply }).await.is_err() { return -1; }
+        rx.await.unwrap_or(-1)
+    }
+    /// Active watches whose last_checked is at or before `before` (i.e. due to re-check).
+    pub async fn page_watches_due(&self, before: i64) -> Vec<(i64, String, String, String, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::PageWatchDue { before, reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn page_watch_update(&self, id: i64, present: bool, checked: i64) {
+        let _ = self.tx.send(MemCmd::PageWatchUpdate { id, present, checked }).await;
+    }
+    pub async fn page_watch_list(&self) -> Vec<(i64, String, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::PageWatchList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn page_watch_stop(&self, id: i64) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::PageWatchStop { id, reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+
     // ── encrypted secrets vault ─────────────────────────────────────────────
     /// Store (or overwrite) a secret. `value` MUST already be ciphertext.
     pub async fn secret_set(&self, name: &str, value: &str) -> bool {
@@ -830,6 +862,14 @@ fn open_db(path: &str) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
             due_ts INTEGER NOT NULL, text TEXT NOT NULL, fired INTEGER NOT NULL DEFAULT 0
+         );
+         -- Web page watchers: alert when `needle` appears on `url`. was_present
+         -- tracks the last-seen state so we alert once per absent->present flip.
+         CREATE TABLE IF NOT EXISTS page_watches (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, url TEXT NOT NULL,
+            needle TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+            was_present INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
+            last_checked INTEGER NOT NULL DEFAULT 0
          );
          -- Encrypted secrets vault: value is AES-256-GCM ciphertext ('enc:...'),
          -- so a stolen DB file never reveals a secret. Keyed by a friendly name.
@@ -1250,6 +1290,38 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
                 out.push((id, text));
             }
             let _ = reply.send(out);
+        }
+        MemCmd::PageWatchAdd { url, needle, label, was_present, reply } => {
+            let _ = conn.execute(
+                "INSERT INTO page_watches (ts, url, needle, label, was_present, active, last_checked) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+                params![now_secs(), url, needle, label, was_present as i64, now_secs()],
+            );
+            let _ = reply.send(conn.last_insert_rowid());
+        }
+        MemCmd::PageWatchDue { before, reply } => {
+            let rows = (|| -> Result<Vec<(i64, String, String, String, bool)>> {
+                let mut stmt = conn.prepare("SELECT id, url, needle, label, was_present FROM page_watches WHERE active=1 AND last_checked <= ?1")?;
+                let r = stmt.query_map(params![before], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)? != 0)))?
+                    .filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::PageWatchUpdate { id, present, checked } => {
+            let _ = conn.execute("UPDATE page_watches SET was_present=?1, last_checked=?2 WHERE id=?3", params![present as i64, checked, id]);
+        }
+        MemCmd::PageWatchList { reply } => {
+            let rows = (|| -> Result<Vec<(i64, String, String, String)>> {
+                let mut stmt = conn.prepare("SELECT id, url, needle, label FROM page_watches WHERE active=1 ORDER BY id ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?
+                    .filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::PageWatchStop { id, reply } => {
+            let n = conn.execute("UPDATE page_watches SET active=0 WHERE id=?1 AND active=1", params![id]).unwrap_or(0);
+            let _ = reply.send(n > 0);
         }
         MemCmd::SecretSet { name, value, reply } => {
             let ok = conn.execute(

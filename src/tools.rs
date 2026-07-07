@@ -160,6 +160,14 @@ pub fn definitions() -> Vec<Tool> {
         f("remind_cancel", "Cancel a pending reminder by its id (from remind_list).",
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
 
+        // ── web page watcher (proactive monitoring)
+        f("page_watch", "Watch a web page and notify the user when a piece of TEXT appears on it (checked in the background every ~10 min). Use for 'tell me when this page says tickets available', 'watch this product page for In Stock', 'alert me when this release page mentions v2'. Needs Jarvis running in the background (serve/daemon). Fires a desktop notification + nudge when the text shows up.",
+          serde_json::json!({"type":"object","properties":{"url":{"type":"string","description":"the page URL to watch"},"contains":{"type":"string","description":"the text to watch for (case-insensitive), e.g. 'in stock', 'tickets available'"},"label":{"type":"string","description":"optional short label for the watch"}},"required":["url","contains"]})),
+        f("page_watch_list", "List the web pages currently being watched (id, url, and the text each is watching for).",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("page_watch_stop", "Stop watching a page by its id (from page_watch_list).",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
+
         // ── window management
         f("list_windows", "List the user's currently open application windows (app name + title), skipping minimized ones. Use when the user asks 'what do I have open', 'which windows are open', or before switching to one.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
@@ -341,6 +349,9 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     }
     if hit(&["remind", "reminder", "timer", "alarm", "in an hour", "minutes", "later", "notify me"]) {
         keep.extend(["remind_set", "remind_list", "remind_cancel"]);
+    }
+    if hit(&["watch this page", "watch the page", "monitor", "tell me when", "alert me when", "notify me when", "in stock", "available", "when it changes", "when this says", "keep an eye"]) {
+        keep.extend(["page_watch", "page_watch_list", "page_watch_stop"]);
     }
     if hit(&["watch", "video", "hear", "listen", "playing", "subtitle", "transcri"]) {
         keep.extend(["watch_start", "watch_stop", "watch_status"]);
@@ -545,6 +556,9 @@ pub async fn execute(
         "remind_set" => remind_set(args_json, mem).await,
         "remind_list" => remind_list(mem).await,
         "remind_cancel" => remind_cancel(args_json, mem).await,
+        "page_watch" => page_watch(args_json, mem).await,
+        "page_watch_list" => page_watch_list(mem).await,
+        "page_watch_stop" => page_watch_stop(args_json, mem).await,
         "list_windows" => list_windows(),
         "focus_window" => focus_window(args_json),
         "find_files" => find_files(args_json),
@@ -1802,6 +1816,71 @@ async fn remind_cancel(args: &str, mem: &crate::memory::MemoryHandle) -> String 
         format!("Cancelled reminder #{}.", a.id)
     } else {
         format!("No pending reminder #{} to cancel.", a.id)
+    }
+}
+
+// ── web page watcher ────────────────────────────────────────────────────────
+// Fetch a page's body text (best-effort, generous cap for needle search). Public
+// so the background scheduler can reuse it. None on network failure.
+pub async fn fetch_page_text(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (compatible; JarvisOS/1.0)")
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().await.ok()?;
+    Some(body.chars().take(400_000).collect())
+}
+
+async fn page_watch(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { url: String, contains: String, label: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let url = a.url.trim();
+    let needle = a.contains.trim();
+    if url.is_empty() || needle.is_empty() {
+        return "ERROR: need both a url and the text to watch for.".to_string();
+    }
+    // Fetch once now to (a) validate the URL and (b) record the current state, so
+    // we only alert on a later absent->present flip (not if it's already present).
+    let present = match fetch_page_text(url).await {
+        Some(text) => text.to_lowercase().contains(&needle.to_lowercase()),
+        None => return format!("ERROR: couldn't fetch {url} (is it reachable?). Watch not created."),
+    };
+    let label = a.label.as_deref().unwrap_or("").trim();
+    let id = mem.page_watch_add(url, needle, label, present).await;
+    if id < 0 {
+        return "ERROR: could not save the watch.".to_string();
+    }
+    let state = if present { " (note: the text is ALREADY present; I'll alert you the NEXT time it appears after going away)" } else { "" };
+    format!("Watching #{id}: {url} for \"{needle}\"{state}. I'll notify you when it appears (keep Jarvis running in the background).")
+}
+
+async fn page_watch_list(mem: &crate::memory::MemoryHandle) -> String {
+    let rows = mem.page_watch_list().await;
+    if rows.is_empty() {
+        return "Not watching any pages right now.".to_string();
+    }
+    let mut out = String::from("Watched pages:\n");
+    for (id, url, needle, label) in rows {
+        let lbl = if label.is_empty() { String::new() } else { format!(" [{label}]") };
+        out.push_str(&format!("  #{id}{lbl}: {url} -> \"{needle}\"\n"));
+    }
+    out
+}
+
+async fn page_watch_stop(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { id: i64 }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.page_watch_stop(a.id).await {
+        format!("Stopped watching page #{}.", a.id)
+    } else {
+        format!("No active page watch #{} to stop.", a.id)
     }
 }
 
