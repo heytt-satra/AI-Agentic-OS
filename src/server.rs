@@ -182,6 +182,16 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         })
         .collect();
     let nudges: Vec<_> = pending.iter().take(6).map(|(id, t)| serde_json::json!({"id": id, "text": t})).collect();
+    // Scheduled: pending reminders (with a human "in Xm/Xh" until due) + active page watches.
+    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let reminders: Vec<_> = st.mem.reminders_list().await.into_iter().take(6).map(|(id, due, text)| {
+        let mins = ((due - now_ts).max(0) + 59) / 60;
+        let when = if mins < 60 { format!("{mins}m") } else if mins < 1440 { format!("{}h", mins / 60) } else { format!("{}d", mins / 1440) };
+        serde_json::json!({"id": id, "text": text, "when": when})
+    }).collect();
+    let watches: Vec<_> = st.mem.page_watch_list().await.into_iter().take(6).map(|(id, url, needle, label)| {
+        serde_json::json!({"id": id, "url": url, "needle": needle, "label": label})
+    }).collect();
     let (calib, scored) = st.mem.causal_calibration().await;
     // Ambient machine readout (off the async executor - the CPU sample sleeps).
     let (cpu, mem_pct) = tokio::task::spawn_blocking(crate::tools::quick_machine).await.unwrap_or((0.0, 0));
@@ -197,6 +207,8 @@ async fn mind(State(st): State<AppState>) -> Json<serde_json::Value> {
         "causal": causal,
         "calibration": {"pct": (calib * 100.0).round() as i64, "scored": scored},
         "nudges": nudges,
+        "reminders": reminders,
+        "watches": watches,
         "watching": crate::watch::is_active(),
         "watch": crate::watch::status(),
         "feed": feed,
@@ -1044,6 +1056,21 @@ function renderMind(d){
       '<div class="acts"><button class="yes" onclick="reactNudge('+n.id+',\'act\')">Act on it</button>'+
       '<button class="no" onclick="reactNudge('+n.id+',\'dismiss\')">Dismiss</button></div></div>'
     ).join(''));
+  }
+
+  // Scheduled: pending reminders + active page watches - the things Jarvis is
+  // holding for the future, so they're visible instead of hidden until they fire.
+  const hasRem = d.reminders && d.reminders.length, hasWatch = d.watches && d.watches.length;
+  if(hasRem || hasWatch){
+    let inner = '';
+    if(hasRem){ inner += d.reminders.map(r=>
+      '<div class="item"><div>'+esc(r.text)+'</div><div class="meta">reminder · <span class="conf">in '+esc(r.when)+'</span></div></div>'
+    ).join(''); }
+    if(hasWatch){ inner += d.watches.map(w=>{
+      const host = (function(){ try{ return new URL(w.url).hostname; }catch(e){ return w.url; } })();
+      return '<div class="item"><div>watching '+esc(host)+' for "'+esc(w.needle)+'"</div><div class="meta">page watch</div></div>';
+    }).join(''); }
+    html += sec('Scheduled', inner);
   }
   mindBody.innerHTML = html;
 }

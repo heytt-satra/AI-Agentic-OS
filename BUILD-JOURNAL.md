@@ -2220,3 +2220,18 @@ the scheduler.
 showed '[page-watch] fired #1: example domain just appeared on https://example.com', a nudge was
 created, and was_present flipped to 1 (so it won't spam every tick). cargo test 47 passed. Test data
 cleaned up.
+
+### 2026-07-05 - HUD: a "Scheduled" section (reminders + page watches made visible)
+**The proactive features were invisible until they fired.** Reminders and page watches ran in the
+background with no way to see what was queued. Now the mind panel has a SCHEDULED section: pending
+reminders (each with a human "in Xm/Xh/Xd" until due) and active page watches (host + the text it's
+watching for). /mind gained `reminders` and `watches` arrays (reminders_list + page_watch_list);
+renderMind adds the section below Pending nudges. So the HUD's Mind tab now shows the full picture -
+what Jarvis has LEARNED, its goals, causal record, what it's watching on screen, pending nudges, AND
+what it's holding for the future.
+**Verified visually in a real browser (gstack /browse):** seeded a reminder ('Call the plumber',
+in 2h) and a page watch (example.com for 'tickets'); /mind returned both; screenshotted the mind
+panel scrolled to the Scheduled section - it renders 'Call the plumber · REMINDER · IN 2H' and
+'watching example.com for "tickets" · PAGE WATCH', DESIGN.md-faithful (cyan for the live 'in 2h'
+data). cargo test 47 passed. All test data cleaned up (also swept some leftover reminder-test
+nudges from earlier sessions).
