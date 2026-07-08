@@ -2235,3 +2235,19 @@ panel scrolled to the Scheduled section - it renders 'Call the plumber · REMIND
 'watching example.com for "tickets" · PAGE WATCH', DESIGN.md-faithful (cyan for the live 'in 2h'
 data). cargo test 47 passed. All test data cleaned up (also swept some leftover reminder-test
 nudges from earlier sessions).
+
+### 2026-07-08 - New capability: system_power (lock / sleep / shutdown / restart / logoff)
+**Real OS session control.** system_power(action) locks, sleeps, shuts down, restarts, or logs off the
+machine - 'lock my computer', 'put it to sleep', 'restart'. Uses standard Windows invocations
+(rundll32 user32.dll,LockWorkStation for lock; SetSuspendState for sleep; shutdown /s|/r|/l). A pure
+power_action() normalizer maps synonyms (reboot->restart, log out->logoff, ...) and is shared with the
+policy so both classify identically.
+**Safety-gated by disruption:** lock runs immediately (harmless, screen-only). sleep/shutdown/restart/
+logoff END or suspend the session and can lose unsaved work, so they require confirmation via the
+safety policy (matching the posture: OS/session-level actions that could interrupt get a prompt).
+**Wiring:** definition + dispatch + a policy arm + relevant_definitions gating (lock/sleep/shutdown/
+restart/reboot/log off/suspend keywords).
+**Verified:** build clean; cargo test 48 passed (1 new - lock runs without approval, and sleep/
+shutdown/restart/logoff/reboot/'log out' all require it). NOT executed live on purpose - actually
+running lock/shutdown would disrupt or power off the owner's session mid-work; the commands are
+standard, well-known Windows invocations and the gating is unit-covered.

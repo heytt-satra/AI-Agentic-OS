@@ -29,6 +29,14 @@ pub fn assess(tool: &str, args_json: &str) -> Risk {
         // recoverable (goes to the Recycle Bin) but still removes the file
         "recycle_path" => (true, field("path"), format!("move to Recycle Bin: {}", field("path"))),
 
+        // power/session actions: lock is harmless; sleep/shutdown/restart/logoff
+        // end or suspend the session and can lose unsaved work, so they confirm.
+        "system_power" => {
+            let action = crate::tools::power_action(&field("action")).unwrap_or("");
+            let disruptive = matches!(action, "sleep" | "shutdown" | "restart" | "logoff");
+            (disruptive, action.to_string(), format!("{action} the computer"))
+        }
+
         // force-quitting a process ends it immediately (unsaved work lost)
         "kill_process" => {
             let who = if !field("name").is_empty() {
@@ -160,6 +168,17 @@ mod tests {
         let r = assess("recycle_path", r#"{"path":"desktop/old.txt"}"#);
         assert!(r.needs_approval);
         assert!(r.label.contains("Recycle Bin") && !r.label.contains("DELETE"));
+    }
+
+    #[test]
+    fn power_actions_gate_correctly() {
+        // lock is harmless -> runs without approval
+        assert!(!assess("system_power", r#"{"action":"lock"}"#).needs_approval);
+        // disruptive ones confirm first
+        for a in ["sleep", "shutdown", "restart", "logoff", "reboot", "log out"] {
+            let r = assess("system_power", &format!(r#"{{"action":"{a}"}}"#));
+            assert!(r.needs_approval, "'{a}' should need approval");
+        }
     }
 
     #[test]

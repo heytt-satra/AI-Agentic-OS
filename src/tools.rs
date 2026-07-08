@@ -204,6 +204,10 @@ pub fn definitions() -> Vec<Tool> {
         f("speak", "Say text out loud through the computer's speakers using the OS text-to-speech voice. Use when the user asks you to 'read this out loud', 'say X', 'read me the news', or wants a hands-free spoken answer. This is separate from the reply text - use it in addition to answering.",
           str_prop("text", "the text to speak aloud")),
 
+        // ── power / session control
+        f("system_power", "Control the machine's power/session: lock, sleep, shut down, restart, or log off. Use for 'lock my computer', 'put it to sleep', 'restart', 'log me out'. Lock runs immediately; sleep/shutdown/restart/logoff ask for confirmation first (they end your session and can lose unsaved work).",
+          serde_json::json!({"type":"object","properties":{"action":{"type":"string","description":"one of: lock, sleep, shutdown, restart, logoff"}},"required":["action"]})),
+
         // ── media / volume control
         f("media_control", "Control media playback and volume via the keyboard media keys: play/pause, next/previous track, stop, volume up/down/mute. Works with whatever is playing (Spotify, YouTube, a video, etc.). Use for 'pause the music', 'next song', 'turn it up', 'mute'. Pass 'times' to repeat a volume step.",
           serde_json::json!({"type":"object","properties":{"action":{"type":"string","description":"one of: play_pause, next, previous, stop, volume_up, volume_down, mute"},"times":{"type":"integer","description":"repeat count for volume_up/volume_down (default 1)"}},"required":["action"]})),
@@ -328,6 +332,9 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     }
     if hit(&["music", "song", "track", "play", "pause", "volume", "louder", "quieter", "mute", "next", "skip", "media", "spotify", "turn it up", "turn it down"]) {
         keep.extend(["media_control"]);
+    }
+    if hit(&["lock", "sleep", "shutdown", "shut down", "restart", "reboot", "log off", "log out", "logout", "power off", "turn off", "suspend"]) {
+        keep.extend(["system_power"]);
     }
     if hit(&["journal", "diary", "jot", "log that", "note in my", "my log", "dear diary", "add to my log"]) {
         keep.extend(["journal_add", "journal_read"]);
@@ -570,6 +577,7 @@ pub async fn execute(
         "recent_files" => recent_files(args_json),
         "speak" => speak(args_json),
         "media_control" => media_control(args_json),
+        "system_power" => system_power(args_json),
         "journal_add" => journal_add(args_json),
         "journal_read" => journal_read(args_json),
         "secret_set" => secret_set(args_json, mem).await,
@@ -2257,6 +2265,52 @@ fn speak(args: &str) -> String {
 }
 
 // ── media / volume control ──────────────────────────────────────────────────
+// ── power / session control ─────────────────────────────────────────────────
+// Normalize a power action to its canonical name. Public so the policy gate can
+// classify it the same way. Returns None for an unknown action.
+pub fn power_action(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_lowercase().replace([' ', '-', '_'], "").as_str() {
+        "lock" | "locked" | "lockscreen" | "lockcomputer" => Some("lock"),
+        "sleep" | "suspend" | "standby" => Some("sleep"),
+        "shutdown" | "shutoff" | "poweroff" | "turnoff" => Some("shutdown"),
+        "restart" | "reboot" => Some("restart"),
+        "logoff" | "logout" | "signout" | "signoff" => Some("logoff"),
+        _ => None,
+    }
+}
+
+fn system_power(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { action: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let Some(act) = power_action(&a.action) else {
+        return format!("ERROR: unknown power action '{}'. Use lock, sleep, shutdown, restart, or logoff.", a.action);
+    };
+    if !cfg!(windows) {
+        return "system_power is Windows-only for now.".to_string();
+    }
+    // Build the OS command per action.
+    let (prog, cmd_args): (&str, Vec<&str>) = match act {
+        "lock" => ("rundll32.exe", vec!["user32.dll,LockWorkStation"]),
+        "sleep" => ("rundll32.exe", vec!["powrprof.dll,SetSuspendState", "0,1,0"]),
+        "shutdown" => ("shutdown", vec!["/s", "/t", "0"]),
+        "restart" => ("shutdown", vec!["/r", "/t", "0"]),
+        "logoff" => ("shutdown", vec!["/l"]),
+        _ => unreachable!(),
+    };
+    match std::process::Command::new(prog).args(&cmd_args).spawn() {
+        Ok(_) => match act {
+            "lock" => "Locked the screen.".to_string(),
+            "sleep" => "Putting the machine to sleep.".to_string(),
+            "shutdown" => "Shutting down now.".to_string(),
+            "restart" => "Restarting now.".to_string(),
+            "logoff" => "Logging you off.".to_string(),
+            _ => "Done.".to_string(),
+        },
+        Err(e) => format!("ERROR: could not {act}: {e}"),
+    }
+}
+
 fn media_control(args: &str) -> String {
     #[derive(Deserialize)]
     struct A { action: String, times: Option<u32> }
