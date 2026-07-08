@@ -62,6 +62,10 @@ pub fn definitions() -> Vec<Tool> {
           str_prop("word", "the word to define")),
         f("wikipedia", "Get a short factual summary of a topic from Wikipedia. Use for 'who is Ada Lovelace', 'what is quantum entanglement', 'tell me about the Eiffel Tower'. Key-free and reliable for encyclopedic facts.",
           str_prop("topic", "the person, place, or thing to look up")),
+        f("stock_quote", "Get the current price and day change for a stock ticker (e.g. AAPL, MSFT, TSLA). Key-free. Use for 'what's Apple stock at', 'AAPL price'.",
+          str_prop("symbol", "the stock ticker symbol, e.g. 'AAPL'")),
+        f("crypto_price", "Get the current USD price of a cryptocurrency (e.g. bitcoin, ethereum, or btc/eth). Key-free. Use for 'bitcoin price', 'how much is ETH'.",
+          str_prop("coin", "the coin name or symbol, e.g. 'bitcoin' or 'btc'")),
 
         // ── research + outreach engine: find -> collect -> reach out
         f("extract_contacts", "Fetch a web page and pull out the email addresses and phone numbers on it. Use on a lead's website (often the home or contact page) to find how to reach them.", str_prop("url", "the page URL to scan")),
@@ -354,6 +358,12 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     if hit(&["who is", "who was", "what is", "what are", "tell me about", "wikipedia", "history of", "facts about", "explain"]) {
         keep.extend(["wikipedia"]);
     }
+    if hit(&["stock", "share price", "ticker", "nasdaq", "market", "aapl", "tsla", "how's the market", "trading at"]) {
+        keep.extend(["stock_quote"]);
+    }
+    if hit(&["crypto", "bitcoin", "ethereum", "btc", "eth", "coin", "token price", "solana", "dogecoin"]) {
+        keep.extend(["crypto_price"]);
+    }
     if hit(&["speak", "say ", "read this", "read it", "read me", "out loud", "aloud", "read the", "tell me out"]) {
         keep.extend(["speak"]);
     }
@@ -633,6 +643,8 @@ pub async fn execute(
         "news_search" => news_search(args_json).await,
         "define_word" => define_word(args_json).await,
         "wikipedia" => wikipedia(args_json).await,
+        "stock_quote" => stock_quote(args_json).await,
+        "crypto_price" => crypto_price(args_json).await,
         "web_search" => web_search(args_json).await,
         "extract_contacts" => extract_contacts(args_json).await,
         "verify_email" => verify_email(args_json).await,
@@ -4536,6 +4548,71 @@ async fn wikipedia(args: &str) -> String {
     let title = v["title"].as_str().unwrap_or(topic);
     let page = v["content_urls"]["desktop"]["page"].as_str().map(|u| format!("\n{u}")).unwrap_or_default();
     format!("{title} (Wikipedia):\n{extract}{page}")
+}
+
+async fn stock_quote(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { symbol: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let sym = a.symbol.trim().to_uppercase();
+    if sym.is_empty() { return "ERROR: no symbol given.".to_string(); }
+    // Yahoo Finance chart endpoint (key-free) carries the current + previous close.
+    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{sym}");
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).user_agent("Mozilla/5.0").build() {
+        Ok(c) => c, Err(_) => return "ERROR: http client".to_string(),
+    };
+    let resp = match client.get(&url).send().await { Ok(r) => r, Err(_) => return format!("Couldn't reach the market for {sym}.") };
+    if !resp.status().is_success() {
+        return format!("No quote for '{sym}' (is the ticker right?).");
+    }
+    let v: serde_json::Value = match resp.json().await { Ok(v) => v, Err(_) => return format!("Couldn't read the quote for {sym}.") };
+    let meta = &v["chart"]["result"][0]["meta"];
+    let price = meta["regularMarketPrice"].as_f64();
+    let prev = meta["chartPreviousClose"].as_f64().or_else(|| meta["previousClose"].as_f64());
+    let ccy = meta["currency"].as_str().unwrap_or("USD");
+    match (price, prev) {
+        (Some(p), Some(pc)) => {
+            let chg = p - pc;
+            let pct = if pc != 0.0 { chg / pc * 100.0 } else { 0.0 };
+            let arrow = if chg >= 0.0 { "up" } else { "down" };
+            format!("{sym}: {p:.2} {ccy} ({arrow} {:+.2}, {:+.2}% today)", chg, pct)
+        }
+        (Some(p), None) => format!("{sym}: {p:.2} {ccy}"),
+        _ => format!("No price available for '{sym}'."),
+    }
+}
+
+async fn crypto_price(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { coin: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let raw = a.coin.trim().to_lowercase();
+    if raw.is_empty() { return "ERROR: no coin given.".to_string(); }
+    // Map common symbols to CoinGecko ids; otherwise use the input as the id.
+    let id = match raw.as_str() {
+        "btc" | "bitcoin" => "bitcoin",
+        "eth" | "ethereum" => "ethereum",
+        "sol" | "solana" => "solana",
+        "ada" | "cardano" => "cardano",
+        "doge" | "dogecoin" => "dogecoin",
+        "xrp" | "ripple" => "ripple",
+        "bnb" => "binancecoin",
+        "usdt" | "tether" => "tether",
+        other => other,
+    };
+    let url = format!("https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd&include_24hr_change=true");
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).user_agent("Mozilla/5.0").build() {
+        Ok(c) => c, Err(_) => return "ERROR: http client".to_string(),
+    };
+    let resp = match client.get(&url).header("accept", "application/json").send().await { Ok(r) => r, Err(_) => return format!("Couldn't reach the crypto price feed for '{raw}'.") };
+    let v: serde_json::Value = match resp.json().await { Ok(v) => v, Err(_) => return format!("Couldn't read the price for '{raw}'.") };
+    match v[id]["usd"].as_f64() {
+        Some(p) => {
+            let chg = v[id]["usd_24h_change"].as_f64().unwrap_or(0.0);
+            format!("{id}: ${p} USD ({:+.2}% in 24h)", chg)
+        }
+        None => format!("No price found for '{raw}'. Try the full name (e.g. 'bitcoin', 'ethereum')."),
+    }
 }
 
 async fn news_search(args: &str) -> String {

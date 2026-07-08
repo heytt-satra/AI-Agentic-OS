@@ -48,8 +48,8 @@ Status key: `[ ]` planned, `[~]` in progress, `[x]` shipped + pushed.
 32. `[ ]` translate — translate text between languages
 33. `[x]` define_word — dictionary definition of a word
 34. `[x]` wikipedia — summary of a topic from Wikipedia
-35. `[ ]` stock_quote — current stock price + day change
-36. `[ ]` crypto_price — current crypto price
+35. `[x]` stock_quote — current stock price + day change
+36. `[x]` crypto_price — current crypto price
 37. `[ ]` rss_check — check an RSS/Atom feed for new items
 38. `[ ]` hn_top — top Hacker News stories right now
 39. `[ ]` github_repo — summary/latest release of a GitHub repo

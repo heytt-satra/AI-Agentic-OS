@@ -2302,3 +2302,15 @@ wikipedia).
 **Verified end-to-end:** 'define serendipity' -> 'a fortunate and unexpected discovery by chance';
 'tell me about Ada Lovelace from wikipedia' -> accurate summary (English mathematician, Babbage's
 analytical engine, first programmer) with the wiki URL. No new deps. cargo test 50 passed.
+
+### 2026-07-08 - Features #35 stock_quote, #36 crypto_price (key-free markets)
+**#35 stock_quote:** current price + day change via Yahoo Finance's key-free chart endpoint
+(regularMarketPrice vs previous close, with currency). **#36 crypto_price:** USD price + 24h change
+via CoinGecko's free API, with a symbol->id map (btc->bitcoin, eth->ethereum, sol, ada, doge, xrp,
+bnb, usdt) and pass-through for full names.
+**Debugged live:** crypto first returned 'no price' - CoinGecko rejects requests without a
+User-Agent. Adding a UA (+ Accept: application/json) fixed it; the same UA is on the stock and
+wikipedia calls. Good reminder that key-free public APIs still gate on a UA.
+**Verified end-to-end:** 'AAPL trading at?' -> '$310.66, down 0.64% today'; 'bitcoin price' ->
+'$62,545 USD, down 0.90% in 24h'. Gated by stock/ticker/market and crypto/bitcoin/eth keywords. No
+new deps. cargo test 50 passed.
