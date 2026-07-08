@@ -217,6 +217,8 @@ pub fn definitions() -> Vec<Tool> {
           str_prop("text", "the journal entry to add")),
         f("journal_read", "Read back the user's journal for a day. Use for 'what's in my journal', 'read my journal', 'what did I journal yesterday'. Defaults to today; pass a date (YYYY-MM-DD) or 'yesterday' for another day.",
           serde_json::json!({"type":"object","properties":{"date":{"type":"string","description":"optional: 'today' (default), 'yesterday', or a YYYY-MM-DD date"}},"required":[]})),
+        f("journal_search", "Search ALL of the user's journal entries (across every day) for a word or phrase. Use for 'what did I journal about the project', 'find my note about the dentist', 'when did I write about X'. Returns matching entries with their dates, newest first.",
+          str_prop("query", "the word or phrase to search journal entries for")),
 
         // ── encrypted secrets vault
         f("secret_set", "Save a secret (password, PIN, API key, wifi password, door code) ENCRYPTED on this device, under a short name. Use when the user says 'remember my X password', 'store this key as Y'. Stored with AES-256 so a stolen database file can't read it.",
@@ -336,8 +338,8 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     if hit(&["lock", "sleep", "shutdown", "shut down", "restart", "reboot", "log off", "log out", "logout", "power off", "turn off", "suspend"]) {
         keep.extend(["system_power"]);
     }
-    if hit(&["journal", "diary", "jot", "log that", "note in my", "my log", "dear diary", "add to my log"]) {
-        keep.extend(["journal_add", "journal_read"]);
+    if hit(&["journal", "diary", "jot", "log that", "note in my", "my log", "dear diary", "add to my log", "did i journal", "did i write"]) {
+        keep.extend(["journal_add", "journal_read", "journal_search"]);
     }
     if hit(&["secret", "password", "passcode", "pin", "api key", "token", "credential", "wifi password", "code for", "vault", "store this key"]) {
         keep.extend(["secret_set", "secret_get", "secret_list", "secret_remove"]);
@@ -580,6 +582,7 @@ pub async fn execute(
         "system_power" => system_power(args_json),
         "journal_add" => journal_add(args_json),
         "journal_read" => journal_read(args_json),
+        "journal_search" => journal_search(args_json),
         "secret_set" => secret_set(args_json, mem).await,
         "secret_get" => secret_get(args_json, mem).await,
         "secret_list" => secret_list(mem).await,
@@ -2400,6 +2403,48 @@ fn journal_read(args: &str) -> String {
         _ => format!("No journal entries for {date}."),
     }
 }
+
+fn journal_search(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { query: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let q = a.query.trim().to_lowercase();
+    if q.is_empty() {
+        return "ERROR: give a word or phrase to search for.".to_string();
+    }
+    let dir = journal_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return "No journal yet (nothing to search).".to_string();
+    };
+    // Collect .md files (named YYYY-MM-DD.md), newest date first.
+    let mut files: Vec<(String, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
+        .map(|p| (p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), p))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0)); // newest date first
+
+    let mut hits: Vec<String> = Vec::new();
+    for (date, path) in files {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        for line in text.lines() {
+            let l = line.trim();
+            // Entry lines start with "- HH:MM  ..."; skip the "# date" header.
+            if l.starts_with("- ") && l.to_lowercase().contains(&q) {
+                hits.push(format!("[{date}] {}", l.trim_start_matches("- ").trim()));
+                if hits.len() >= 30 { break; }
+            }
+        }
+        if hits.len() >= 30 { break; }
+    }
+    if hits.is_empty() {
+        return format!("No journal entries mention \"{}\".", a.query.trim());
+    }
+    format!("Journal entries mentioning \"{}\" (newest first):\n{}", a.query.trim(), hits.join("\n"))
+}
+
+// ── encrypted secrets vault ─────────────────────────────────────────────────
 
 // ── encrypted secrets vault ─────────────────────────────────────────────────
 async fn secret_set(args: &str, mem: &crate::memory::MemoryHandle) -> String {

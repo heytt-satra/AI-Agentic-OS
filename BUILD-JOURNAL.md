@@ -2251,3 +2251,14 @@ restart/reboot/log off/suspend keywords).
 shutdown/restart/logoff/reboot/'log out' all require it). NOT executed live on purpose - actually
 running lock/shutdown would disrupt or power off the owner's session mid-work; the commands are
 standard, well-known Windows invocations and the gating is unit-covered.
+
+### 2026-07-08 - Enhancement: journal_search (find across all entries)
+**The journal was write + read-one-day; now it's searchable.** journal_search(query) scans every
+day's markdown file, matches entry lines (the "- HH:MM ..." lines, skipping date headers)
+case-insensitively, and returns hits with their date, newest first (capped at 30). For 'what did I
+journal about the project', 'find my note about the dentist', 'when did I write about X'.
+**Wiring:** definition + dispatch + gating (journal/diary/did i journal/did i write keywords).
+**Verified end-to-end:** journaled 'met with the Zephyr client about the redesign' and 'fixed the
+payment bug in the checkout flow', then 'search my journal for anything about Zephyr' returned exactly
+'[2026-07-08] 10:41 Met with the Zephyr client about the redesign'. cargo test 48 passed. Test journal
+file cleaned up.
