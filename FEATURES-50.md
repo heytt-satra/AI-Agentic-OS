@@ -46,8 +46,8 @@ Status key: `[ ]` planned, `[~]` in progress, `[x]` shipped + pushed.
 ## D. Web, research & knowledge
 31. `[ ]` summarize_url — fetch a page and summarize it
 32. `[ ]` translate — translate text between languages
-33. `[ ]` define_word — dictionary definition of a word
-34. `[ ]` wikipedia — summary of a topic from Wikipedia
+33. `[x]` define_word — dictionary definition of a word
+34. `[x]` wikipedia — summary of a topic from Wikipedia
 35. `[ ]` stock_quote — current stock price + day change
 36. `[ ]` crypto_price — current crypto price
 37. `[ ]` rss_check — check an RSS/Atom feed for new items

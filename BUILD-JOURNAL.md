@@ -2291,3 +2291,14 @@ with affine temperature handling; rejects cross-category conversions. Also core.
 **Verified:** build clean; cargo test 50 passed (2 new - calculator precision/right-assoc/errors;
 unit_convert miles->km, F->C, C->K, gb->mb, cross-category rejection). End-to-end: '1234 times 5678
 and convert 5 miles to km' -> the agent returned 5 miles = 8.04672 km via unit_convert. No new deps.
+
+### 2026-07-08 - Features #33 define_word, #34 wikipedia (key-free knowledge)
+**#33 define_word:** dictionary definitions via api.dictionaryapi.dev (free, no key) - part of speech,
+definition, an example, up to 3 meanings. **#34 wikipedia:** short factual summary via the Wikipedia
+REST summary API (free, no key) plus the page URL - reliable for encyclopedic facts, better than
+scraping a search result. Both async, 10s timeout, clear "not found" messages.
+**Wiring:** definitions + dispatch + gating (define/meaning/dictionary; who is/what is/tell me about/
+wikipedia).
+**Verified end-to-end:** 'define serendipity' -> 'a fortunate and unexpected discovery by chance';
+'tell me about Ada Lovelace from wikipedia' -> accurate summary (English mathematician, Babbage's
+analytical engine, first programmer) with the wiki URL. No new deps. cargo test 50 passed.

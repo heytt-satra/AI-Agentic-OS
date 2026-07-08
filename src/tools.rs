@@ -58,6 +58,10 @@ pub fn definitions() -> Vec<Tool> {
         f("fetch_url", "HTTP GET a URL, return the body text (truncated).", str_prop("url", "the URL")),
         f("web_search", "Search the web for ANYTHING - leads, companies, people, jobs, suppliers, research, current facts - and get back the top results as title, url, and snippet. This is how you FIND things online before fetching or browsing them. Use it whenever the user wants you to find or look something up.", str_prop("query", "what to search for")),
         f("news_search", "Search recent tech/startup/finance news (Hacker News, newest first). Use once for current events.", str_prop("query", "topic")),
+        f("define_word", "Get the dictionary definition(s) of an English word (meanings, part of speech, an example). Use for 'define serendipity', 'what does X mean'. Key-free.",
+          str_prop("word", "the word to define")),
+        f("wikipedia", "Get a short factual summary of a topic from Wikipedia. Use for 'who is Ada Lovelace', 'what is quantum entanglement', 'tell me about the Eiffel Tower'. Key-free and reliable for encyclopedic facts.",
+          str_prop("topic", "the person, place, or thing to look up")),
 
         // ── research + outreach engine: find -> collect -> reach out
         f("extract_contacts", "Fetch a web page and pull out the email addresses and phone numbers on it. Use on a lead's website (often the home or contact page) to find how to reach them.", str_prop("url", "the page URL to scan")),
@@ -344,6 +348,12 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     if hit(&["weather", "rain", "temperature", "forecast", "sunny", "cold outside", "hot outside", "umbrella", "how's it outside", "degrees"]) {
         keep.extend(["weather"]);
     }
+    if hit(&["define", "definition", "what does", "mean", "meaning of", "dictionary", "spell"]) {
+        keep.extend(["define_word"]);
+    }
+    if hit(&["who is", "who was", "what is", "what are", "tell me about", "wikipedia", "history of", "facts about", "explain"]) {
+        keep.extend(["wikipedia"]);
+    }
     if hit(&["speak", "say ", "read this", "read it", "read me", "out loud", "aloud", "read the", "tell me out"]) {
         keep.extend(["speak"]);
     }
@@ -621,6 +631,8 @@ pub async fn execute(
         "browse_js" => browse_js(args_json).await,
         "fetch_url" => fetch_url(args_json).await,
         "news_search" => news_search(args_json).await,
+        "define_word" => define_word(args_json).await,
+        "wikipedia" => wikipedia(args_json).await,
         "web_search" => web_search(args_json).await,
         "extract_contacts" => extract_contacts(args_json).await,
         "verify_email" => verify_email(args_json).await,
@@ -4467,6 +4479,63 @@ async fn recall_conversation(args: &str, mem: &crate::memory::MemoryHandle) -> S
         out.push_str(&format!("\n[{who}] {snippet}"));
     }
     out
+}
+
+async fn define_word(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { word: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let word = a.word.trim();
+    if word.is_empty() { return "ERROR: no word given.".to_string(); }
+    let url = format!("https://api.dictionaryapi.dev/api/v2/entries/en/{}", word.replace(' ', "%20"));
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build();
+    let Ok(client) = client else { return "ERROR: http client".to_string() };
+    let resp = match client.get(&url).send().await { Ok(r) => r, Err(_) => return format!("Couldn't reach the dictionary for '{word}'.") };
+    if !resp.status().is_success() {
+        return format!("No dictionary definition found for '{word}'.");
+    }
+    let v: serde_json::Value = match resp.json().await { Ok(v) => v, Err(_) => return format!("No definition for '{word}'.") };
+    let mut out = format!("{word}:\n");
+    let mut n = 0;
+    if let Some(entry) = v.as_array().and_then(|a| a.first()) {
+        if let Some(meanings) = entry["meanings"].as_array() {
+            for m in meanings.iter().take(3) {
+                let pos = m["partOfSpeech"].as_str().unwrap_or("");
+                if let Some(def) = m["definitions"].as_array().and_then(|d| d.first()) {
+                    let d = def["definition"].as_str().unwrap_or("");
+                    let ex = def["example"].as_str().map(|e| format!(" (e.g. \"{e}\")")).unwrap_or_default();
+                    out.push_str(&format!("  ({pos}) {d}{ex}\n"));
+                    n += 1;
+                }
+            }
+        }
+    }
+    if n == 0 { format!("No definition found for '{word}'.") } else { out }
+}
+
+async fn wikipedia(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { topic: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let topic = a.topic.trim();
+    if topic.is_empty() { return "ERROR: no topic given.".to_string(); }
+    let title = topic.replace(' ', "_");
+    let url = format!("https://en.wikipedia.org/api/rest_v1/page/summary/{}", title);
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).user_agent("JarvisOS/1.0").build() {
+        Ok(c) => c, Err(_) => return "ERROR: http client".to_string(),
+    };
+    let resp = match client.get(&url).send().await { Ok(r) => r, Err(_) => return format!("Couldn't reach Wikipedia for '{topic}'.") };
+    if !resp.status().is_success() {
+        return format!("No Wikipedia page found for '{topic}'. Try rephrasing the exact title.");
+    }
+    let v: serde_json::Value = match resp.json().await { Ok(v) => v, Err(_) => return format!("Couldn't read the Wikipedia summary for '{topic}'.") };
+    let extract = v["extract"].as_str().unwrap_or("");
+    if extract.trim().is_empty() {
+        return format!("No summary available for '{topic}'.");
+    }
+    let title = v["title"].as_str().unwrap_or(topic);
+    let page = v["content_urls"]["desktop"]["page"].as_str().map(|u| format!("\n{u}")).unwrap_or_default();
+    format!("{title} (Wikipedia):\n{extract}{page}")
 }
 
 async fn news_search(args: &str) -> String {
