@@ -36,8 +36,8 @@ Status key: `[ ]` planned, `[~]` in progress, `[x]` shipped + pushed.
 22. `[ ]` todo_add/todo_list/todo_done — a user-facing to-do list (distinct from agent tasks)
 23. `[ ]` timer — a countdown timer that fires a notification (backed by reminders)
 24. `[ ]` world_clock — current time in another city/timezone
-25. `[ ]` calculator — deterministic arithmetic/expression evaluation
-26. `[ ]` unit_convert — convert units (length, weight, temperature, data, etc.)
+25. `[x]` calculator — deterministic arithmetic/expression evaluation
+26. `[x]` unit_convert — convert units (length, weight, temperature, data, etc.)
 27. `[ ]` currency_convert — convert currencies via a free rates API
 28. `[ ]` daily_briefing — compose a morning summary (reminders, weather, watches, activity)
 29. `[ ]` habit_track — track a recurring habit and show streaks

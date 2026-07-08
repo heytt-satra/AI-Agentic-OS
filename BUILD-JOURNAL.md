@@ -2278,3 +2278,16 @@ newer than `since`) is reused by both the tool's baseline and the scheduler.
 dropped quarterly_report.pdf, ran a scheduler tick: log showed '[folder-watch] fired #1: 1 new file(s)
 in .../fwtest: quarterly_report.pdf' and a nudge was queued. cargo test 48 passed. Test data cleaned
 up. New folder_watches table + 5 memory ops + scheduler hook, mirroring the page-watch design.
+
+### 2026-07-08 - Feature plan (50) + features #25 calculator, #26 unit_convert
+**Committed FEATURES-50.md** - a concrete 50-feature backlog across system/device, files,
+productivity, web/knowledge, media, and automation, biased to ship self-contained verifiable
+features first. Then started building from it.
+**#25 calculator:** a small recursive-descent arithmetic evaluator (+ - * / % ^, parens, unary,
+decimals; right-associative ^; division/modulo-by-zero errors) so math is EXACT, not guessed. Pure
+eval_expr(), promoted to the always-on core (cheap, universally useful).
+**#26 unit_convert:** length/mass/temperature/data/time conversion via a factor table (base units)
+with affine temperature handling; rejects cross-category conversions. Also core.
+**Verified:** build clean; cargo test 50 passed (2 new - calculator precision/right-assoc/errors;
+unit_convert miles->km, F->C, C->K, gb->mb, cross-category rejection). End-to-end: '1234 times 5678
+and convert 5 miles to km' -> the agent returned 5 miles = 8.04672 km via unit_convert. No new deps.

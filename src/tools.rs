@@ -204,6 +204,12 @@ pub fn definitions() -> Vec<Tool> {
         f("weather", "Get the current weather and a short forecast for a place (or the user's location if none given). Use for 'what's the weather', 'will it rain', 'weather in Tokyo'. Reliable and key-free - prefer this over web_search for weather.",
           serde_json::json!({"type":"object","properties":{"location":{"type":"string","description":"city or place, e.g. 'Mumbai'; omit to use the user's current location"}},"required":[]})),
 
+        // ── calculator + unit conversion (exact, deterministic)
+        f("calculator", "Evaluate an arithmetic expression EXACTLY (+ - * / % ^, parentheses, decimals). Use for any real math so the answer is precise, not guessed - 'what is 1234*5678', '(19+4)/7', '2^16'.",
+          str_prop("expression", "the arithmetic expression, e.g. '(15*0.2)+3'")),
+        f("unit_convert", "Convert a value between units in the same category: length (m,km,cm,mm,mi,ft,in,yd), mass (kg,g,mg,lb,oz), temperature (c,f,k), data (b,kb,mb,gb,tb), time (s,min,h,day). Use for 'convert 5 miles to km', '100f in celsius', '2gb to mb'.",
+          serde_json::json!({"type":"object","properties":{"value":{"type":"number"},"from":{"type":"string","description":"source unit, e.g. 'mi'"},"to":{"type":"string","description":"target unit, e.g. 'km'"}},"required":["value","from","to"]})),
+
         // ── recent files (by modification time)
         f("recent_files", "List the files the user changed most RECENTLY across their Desktop, Documents, and Downloads (or a folder you name), newest first. Use for 'what did I work on recently', 'my latest downloads', 'the file I just saved'. Different from find_files (which searches by name).",
           serde_json::json!({"type":"object","properties":{"folder":{"type":"string","description":"optional folder to look in (natural location like 'downloads' or a path)"},"count":{"type":"integer","description":"how many to return (default 12)"}},"required":[]})),
@@ -307,6 +313,7 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
         // bugs here). Always on so they can never be hidden by a phrasing mismatch.
         // The heavier/rarer groups below still gate on keywords to keep turns cheap.
         "clipboard_read", "clipboard_write", "system_status", "recall_conversation",
+        "calculator", "unit_convert",
     ]
     .into_iter()
     .collect();
@@ -590,6 +597,8 @@ pub async fn execute(
         "screenshot_save" => screenshot_save(args_json),
         "network_info" => network_info().await,
         "weather" => weather(args_json).await,
+        "calculator" => calculator(args_json),
+        "unit_convert" => unit_convert(args_json),
         "recent_files" => recent_files(args_json),
         "speak" => speak(args_json),
         "media_control" => media_control(args_json),
@@ -2700,6 +2709,142 @@ async fn bookmark_remove(args: &str, mem: &crate::memory::MemoryHandle) -> Strin
 // ── weather ─────────────────────────────────────────────────────────────────
 // Current conditions + a compact 3-day outlook from wttr.in (key-free plaintext).
 // Empty location lets wttr.in geolocate by IP.
+// ── calculator: a small recursive-descent arithmetic evaluator ──────────────
+// Grammar: expr = term (('+'|'-') term)*; term = power (('*'|'/'|'%') power)*;
+// power = unary ('^' power)?; unary = ('-'|'+')? atom; atom = number | '(' expr ')'.
+struct Calc<'a> { s: &'a [u8], i: usize }
+impl<'a> Calc<'a> {
+    fn ws(&mut self) { while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() { self.i += 1; } }
+    fn expr(&mut self) -> Result<f64, String> {
+        let mut v = self.term()?;
+        loop {
+            self.ws();
+            match self.s.get(self.i) {
+                Some(b'+') => { self.i += 1; v += self.term()?; }
+                Some(b'-') => { self.i += 1; v -= self.term()?; }
+                _ => break,
+            }
+        }
+        Ok(v)
+    }
+    fn term(&mut self) -> Result<f64, String> {
+        let mut v = self.power()?;
+        loop {
+            self.ws();
+            match self.s.get(self.i) {
+                Some(b'*') => { self.i += 1; v *= self.power()?; }
+                Some(b'/') => { self.i += 1; let d = self.power()?; if d == 0.0 { return Err("division by zero".into()); } v /= d; }
+                Some(b'%') => { self.i += 1; let d = self.power()?; if d == 0.0 { return Err("modulo by zero".into()); } v %= d; }
+                _ => break,
+            }
+        }
+        Ok(v)
+    }
+    fn power(&mut self) -> Result<f64, String> {
+        let b = self.unary()?;
+        self.ws();
+        if self.s.get(self.i) == Some(&b'^') {
+            self.i += 1;
+            let e = self.power()?; // right-associative
+            Ok(b.powf(e))
+        } else {
+            Ok(b)
+        }
+    }
+    fn unary(&mut self) -> Result<f64, String> {
+        self.ws();
+        match self.s.get(self.i) {
+            Some(b'-') => { self.i += 1; Ok(-self.unary()?) }
+            Some(b'+') => { self.i += 1; self.unary() }
+            _ => self.atom(),
+        }
+    }
+    fn atom(&mut self) -> Result<f64, String> {
+        self.ws();
+        if self.s.get(self.i) == Some(&b'(') {
+            self.i += 1;
+            let v = self.expr()?;
+            self.ws();
+            if self.s.get(self.i) != Some(&b')') { return Err("missing ')'".into()); }
+            self.i += 1;
+            return Ok(v);
+        }
+        let start = self.i;
+        while self.i < self.s.len() && (self.s[self.i].is_ascii_digit() || self.s[self.i] == b'.') { self.i += 1; }
+        if self.i == start { return Err("expected a number".into()); }
+        std::str::from_utf8(&self.s[start..self.i]).ok()
+            .and_then(|t| t.parse::<f64>().ok())
+            .ok_or_else(|| "bad number".to_string())
+    }
+}
+
+fn eval_expr(s: &str) -> Result<f64, String> {
+    let mut c = Calc { s: s.trim().as_bytes(), i: 0 };
+    let v = c.expr()?;
+    c.ws();
+    if c.i != c.s.len() { return Err(format!("unexpected '{}'", &s.trim()[c.i.min(s.trim().len())..])); }
+    if !v.is_finite() { return Err("result is not a finite number".into()); }
+    Ok(v)
+}
+
+fn calculator(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { expression: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    match eval_expr(&a.expression) {
+        Ok(v) => {
+            // Print integers cleanly, otherwise trim trailing zeros.
+            let out = if v.fract() == 0.0 && v.abs() < 1e15 { format!("{}", v as i64) } else { format!("{v}") };
+            format!("{} = {out}", a.expression.trim())
+        }
+        Err(e) => format!("ERROR: can't evaluate '{}': {e}", a.expression.trim()),
+    }
+}
+
+// ── unit conversion ─────────────────────────────────────────────────────────
+// Returns the factor to a category's base unit, or None if the unit is unknown.
+fn unit_factor(u: &str) -> Option<(&'static str, f64)> {
+    // (category, factor-to-base). Base: length=meter, mass=gram, data=byte, time=second.
+    let map: &[(&str, &str, f64)] = &[
+        ("length","m",1.0),("length","meter",1.0),("length","meters",1.0),("length","km",1000.0),("length","cm",0.01),("length","mm",0.001),
+        ("length","mi",1609.344),("length","mile",1609.344),("length","miles",1609.344),("length","ft",0.3048),("length","foot",0.3048),("length","feet",0.3048),
+        ("length","in",0.0254),("length","inch",0.0254),("length","yd",0.9144),("length","yard",0.9144),
+        ("mass","g",1.0),("mass","gram",1.0),("mass","kg",1000.0),("mass","mg",0.001),("mass","lb",453.59237),("mass","lbs",453.59237),("mass","pound",453.59237),("mass","oz",28.349523125),
+        ("data","b",1.0),("data","byte",1.0),("data","kb",1024.0),("data","mb",1048576.0),("data","gb",1073741824.0),("data","tb",1099511627776.0),
+        ("time","s",1.0),("time","sec",1.0),("time","second",1.0),("time","seconds",1.0),("time","min",60.0),("time","minute",60.0),("time","minutes",60.0),("time","h",3600.0),("time","hr",3600.0),("time","hour",3600.0),("time","hours",3600.0),("time","day",86400.0),("time","days",86400.0),
+    ];
+    let ul = u.trim().to_lowercase();
+    map.iter().find(|(_, name, _)| *name == ul).map(|(cat, _, f)| (*cat, *f))
+}
+
+fn unit_convert(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { value: f64, from: String, to: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let (f, t) = (a.from.trim().to_lowercase(), a.to.trim().to_lowercase());
+    // Temperature is affine, handled separately.
+    let is_temp = |u: &str| matches!(u, "c"|"celsius"|"f"|"fahrenheit"|"k"|"kelvin");
+    let result = if is_temp(&f) && is_temp(&t) {
+        // to celsius, then to target
+        let c = match f.as_str() { "f"|"fahrenheit" => (a.value - 32.0) * 5.0/9.0, "k"|"kelvin" => a.value - 273.15, _ => a.value };
+        let out = match t.as_str() { "f"|"fahrenheit" => c * 9.0/5.0 + 32.0, "k"|"kelvin" => c + 273.15, _ => c };
+        Some(out)
+    } else {
+        match (unit_factor(&f), unit_factor(&t)) {
+            (Some((cf, ff)), Some((ct, ft))) if cf == ct => Some(a.value * ff / ft),
+            (Some((cf, _)), Some((ct, _))) => return format!("ERROR: can't convert {cf} to {ct} - different kinds of unit."),
+            _ => None,
+        }
+    };
+    match result {
+        Some(v) => {
+            let out = if v.fract() == 0.0 && v.abs() < 1e15 { format!("{}", v as i64) } else { format!("{:.6}", v).trim_end_matches('0').trim_end_matches('.').to_string() };
+            format!("{} {} = {out} {}", a.value, a.from.trim(), a.to.trim())
+        }
+        None => format!("ERROR: unknown unit '{}' or '{}'. Supported: length, mass, temperature, data, time.", a.from.trim(), a.to.trim()),
+    }
+}
+
 async fn weather(args: &str) -> String {
     #[derive(Deserialize, Default)]
     struct A { location: Option<String> }
@@ -4380,6 +4525,30 @@ mod tests {
         assert_eq!(parse_clock("12pm").unwrap().hour(), 12);
         // garbage
         assert!(parse_reminder_at(now, "someday").is_none());
+    }
+
+    #[test]
+    fn calculator_evaluates_precisely() {
+        assert_eq!(eval_expr("1234*5678").unwrap(), 7006652.0);
+        assert_eq!(eval_expr("(19+4)/7").unwrap() as f64, 23.0/7.0);
+        assert_eq!(eval_expr("2^16").unwrap(), 65536.0);
+        assert_eq!(eval_expr("-3 + 4*2").unwrap(), 5.0);
+        assert_eq!(eval_expr("10 % 3").unwrap(), 1.0);
+        assert_eq!(eval_expr("2^3^2").unwrap(), 512.0); // right-assoc
+        assert!(eval_expr("1/0").is_err());
+        assert!(eval_expr("2+").is_err());
+        assert!(eval_expr("(1+2").is_err());
+    }
+
+    #[test]
+    fn unit_convert_across_categories() {
+        let mi = unit_convert(r#"{"value":5,"from":"mi","to":"km"}"#);
+        assert!(mi.contains("8.04672"), "got: {mi}");
+        assert!(unit_convert(r#"{"value":100,"from":"f","to":"c"}"#).contains("37.7"));
+        assert!(unit_convert(r#"{"value":0,"from":"c","to":"k"}"#).contains("273.15"));
+        assert!(unit_convert(r#"{"value":2,"from":"gb","to":"mb"}"#).contains("2048"));
+        // cross-category rejected
+        assert!(unit_convert(r#"{"value":1,"from":"kg","to":"m"}"#).starts_with("ERROR"));
     }
 
     #[test]
