@@ -2325,3 +2325,17 @@ reporting the size.
 **Verified end-to-end:** diffed two files -> correctly flagged 'line two' -> 'line TWO changed';
 sha256 of a file -> bce2aeea...b51077b1 (real 64-hex); downloaded example.com -> file written, size
 reported. No new deps (git + certutil are already on Windows). cargo test 50 passed.
+
+### 2026-07-08 - Features #1 open_settings, #4 disk_usage, #38 hn_top
+**#1 open_settings:** opens a Windows Settings page directly via ms-settings: URIs, with a friendly
+name map (bluetooth, wifi, display, sound, battery, privacy, apps, update, storage, notifications,
+personalization, about, ...). **#4 disk_usage:** 'where's my space going' - sums each immediate
+subfolder's size (bounded recursive walk, skips build/system noise via skip_dir, caps at 200k entries)
+and lists biggest-first with human sizes. **#38 hn_top:** current Hacker News front page (title, points,
+url) via the Algolia front_page API in one request.
+**Wiring:** definitions + dispatch + gating (settings/bluetooth/wifi; disk/space/biggest folder; hacker
+news/top stories).
+**Verified end-to-end:** 'open my bluetooth settings' -> SystemSettings.exe launched (confirmed in
+tasklist, then closed); 'what's taking up space in the project' -> correctly flagged target 24.9 GB and
+.git 13 MB; 'top 3 on hacker news' -> 3 real front-page stories with URLs. No new deps. cargo test 50
+passed.

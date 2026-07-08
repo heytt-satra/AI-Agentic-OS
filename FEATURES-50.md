@@ -8,10 +8,10 @@ verifiable, no-heavy-dependency features first (the zero-install rule holds).
 Status key: `[ ]` planned, `[~]` in progress, `[x]` shipped + pushed.
 
 ## A. System & device control
-1. `[ ]` open_settings — open a Windows settings page (bluetooth, wifi, display, sound) via ms-settings:
+1. `[x]` open_settings — open a Windows settings page (bluetooth, wifi, display, sound) via ms-settings:
 2. `[ ]` empty_recycle_bin — empty the Recycle Bin (approval-gated, shows reclaimed space)
 3. `[ ]` set_volume — set the system master volume to an absolute 0-100 level
-4. `[ ]` disk_usage — biggest folders under a path (where is my space going)
+4. `[x]` disk_usage — biggest folders under a path (where is my space going)
 5. `[ ]` installed_apps — list installed applications (winget/registry)
 6. `[ ]` startup_apps — list programs that run at login
 7. `[ ]` brightness_set — set display brightness 0-100
@@ -51,7 +51,7 @@ Status key: `[ ]` planned, `[~]` in progress, `[x]` shipped + pushed.
 35. `[x]` stock_quote — current stock price + day change
 36. `[x]` crypto_price — current crypto price
 37. `[ ]` rss_check — check an RSS/Atom feed for new items
-38. `[ ]` hn_top — top Hacker News stories right now
+38. `[x]` hn_top — top Hacker News stories right now
 39. `[ ]` github_repo — summary/latest release of a GitHub repo
 40. `[ ]` maps_search — look up a place / directions (link out)
 

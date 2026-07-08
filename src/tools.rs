@@ -165,6 +165,12 @@ pub fn definitions() -> Vec<Tool> {
           serde_json::json!({"type":"object","properties":{"count":{"type":"integer","description":"how many recent copies to show (default 10)"}},"required":[]})),
         f("system_status", "Report this machine's live health: CPU load, memory used/total, disk free/total, battery level and charging state (if present), and uptime. Use when the user asks 'how's my system', 'am I low on memory/disk/battery', or before a heavy task.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("open_settings", "Open a Windows Settings page directly. Use for 'open bluetooth settings', 'open wifi settings', 'change my display/sound/battery/privacy settings'. Recognizes: bluetooth, wifi, network, display, sound, battery, power, privacy, apps, update, storage, mouse, keyboard, notifications, personalization, about.",
+          str_prop("page", "which settings page, e.g. 'bluetooth', 'display', 'wifi'")),
+        f("disk_usage", "Show which folders are using the most space under a directory (immediate subfolders, biggest first). Use for 'what's taking up space', 'where's my disk space going', 'biggest folders in Downloads'.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"folder to analyze (natural locations like 'downloads' work; defaults to home)"}},"required":[]})),
+        f("hn_top", "Get the current top stories on Hacker News (title, points, url). Use for 'what's on Hacker News', 'top tech stories right now'.",
+          serde_json::json!({"type":"object","properties":{"count":{"type":"integer","description":"how many (default 10)"}},"required":[]})),
 
         // ── reminders (one-off, fire in the background)
         f("remind_set", "Set a reminder that fires in the background (a desktop notification + a nudge). Give a time via 'minutes' (relative: 'in 20 minutes') OR 'at' (a clock time: '3pm', '15:30', 'tomorrow 9am'), and optionally 'every' to REPEAT ('daily', 'hourly', 'weekly') - e.g. 'remind me every day at 8am to take my meds'. Requires Jarvis running in the background (jarvis serve or daemon) when it comes due.",
@@ -354,6 +360,15 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     }
     if hit(&["system", "cpu", "memory", "ram", "disk", "storage", "battery", "how's my", "hows my", "machine", "resources", "uptime", "performance"]) {
         keep.extend(["system_status"]);
+    }
+    if hit(&["settings", "bluetooth", "wifi", "display", "sound", "brightness", "control panel", "preferences", "configure"]) {
+        keep.extend(["open_settings"]);
+    }
+    if hit(&["disk", "storage", "space", "taking up", "biggest folder", "how big", "folder size", "where's my space"]) {
+        keep.extend(["disk_usage"]);
+    }
+    if hit(&["hacker news", "hackernews", " hn ", "top stories", "tech news", "front page"]) {
+        keep.extend(["hn_top"]);
     }
     if hit(&["network", "ip", "wifi", "wi-fi", "online", "internet", "connected", "ssid", "offline"]) {
         keep.extend(["network_info"]);
@@ -612,6 +627,9 @@ pub async fn execute(
         "clipboard_write" => clipboard_write(args_json),
         "clipboard_history" => clipboard_history(args_json, mem).await,
         "system_status" => system_status(),
+        "open_settings" => open_settings(args_json),
+        "disk_usage" => disk_usage(args_json),
+        "hn_top" => hn_top(args_json).await,
         "remind_set" => remind_set(args_json, mem).await,
         "remind_list" => remind_list(mem).await,
         "remind_cancel" => remind_cancel(args_json, mem).await,
@@ -1825,6 +1843,133 @@ pub fn focus_window_by_name(name: &str) -> String {
 }
 pub fn kill_process_by_name(name: &str) -> String {
     kill_process(&serde_json::json!({"name": name}).to_string())
+}
+
+// Map a friendly settings-page name to its ms-settings: URI.
+fn settings_uri(page: &str) -> Option<&'static str> {
+    match page.trim().to_lowercase().replace([' ', '-', '_'], "").as_str() {
+        "bluetooth" | "bluetoothdevices" => Some("ms-settings:bluetooth"),
+        "wifi" | "wireless" => Some("ms-settings:network-wifi"),
+        "network" | "internet" => Some("ms-settings:network-status"),
+        "display" | "screen" | "resolution" => Some("ms-settings:display"),
+        "sound" | "audio" | "volume" => Some("ms-settings:sound"),
+        "battery" => Some("ms-settings:batterysaver"),
+        "power" | "sleep" => Some("ms-settings:powersleep"),
+        "privacy" => Some("ms-settings:privacy"),
+        "apps" | "applications" | "programs" => Some("ms-settings:appsfeatures"),
+        "update" | "windowsupdate" => Some("ms-settings:windowsupdate"),
+        "storage" | "disk" => Some("ms-settings:storagesense"),
+        "mouse" => Some("ms-settings:mousetouchpad"),
+        "keyboard" => Some("ms-settings:keyboard"),
+        "notifications" => Some("ms-settings:notifications"),
+        "personalization" | "theme" | "wallpaper" | "background" => Some("ms-settings:personalization"),
+        "about" | "system" => Some("ms-settings:about"),
+        "defaultapps" => Some("ms-settings:defaultapps"),
+        "language" | "region" => Some("ms-settings:regionlanguage"),
+        _ => None,
+    }
+}
+
+fn open_settings(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { page: String }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if !cfg!(windows) {
+        return "open_settings is Windows-only for now.".to_string();
+    }
+    let Some(uri) = settings_uri(&a.page) else {
+        return format!("Don't know a settings page for '{}'. Try: bluetooth, wifi, display, sound, battery, privacy, apps, update, storage, notifications.", a.page);
+    };
+    match std::process::Command::new("cmd").args(["/c", "start", "", uri]).spawn() {
+        Ok(_) => format!("Opened the {} settings.", a.page.trim()),
+        Err(e) => format!("ERROR: could not open settings: {e}"),
+    }
+}
+
+// Recursively sum the size of a directory, bounded so a huge tree can't hang.
+fn dir_size(path: &std::path::Path, budget: &mut usize) -> u64 {
+    let mut total = 0u64;
+    if *budget == 0 { return 0; }
+    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    for entry in entries.flatten() {
+        *budget = budget.saturating_sub(1);
+        if *budget == 0 { break; }
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_file() {
+            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        } else if ft.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !skip_dir(&name) {
+                total += dir_size(&entry.path(), budget);
+            }
+        }
+    }
+    total
+}
+
+fn disk_usage(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { path: Option<String> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let root = match a.path.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(p) => resolve_path(p),
+        None => dirs::home_dir().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|| ".".into()),
+    };
+    let rp = std::path::Path::new(&root);
+    if !rp.is_dir() {
+        return format!("ERROR: no such folder: {}", a.path.unwrap_or(root));
+    }
+    let Ok(entries) = std::fs::read_dir(rp) else { return format!("ERROR: can't read {root}") };
+    let mut sizes: Vec<(String, u64)> = Vec::new();
+    let mut files_total = 0u64;
+    let mut budget = 200_000usize; // total dir entries to visit across the whole scan
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if ft.is_dir() {
+            let sz = dir_size(&entry.path(), &mut budget);
+            sizes.push((name, sz));
+        } else if ft.is_file() {
+            files_total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    if files_total > 0 { sizes.push(("(loose files)".to_string(), files_total)); }
+    if sizes.is_empty() { return format!("{root} is empty."); }
+    sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    let human = |b: u64| if b >= 1_073_741_824 { format!("{:.1} GB", b as f64 / 1_073_741_824.0) }
+        else if b >= 1_048_576 { format!("{:.0} MB", b as f64 / 1_048_576.0) }
+        else { format!("{} KB", (b / 1024).max(1)) };
+    let mut out = format!("Space usage in {root} (biggest first):\n");
+    for (name, sz) in sizes.into_iter().take(15) {
+        out.push_str(&format!("  {} — {name}\n", human(sz)));
+    }
+    if budget == 0 { out.push_str("  (scan was capped; sizes are approximate)\n"); }
+    out
+}
+
+async fn hn_top(args: &str) -> String {
+    #[derive(Deserialize, Default)]
+    struct A { count: Option<usize> }
+    let a: A = serde_json::from_str(args).unwrap_or_default();
+    let n = a.count.unwrap_or(10).clamp(1, 30);
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
+        Ok(c) => c, Err(_) => return "ERROR: http client".to_string(),
+    };
+    let resp = match client.get("https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=30").send().await {
+        Ok(r) => r, Err(_) => return "Couldn't reach Hacker News.".to_string(),
+    };
+    let v: serde_json::Value = match resp.json().await { Ok(v) => v, Err(_) => return "Couldn't read Hacker News.".to_string() };
+    let Some(hits) = v["hits"].as_array() else { return "No stories returned.".to_string() };
+    let mut out = String::from("Top on Hacker News:\n");
+    for (i, h) in hits.iter().take(n).enumerate() {
+        let title = h["title"].as_str().unwrap_or("(untitled)");
+        let pts = h["points"].as_i64().unwrap_or(0);
+        let url = h["url"].as_str().filter(|u| !u.is_empty())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={}", h["objectID"].as_str().unwrap_or("")));
+        out.push_str(&format!("  {}. {title} ({pts} pts)\n     {url}\n", i + 1));
+    }
+    out
 }
 
 fn system_status() -> String {
