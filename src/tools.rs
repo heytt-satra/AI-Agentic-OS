@@ -168,6 +168,14 @@ pub fn definitions() -> Vec<Tool> {
         f("page_watch_stop", "Stop watching a page by its id (from page_watch_list).",
           serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
 
+        // ── folder watcher (notify when a new file appears)
+        f("folder_watch", "Watch a folder and notify the user when a NEW file appears in it (checked in the background). Use for 'tell me when my download finishes', 'alert me when a file lands in my Downloads', 'watch this folder for new files'. Needs Jarvis running in the background (serve/daemon). Only alerts for files added AFTER you set the watch.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"the folder to watch (natural locations like 'downloads' work)"},"label":{"type":"string","description":"optional short label"}},"required":["path"]})),
+        f("folder_watch_list", "List the folders currently being watched for new files.",
+          serde_json::json!({"type":"object","properties":{},"required":[]})),
+        f("folder_watch_stop", "Stop watching a folder by its id (from folder_watch_list).",
+          serde_json::json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]})),
+
         // ── window management
         f("list_windows", "List the user's currently open application windows (app name + title), skipping minimized ones. Use when the user asks 'what do I have open', 'which windows are open', or before switching to one.",
           serde_json::json!({"type":"object","properties":{},"required":[]})),
@@ -361,6 +369,9 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     }
     if hit(&["watch this page", "watch the page", "monitor", "tell me when", "alert me when", "notify me when", "in stock", "available", "when it changes", "when this says", "keep an eye"]) {
         keep.extend(["page_watch", "page_watch_list", "page_watch_stop"]);
+    }
+    if hit(&["folder", "download finish", "new file", "when a file", "lands in", "appears in", "watch my downloads", "watch this folder"]) {
+        keep.extend(["folder_watch", "folder_watch_list", "folder_watch_stop"]);
     }
     if hit(&["watch", "video", "hear", "listen", "playing", "subtitle", "transcri"]) {
         keep.extend(["watch_start", "watch_stop", "watch_status"]);
@@ -568,6 +579,9 @@ pub async fn execute(
         "page_watch" => page_watch(args_json, mem).await,
         "page_watch_list" => page_watch_list(mem).await,
         "page_watch_stop" => page_watch_stop(args_json, mem).await,
+        "folder_watch" => folder_watch(args_json, mem).await,
+        "folder_watch_list" => folder_watch_list(mem).await,
+        "folder_watch_stop" => folder_watch_stop(args_json, mem).await,
         "list_windows" => list_windows(),
         "focus_window" => focus_window(args_json),
         "find_files" => find_files(args_json),
@@ -1892,6 +1906,73 @@ async fn page_watch_stop(args: &str, mem: &crate::memory::MemoryHandle) -> Strin
         format!("Stopped watching page #{}.", a.id)
     } else {
         format!("No active page watch #{} to stop.", a.id)
+    }
+}
+
+// ── folder watcher ──────────────────────────────────────────────────────────
+// Scan a folder's top-level FILES: return (newest mtime seen, names of files with
+// mtime strictly greater than `since`). Public so the scheduler reuses it.
+pub fn folder_scan(path: &str, since: i64) -> (i64, Vec<String>) {
+    let mut max_mtime = since;
+    let mut new_files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(path) else { return (max_mtime, new_files) };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() { continue; }
+        let mtime = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if mtime > max_mtime { max_mtime = mtime; }
+        if mtime > since {
+            new_files.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    (max_mtime, new_files)
+}
+
+async fn folder_watch(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { path: String, label: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let resolved = resolve_path(&a.path);
+    if !std::path::Path::new(&resolved).is_dir() {
+        return format!("ERROR: no such folder: {}", a.path);
+    }
+    // Baseline = the newest file already there, so we only alert on files added AFTER now.
+    let now = unix_now();
+    let (baseline, _) = folder_scan(&resolved, 0);
+    let baseline = baseline.max(now); // ignore anything already present
+    let label = a.label.as_deref().unwrap_or("").trim();
+    let id = mem.folder_watch_add(&resolved, label, baseline).await;
+    if id < 0 {
+        return "ERROR: could not save the folder watch.".to_string();
+    }
+    format!("Watching #{id}: {} for new files. I'll notify you when one appears (keep Jarvis running in the background).", a.path)
+}
+
+async fn folder_watch_list(mem: &crate::memory::MemoryHandle) -> String {
+    let rows = mem.folder_watch_list().await;
+    if rows.is_empty() {
+        return "Not watching any folders right now.".to_string();
+    }
+    let mut out = String::from("Watched folders:\n");
+    for (id, path, label) in rows {
+        let lbl = if label.is_empty() { String::new() } else { format!(" [{label}]") };
+        out.push_str(&format!("  #{id}{lbl}: {path}\n"));
+    }
+    out
+}
+
+async fn folder_watch_stop(args: &str, mem: &crate::memory::MemoryHandle) -> String {
+    #[derive(Deserialize)]
+    struct A { id: i64 }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    if mem.folder_watch_stop(a.id).await {
+        format!("Stopped watching folder #{}.", a.id)
+    } else {
+        format!("No active folder watch #{} to stop.", a.id)
     }
 }
 

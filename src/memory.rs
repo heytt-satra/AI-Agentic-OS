@@ -70,6 +70,12 @@ enum MemCmd {
     PageWatchUpdate { id: i64, present: bool, checked: i64 },
     PageWatchList { reply: oneshot::Sender<Vec<(i64, String, String, String)>> }, // (id,url,needle,label)
     PageWatchStop { id: i64, reply: oneshot::Sender<bool> },
+    // Folder watchers.
+    FolderWatchAdd { path: String, label: String, last_mtime: i64, reply: oneshot::Sender<i64> },
+    FolderWatchDue { before: i64, reply: oneshot::Sender<Vec<(i64, String, String, i64)>> }, // (id,path,label,last_mtime)
+    FolderWatchUpdate { id: i64, last_mtime: i64, checked: i64 },
+    FolderWatchList { reply: oneshot::Sender<Vec<(i64, String, String)>> }, // (id,path,label)
+    FolderWatchStop { id: i64, reply: oneshot::Sender<bool> },
     // Encrypted secrets vault (value stored as ciphertext).
     SecretSet { name: String, value: String, reply: oneshot::Sender<bool> },
     SecretGet { name: String, reply: oneshot::Sender<Option<String>> },
@@ -492,6 +498,31 @@ impl MemoryHandle {
         rx.await.unwrap_or(false)
     }
 
+    // ── folder watchers ─────────────────────────────────────────────────────
+    pub async fn folder_watch_add(&self, path: &str, label: &str, last_mtime: i64) -> i64 {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::FolderWatchAdd { path: path.into(), label: label.into(), last_mtime, reply }).await.is_err() { return -1; }
+        rx.await.unwrap_or(-1)
+    }
+    pub async fn folder_watches_due(&self, before: i64) -> Vec<(i64, String, String, i64)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::FolderWatchDue { before, reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn folder_watch_update(&self, id: i64, last_mtime: i64, checked: i64) {
+        let _ = self.tx.send(MemCmd::FolderWatchUpdate { id, last_mtime, checked }).await;
+    }
+    pub async fn folder_watch_list(&self) -> Vec<(i64, String, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::FolderWatchList { reply }).await.is_err() { return Vec::new(); }
+        rx.await.unwrap_or_default()
+    }
+    pub async fn folder_watch_stop(&self, id: i64) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(MemCmd::FolderWatchStop { id, reply }).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+
     // ── encrypted secrets vault ─────────────────────────────────────────────
     /// Store (or overwrite) a secret. `value` MUST already be ciphertext.
     pub async fn secret_set(&self, name: &str, value: &str) -> bool {
@@ -870,6 +901,13 @@ fn open_db(path: &str) -> Result<Connection> {
             needle TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
             was_present INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
             last_checked INTEGER NOT NULL DEFAULT 0
+         );
+         -- Folder watchers: alert when a NEW file appears in `path`. last_mtime is
+         -- the newest file modification time we've already reported.
+         CREATE TABLE IF NOT EXISTS folder_watches (
+            id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, path TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '', last_mtime INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1, last_checked INTEGER NOT NULL DEFAULT 0
          );
          -- Encrypted secrets vault: value is AES-256-GCM ciphertext ('enc:...'),
          -- so a stolen DB file never reveals a secret. Keyed by a friendly name.
@@ -1321,6 +1359,38 @@ fn handle_cmd(conn: &Connection, embedder: Option<&Embedder>, ann: &mut crate::a
         }
         MemCmd::PageWatchStop { id, reply } => {
             let n = conn.execute("UPDATE page_watches SET active=0 WHERE id=?1 AND active=1", params![id]).unwrap_or(0);
+            let _ = reply.send(n > 0);
+        }
+        MemCmd::FolderWatchAdd { path, label, last_mtime, reply } => {
+            let _ = conn.execute(
+                "INSERT INTO folder_watches (ts, path, label, last_mtime, active, last_checked) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                params![now_secs(), path, label, last_mtime, now_secs()],
+            );
+            let _ = reply.send(conn.last_insert_rowid());
+        }
+        MemCmd::FolderWatchDue { before, reply } => {
+            let rows = (|| -> Result<Vec<(i64, String, String, i64)>> {
+                let mut stmt = conn.prepare("SELECT id, path, label, last_mtime FROM folder_watches WHERE active=1 AND last_checked <= ?1")?;
+                let r = stmt.query_map(params![before], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?
+                    .filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::FolderWatchUpdate { id, last_mtime, checked } => {
+            let _ = conn.execute("UPDATE folder_watches SET last_mtime=?1, last_checked=?2 WHERE id=?3", params![last_mtime, checked, id]);
+        }
+        MemCmd::FolderWatchList { reply } => {
+            let rows = (|| -> Result<Vec<(i64, String, String)>> {
+                let mut stmt = conn.prepare("SELECT id, path, label FROM folder_watches WHERE active=1 ORDER BY id ASC")?;
+                let r = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+                    .filter_map(|x| x.ok()).collect();
+                Ok(r)
+            })().unwrap_or_default();
+            let _ = reply.send(rows);
+        }
+        MemCmd::FolderWatchStop { id, reply } => {
+            let n = conn.execute("UPDATE folder_watches SET active=0 WHERE id=?1 AND active=1", params![id]).unwrap_or(0);
             let _ = reply.send(n > 0);
         }
         MemCmd::SecretSet { name, value, reply } => {

@@ -2262,3 +2262,19 @@ journal about the project', 'find my note about the dentist', 'when did I write 
 payment bug in the checkout flow', then 'search my journal for anything about Zephyr' returned exactly
 '[2026-07-08] 10:41 Met with the Zephyr client about the redesign'. cargo test 48 passed. Test journal
 file cleaned up.
+
+### 2026-07-08 - New capability: folder_watch (notify when a new file appears)
+**The filesystem sibling of page_watch.** folder_watch(path, label?) monitors a folder in the
+background and fires a desktop notification + nudge when a NEW file appears - 'tell me when my
+download finishes', 'alert me when a report lands in Downloads'. folder_watch_list / folder_watch_stop
+manage them. The serve/daemon scheduler re-scans active watches on a ~2-min cadence (FOLDER_WATCH_SECS,
+shorter than page watches since files land fast).
+**Correct baseline semantics:** on register it records the newest existing file's mtime (or now,
+whichever is later), so it only ever alerts on files added AFTER the watch was set - not the folder's
+existing contents. Each fire advances last_mtime to the new max, so a file is reported once. A shared
+folder_scan(path, since) helper (top-level files only, returns the new max mtime + names of files
+newer than `since`) is reused by both the tool's baseline and the scheduler.
+**Verified end-to-end - including the fire path:** registered a watch on a test folder, forced it due,
+dropped quarterly_report.pdf, ran a scheduler tick: log showed '[folder-watch] fired #1: 1 new file(s)
+in .../fwtest: quarterly_report.pdf' and a nudge was queued. cargo test 48 passed. Test data cleaned
+up. New folder_watches table + 5 memory ops + scheduler hook, mirroring the page-watch design.

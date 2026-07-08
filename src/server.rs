@@ -147,6 +147,21 @@ fn spawn_scheduler(provider: Provider, mem: MemoryHandle) {
                     mem.page_watch_update(id, was_present, now).await;
                 }
             }
+            // Folder watchers: re-scan on a shorter cadence (files land fast) and
+            // alert when a NEW file (mtime past the last-seen) appears.
+            let folder_interval: i64 = std::env::var("FOLDER_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+            for (id, path, label, last_mtime) in mem.folder_watches_due(now - folder_interval).await {
+                let (new_max, new_files) = crate::tools::folder_scan(&path, last_mtime);
+                if !new_files.is_empty() {
+                    let where_ = if label.is_empty() { path.clone() } else { label.clone() };
+                    let names: Vec<String> = new_files.iter().take(5).cloned().collect();
+                    let msg = format!("{} new file(s) in {where_}: {}", new_files.len(), names.join(", "));
+                    crate::tools::notify_desktop("Jarvis folder watch", &msg);
+                    mem.nudge_add(&format!("Folder watch: {msg}")).await;
+                    eprintln!("[folder-watch] fired #{id}: {msg}");
+                }
+                mem.folder_watch_update(id, new_max, now).await;
+            }
         }
     });
 }
