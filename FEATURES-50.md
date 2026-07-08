@@ -20,15 +20,15 @@ Status key: `[ ]` planned, `[~]` in progress, `[x]` shipped + pushed.
 10. `[ ]` gpu_status — GPU name, VRAM, utilization (if available)
 
 ## B. Files & documents
-11. `[ ]` diff_files — unified diff between two files (git diff --no-index)
-12. `[ ]` file_hash — SHA-256 / MD5 of a file (verify a download)
+11. `[x]` diff_files — unified diff between two files (git diff --no-index)
+12. `[x]` file_hash — SHA-256 / MD5 of a file (verify a download)
 13. `[ ]` file_replace — find-and-replace text in a file (safe, count changes)
 14. `[ ]` organize_folder — sort a folder's files into subfolders by type/date
 15. `[ ]` find_duplicates — find duplicate files by size+hash under a path
 16. `[ ]` rename_bulk — batch rename files by a pattern (approval-gated)
 17. `[ ]` merge_pdfs — combine several PDFs into one
 18. `[ ]` csv_query — answer a question about a CSV (columns, filters, sums)
-19. `[ ]` download_file — download a URL to a path (with progress/size)
+19. `[x]` download_file — download a URL to a path (with progress/size)
 20. `[ ]` shred_file — securely delete a file (overwrite then remove)
 
 ## C. Productivity & personal data

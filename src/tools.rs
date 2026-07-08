@@ -27,6 +27,12 @@ pub fn definitions() -> Vec<Tool> {
         f("list_dir", "List the files and folders in a directory.", str_prop("path", "directory path (use '.' for current)")),
         f("delete_path", "Permanently delete a file or folder. Requires approval. Irreversible - prefer recycle_path unless the user explicitly wants it gone for good.", str_prop("path", "path to delete")),
         f("recycle_path", "Move a file or folder to the Recycle Bin (recoverable). PREFER THIS over delete_path for 'delete X' / 'get rid of Y' / 'remove Z' - the user can restore it if wrong. Requires approval.", str_prop("path", "path to send to the Recycle Bin")),
+        f("diff_files", "Show the differences between two text files as a unified diff (what changed from A to B). Use for 'what changed between these files', 'compare these two versions'.",
+          serde_json::json!({"type":"object","properties":{"a":{"type":"string","description":"first (original) file path"},"b":{"type":"string","description":"second (new) file path"}},"required":["a","b"]})),
+        f("file_hash", "Compute a checksum (SHA256 by default, or MD5/SHA1) of a file - to verify a download or check if two files are identical. Use for 'what's the sha256 of X', 'checksum this file'.",
+          serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"algo":{"type":"string","description":"SHA256 (default), MD5, or SHA1"}},"required":["path"]})),
+        f("download_file", "Download a file from a URL and save it to disk. Use for 'download this file', 'save that PDF/image/zip'. Defaults to the Downloads folder with the URL's filename; pass a path to choose where.",
+          serde_json::json!({"type":"object","properties":{"url":{"type":"string"},"path":{"type":"string","description":"optional destination path or folder"}},"required":["url"]})),
         f("open_path", "Open an app, file, or URL with the OS default handler. Requires approval.", str_prop("target", "app name, file path, or URL")),
         f("run_shell", "Run any shell command on this machine (PowerShell on Windows). Requires approval. This is the universal tool — file ops, apps, system settings, installs, automation.", str_prop("command", "the command")),
         f("open_app", "Launch an application by name (e.g. 'notepad', 'chrome', 'code'). Resolves via the OS so it works for installed apps. Requires approval. Use this for apps; use open_path for files/URLs.", str_prop("name", "application name")),
@@ -340,6 +346,9 @@ pub async fn relevant_definitions(msg: &str, mem: &crate::memory::MemoryHandle) 
     if hit(&["recent", "recently", "latest", "just saved", "just downloaded", "worked on", "last file", "newest"]) {
         keep.extend(["recent_files"]);
     }
+    if hit(&["diff", "compare", "difference between", "what changed", "hash", "checksum", "sha256", "md5", "download", "save the file", "grab this file", "identical"]) {
+        keep.extend(["diff_files", "file_hash", "download_file"]);
+    }
     if hit(&["clipboard", "copy", "copied", "paste", "clip ", "history", "earlier", "before this"]) {
         keep.extend(["clipboard_read", "clipboard_write", "clipboard_history"]);
     }
@@ -571,6 +580,9 @@ pub async fn execute(
         "list_dir" => list_dir(args_json),
         "delete_path" => delete_path(args_json),
         "recycle_path" => recycle_path(args_json),
+        "diff_files" => diff_files(args_json),
+        "file_hash" => file_hash(args_json),
+        "download_file" => download_file(args_json).await,
         "open_path" => open_path(args_json),
         "run_shell" => run_shell(args_json),
         "open_app" => open_app(args_json),
@@ -1138,6 +1150,96 @@ fn recycle_path(args: &str) -> String {
         Ok(o) if o.status.success() => format!("Moved {} to the Recycle Bin (restore it from there if needed).", a.path),
         Ok(o) => format!("ERROR recycling {}: {}", a.path, String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
         Err(e) => format!("ERROR recycling {}: {e}", a.path),
+    }
+}
+
+fn diff_files(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { a: String, b: String }
+    let arg: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let pa = resolve_path(&arg.a);
+    let pb = resolve_path(&arg.b);
+    for (label, p) in [("A", &pa), ("B", &pb)] {
+        if !std::path::Path::new(p).is_file() {
+            return format!("ERROR: file {label} not found: {}", if label == "A" { &arg.a } else { &arg.b });
+        }
+    }
+    // git diff --no-index gives a clean unified diff and needs no repo. It exits 1
+    // when the files differ (that's normal, not an error).
+    match std::process::Command::new("git").args(["diff", "--no-index", "--no-color", &pa, &pb]).output() {
+        Ok(o) => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            if out.trim().is_empty() {
+                "The two files are identical.".to_string()
+            } else {
+                format!("Diff (A -> B):\n{}", out.chars().take(4000).collect::<String>())
+            }
+        }
+        Err(e) => format!("ERROR: could not run git diff ({e}). Is git installed?"),
+    }
+}
+
+fn file_hash(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { path: String, algo: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let resolved = resolve_path(&a.path);
+    if !std::path::Path::new(&resolved).is_file() {
+        return format!("ERROR: no such file: {}", a.path);
+    }
+    let algo = match a.algo.as_deref().map(|s| s.trim().to_uppercase()).as_deref() {
+        Some("MD5") => "MD5", Some("SHA1") => "SHA1", _ => "SHA256",
+    };
+    if !cfg!(windows) {
+        return "ERROR: file_hash is Windows-only for now (use sha256sum on other OSes).".to_string();
+    }
+    // certutil is built into Windows - no dependency needed.
+    match std::process::Command::new("certutil").args(["-hashfile", &resolved.replace('/', "\\"), algo]).output() {
+        Ok(o) if o.status.success() => {
+            // Output: header line, the hex hash on line 2, a trailer. Grab the hex.
+            let text = String::from_utf8_lossy(&o.stdout);
+            let hash: String = text.lines().nth(1).unwrap_or("").split_whitespace().collect::<String>();
+            if hash.is_empty() { format!("Computed {algo} but couldn't parse it:\n{}", text.chars().take(300).collect::<String>()) }
+            else { format!("{algo} of {}:\n{hash}", a.path) }
+        }
+        Ok(o) => format!("ERROR hashing: {}", String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()),
+        Err(e) => format!("ERROR hashing: {e}"),
+    }
+}
+
+async fn download_file(args: &str) -> String {
+    #[derive(Deserialize)]
+    struct A { url: String, path: Option<String> }
+    let a: A = match serde_json::from_str(args) { Ok(a) => a, Err(e) => return format!("ERROR: bad args: {e}") };
+    let url = a.url.trim();
+    if !url.starts_with("http") { return "ERROR: give an http(s) URL.".to_string(); }
+    // Derive a filename from the URL's last path segment.
+    let fname = url.split('?').next().unwrap_or(url).rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download.bin").to_string();
+    let dest = match a.path.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(p) => {
+            let rp = resolve_path(p);
+            if std::path::Path::new(&rp).is_dir() { format!("{}/{fname}", rp.trim_end_matches('/')) } else { rp }
+        }
+        None => {
+            let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(|| std::path::PathBuf::from("."));
+            dir.join(&fname).to_string_lossy().replace('\\', "/")
+        }
+    };
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).user_agent("Mozilla/5.0").build() {
+        Ok(c) => c, Err(_) => return "ERROR: http client".to_string(),
+    };
+    let resp = match client.get(url).send().await { Ok(r) => r, Err(e) => return format!("ERROR: could not fetch {url}: {e}") };
+    if !resp.status().is_success() {
+        return format!("ERROR: {url} returned HTTP {}", resp.status());
+    }
+    let bytes = match resp.bytes().await { Ok(b) => b, Err(e) => return format!("ERROR: download failed: {e}") };
+    match std::fs::write(&dest, &bytes) {
+        Ok(()) => {
+            let kb = bytes.len() / 1024;
+            let size = if kb >= 1024 { format!("{:.1} MB", kb as f64 / 1024.0) } else { format!("{} KB", kb.max(1)) };
+            format!("Downloaded {size} to {dest}")
+        }
+        Err(e) => format!("ERROR: could not save to {dest}: {e}"),
     }
 }
 

@@ -2314,3 +2314,14 @@ wikipedia calls. Good reminder that key-free public APIs still gate on a UA.
 **Verified end-to-end:** 'AAPL trading at?' -> '$310.66, down 0.64% today'; 'bitcoin price' ->
 '$62,545 USD, down 0.90% in 24h'. Gated by stock/ticker/market and crypto/bitcoin/eth keywords. No
 new deps. cargo test 50 passed.
+
+### 2026-07-08 - Features #11 diff_files, #12 file_hash, #19 download_file
+**#11 diff_files:** unified diff between two files via `git diff --no-index` (no repo needed; exit-1
+on-differ is normal, not an error), 'identical' when they match. **#12 file_hash:** SHA256/MD5/SHA1
+checksum via Windows' built-in certutil (no dependency), parsed to the bare hex. **#19 download_file:**
+save a URL to disk (reqwest), defaulting to Downloads with the URL's filename or a given path/folder,
+reporting the size.
+**Wiring:** definitions + dispatch + gating (diff/compare/hash/checksum/download keywords).
+**Verified end-to-end:** diffed two files -> correctly flagged 'line two' -> 'line TWO changed';
+sha256 of a file -> bce2aeea...b51077b1 (real 64-hex); downloaded example.com -> file written, size
+reported. No new deps (git + certutil are already on Windows). cargo test 50 passed.
